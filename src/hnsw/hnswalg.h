@@ -1176,9 +1176,8 @@ namespace hnswlib {
             int max_below_threshold = is_insert ? settings::EARLY_EXIT_BUFFER_INSERT
                                                 : settings::EARLY_EXIT_BUFFER_QUERY;
 
-            // Progressive Strategy Thresholds (based on result list filling)
-            size_t threshold_p1 = ef / 4;
-            size_t threshold_p2 = ef / 2;
+            // Optimization: Pre-calculate ef^2 for Quadratic Probability Decay
+            size_t ef_sq = ef * ef;
 
             while(!candidate_set.empty()) {
                 auto current_pair = candidate_set.top();
@@ -1242,23 +1241,30 @@ namespace hnswlib {
 
                     if(!pass_filter) {
                         if (blind_bridge) {
-                            bool compute_real = false;
                             size_t current_results = top_candidates.size();
 
-                            // Deterministic hash for probability
-                            uint32_t hash_val = (candidate_id * 104729) % 100;
+                            // Quadratic Probability Decay: P(compute) = 1 - (found / ef)^2
+                            // At found = 0, P = 100%. At found = ef/2, P = 75%. At found = ef, P = 0%.
+                            // Math allows staying high probability longer than linear, then dropping fast.
+                            // Optimized using integer math and bitwise ops to avoid division/modulo.
 
-                            if (current_results < threshold_p1) {        // < ef/4
-                                compute_real = true;            // 100% (Phase 1: Desperate)
-                            } else if (current_results < threshold_p2) { // < ef/2
-                                compute_real = (hash_val < 75); // 75%  (Phase 2: Stable)
-                            } else if (current_results < ef) {           // < ef
-                                compute_real = (hash_val < 25); // 25%  (Phase 3: Secure)
-                            }
+                            if (current_results < ef) {
+                                // Formula: hash < 256 * (1 - (current/ef)^2)
+                                // Equivalent: hash * ef^2 < 256 * (ef^2 - current^2)
+                                
+                                size_t cur_sq = current_results * current_results;
+                                // (ef^2 - cur^2) * 256. Use shift for * 256.
+                                size_t rhs = (ef_sq - cur_sq) << 8; 
 
-                            if (compute_real) {
-                                sim = curSimFunc(data_point, neighbor_data, curDistParam);
-                                candidate_set.emplace(sim, candidate_id);
+                                // Cheap "hash" (0-255) using basic bitwise masking of ID.
+                                // 104729 is prime to scatter bits.
+                                size_t hash_val = (candidate_id * 104729) & 0xFF; 
+
+                                // Check if we fall within the probability window
+                                if ((hash_val * ef_sq) < rhs) {
+                                    sim = curSimFunc(data_point, neighbor_data, curDistParam);
+                                    candidate_set.emplace(sim, candidate_id);
+                                }
                             }
                         }
                         continue;

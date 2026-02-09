@@ -1176,6 +1176,15 @@ namespace hnswlib {
             int max_below_threshold = is_insert ? settings::EARLY_EXIT_BUFFER_INSERT
                                                 : settings::EARLY_EXIT_BUFFER_QUERY;
 
+            // Progressive Blind Bridge Counters
+            size_t blind_cnt = 0;
+            // Phase 1: Anchor (Precision) - First 10% of ef or 5 nodes. Always compute distance.
+            size_t threshold_p1 = std::max((size_t)5, ef / 10);
+            // Phase 2: Verification (High Prob) - Up to 25% of ef. 75% compute.
+            size_t threshold_p2 = ef / 4;
+            // Phase 3: Traversal (low Prob) - Up to 50% of ef. 25% compute.
+            size_t threshold_p3 = ef / 2;
+
             while(!candidate_set.empty()) {
                 auto current_pair = candidate_set.top();
                 idhInt current_id = current_pair.second;
@@ -1238,9 +1247,31 @@ namespace hnswlib {
 
                     if(!pass_filter) {
                         if (blind_bridge) {
-                            // Blind Bridge: Inherit parent's similarity
-                            // Added to candidate_set for traversal, but NOT results
-                            candidate_set.emplace(current_pair.first, candidate_id);
+                            blind_cnt++;
+                            bool compute_real = false;
+
+                            // Deterministic hash for probability (avoid overhead of rand())
+                            // Uses candidate_id and blind_cnt to scatter probabilities
+                            uint32_t hash_val = (candidate_id * 104729 + blind_cnt * 13) % 100;
+
+                            if (blind_cnt <= threshold_p1) {
+                                compute_real = true;            // 100% (Phase 1)
+                            } else if (blind_cnt <= threshold_p2) {
+                                compute_real = (hash_val < 75); // 75%  (Phase 2)
+                            } else if (blind_cnt <= threshold_p3) {
+                                compute_real = (hash_val < 25); // 25%  (Phase 3)
+                            }
+                            // Else Phase 4: 0% (Pure Blind)
+
+                            if (compute_real) {
+                                // Compute REAL distance for "Stepping Stone"
+                                // This grounds the bridge in geometric reality, preventing drift
+                                sim = curSimFunc(data_point, neighbor_data, curDistParam);
+                                candidate_set.emplace(sim, candidate_id);
+                            }
+                            // If not computing real distance, we drop the node.
+                            // We do NOT inherit scores (Blind Bridge) anymore to avoid
+                            // exploring low-quality paths in dense filtered clusters.
                         }
                         continue;
                     }

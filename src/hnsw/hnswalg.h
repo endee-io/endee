@@ -214,7 +214,8 @@ namespace hnswlib {
         searchKnn(const void* query_data,
                   size_t k,
                   size_t ef,
-                  FilterFunctor* isIdAllowed) const {
+                  FilterFunctor* isIdAllowed,
+                  bool blind_bridge = true) const { // Default true as requested
             int x = 0;
             LOG_DEBUG("Inside searchKnn, element count: " << curElementsCount_);
             std::vector<std::pair<dist_t, idInt>> result;
@@ -284,9 +285,9 @@ namespace hnswlib {
                  std::vector<idhInt> l1_eps = {currObj};
                  std::vector<std::pair<dist_t, idhInt>> l1_res;
                  if(deletedElementsCount_) {
-                     l1_res = searchBaseLayer<false, true, FilterFunctor>(l1_eps, query_data, 1, M_, isIdAllowed);
+                     l1_res = searchBaseLayer<false, true, FilterFunctor>(l1_eps, query_data, 1, M_, isIdAllowed, blind_bridge);
                  } else {
-                     l1_res = searchBaseLayer<false, false, FilterFunctor>(l1_eps, query_data, 1, M_, isIdAllowed);
+                     l1_res = searchBaseLayer<false, false, FilterFunctor>(l1_eps, query_data, 1, M_, isIdAllowed, blind_bridge);
                  }
                  
                  for(size_t i = 0; i < std::min((size_t)2, l1_res.size()); ++i) {
@@ -300,10 +301,10 @@ namespace hnswlib {
             LOG_DEBUG("Starting search in level 0..");
             if(deletedElementsCount_) {
                 top_candidates = searchBaseLayer<false, true, FilterFunctor>(
-                        entry_points, query_data, 0, std::max(ef, k), isIdAllowed);  // Level 0 for final search
+                        entry_points, query_data, 0, std::max(ef, k), isIdAllowed, blind_bridge);  // Level 0 for final search
             } else {
                 top_candidates = searchBaseLayer<false, false, FilterFunctor>(
-                        entry_points, query_data, 0, std::max(ef, k), isIdAllowed);  // Level 0 for final search
+                        entry_points, query_data, 0, std::max(ef, k), isIdAllowed, blind_bridge);  // Level 0 for final search
             }
             LOG_DEBUG("Search in level 0 completed. Found " << top_candidates.size()
                                                             << " candidates");
@@ -1094,7 +1095,7 @@ namespace hnswlib {
         // Returns a vector of top candidates sorted by similarity (1-distance) in reverse order
         template <bool is_insert, bool has_deletions, typename FilterFunctor = void>
         std::vector<std::pair<dist_t, idhInt>>
-        searchBaseLayer(const std::vector<idhInt>& ep_ids, const void* data_point, idhInt layer, size_t ef, FilterFunctor* filter = nullptr) const {
+        searchBaseLayer(const std::vector<idhInt>& ep_ids, const void* data_point, idhInt layer, size_t ef, FilterFunctor* filter = nullptr, bool blind_bridge = true) const {
             LOG_TIME("searchBaseLayer");
             VisitedList* vl = visited_list_pool_->getFreeVisitedList();
             vl_type* visited_array = vl->mass;
@@ -1226,12 +1227,22 @@ namespace hnswlib {
 
                     // Check filter BEFORE computing distance
                     // Treats filtered nodes as non-existent (traverses a subgraph)
+                    bool pass_filter = true;
                     if constexpr(!std::is_same_v<FilterFunctor, void>) {
                         if (filter != nullptr) {
                             if (!(*filter)(getExternalLabel(candidate_id))) {
-                                continue;
+                                pass_filter = false;
                             }
                         }
+                    }
+
+                    if(!pass_filter) {
+                        if (blind_bridge) {
+                            // Blind Bridge: Inherit parent's similarity
+                            // Added to candidate_set for traversal, but NOT results
+                            candidate_set.emplace(current_pair.first, candidate_id);
+                        }
+                        continue;
                     }
 
                     sim = curSimFunc(data_point, neighbor_data, curDistParam);

@@ -1180,8 +1180,8 @@ namespace hnswlib {
 
             // Progressive Fatigue Logic:
             
-            // Base budget: ef * M0 (Standard Layer 0 complexity). 
-            size_t fatigue_base = ef * M0_ * 5;
+            // Base budget: ef * M . 
+            size_t fatigue_base = ef * M_;
 
             // Apply filter boost if filter is active
             if constexpr(!std::is_same_v<FilterFunctor, void>) {

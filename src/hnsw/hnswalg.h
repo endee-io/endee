@@ -1113,6 +1113,7 @@ namespace hnswlib {
                 buffer.resize(curDataSize);
             }
 
+            size_t dist_computations = 0;
             dist_t lowerBound = std::numeric_limits<dist_t>::lowest();
 
             for (idhInt ep_id : ep_ids) {
@@ -1134,6 +1135,7 @@ namespace hnswlib {
 
                     if(vec_data) {
                         sim = curSimFunc(data_point, vec_data, curDistParam);
+                        dist_computations++;
 
                         if constexpr(std::is_same_v<FilterFunctor, void>) {
                             top_candidates.emplace(sim, ep_id);
@@ -1176,8 +1178,11 @@ namespace hnswlib {
             int max_below_threshold = is_insert ? settings::EARLY_EXIT_BUFFER_INSERT
                                                 : settings::EARLY_EXIT_BUFFER_QUERY;
 
-            // Optimization: Pre-calculate ef^2 for Quadratic Probability Decay
-            size_t ef_sq = ef * ef;
+            // Progressive Fatigue Logic:
+            
+            // Base budget: ef * M0 (Standard Layer 0 complexity). 
+            size_t fatigue_base = ef * M0_;
+            size_t fatigue_tail = fatigue_base * 10; // Taper duration
 
             while(!candidate_set.empty()) {
                 auto current_pair = candidate_set.top();
@@ -1241,36 +1246,34 @@ namespace hnswlib {
 
                     if(!pass_filter) {
                         if (blind_bridge) {
-                            size_t current_results = top_candidates.size();
+                            // Check Fatigue
+                             if (dist_computations > fatigue_base) {
+                                  // We are in the tapering region (Base -> 10*Base)
+                                  // Linearly increase drop probability from 0% to 100%.
+                                  
+                                  size_t excess = dist_computations - fatigue_base;
+                                  
+                                  if (excess >= fatigue_tail) {
+                                      continue; // 100% drop (Hard Cap exceeded)
+                                  }
 
-                            // Quadratic Probability Decay: P(compute) = 1 - (found / ef)^2
-                            // At found = 0, P = 100%. At found = ef/2, P = 75%. At found = ef, P = 0%.
-                            // Math allows staying high probability longer than linear, then dropping fast.
-                            // Optimized using integer math and bitwise ops to avoid division/modulo.
-
-                            if (current_results < ef) {
-                                // Formula: hash < 256 * (1 - (current/ef)^2)
-                                // Equivalent: hash * ef^2 < 256 * (ef^2 - current^2)
-                                
-                                size_t cur_sq = current_results * current_results;
-                                // (ef^2 - cur^2) * 256. Use shift for * 256.
-                                size_t rhs = (ef_sq - cur_sq) << 8; 
-
-                                // Cheap "hash" (0-255) using basic bitwise masking of ID.
-                                // 104729 is prime to scatter bits.
-                                size_t hash_val = (candidate_id * 104729) & 0xFF; 
-
-                                // Check if we fall within the probability window
-                                if ((hash_val * ef_sq) < rhs) {
-                                    sim = curSimFunc(data_point, neighbor_data, curDistParam);
-                                    candidate_set.emplace(sim, candidate_id);
-                                }
-                            }
+                                  // Prob = Excess / Tail_Length
+                                  size_t drop_prob = (excess * 255) / fatigue_tail; 
+                                  
+                                  size_t hash = (candidate_id * 104729) & 0xFF;
+                                  if (hash < drop_prob) continue;
+                             }
+                             
+                             // Explore
+                             sim = curSimFunc(data_point, neighbor_data, curDistParam);
+                             dist_computations++;
+                             candidate_set.emplace(sim, candidate_id);
                         }
                         continue;
                     }
 
                     sim = curSimFunc(data_point, neighbor_data, curDistParam);
+                    dist_computations++; // Count valid computations too
 
                     if(top_candidates.size() < ef || sim > lowerBound) {
                         candidate_set.emplace(sim, candidate_id);

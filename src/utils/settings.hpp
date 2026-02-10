@@ -75,7 +75,7 @@ namespace settings {
     constexpr int EARLY_EXIT_BUFFER_QUERY = 8;
 
     // Pre-filter threshold - use pre-filter when cardinality is below this value
-    constexpr size_t PREFILTER_CARDINALITY_THRESHOLD = 2500;
+    constexpr size_t PREFILTER_CARDINALITY_THRESHOLD = 10'000;
 
     //DEFAULT VALUES
     constexpr size_t DEFAULT_FILTER_BOOST_PERCENTAGE = 0;

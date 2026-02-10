@@ -1,0 +1,5 @@
+
+endee
+sentence-transformers
+openai
+python-dotenv

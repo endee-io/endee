@@ -78,6 +78,7 @@ namespace settings {
     constexpr size_t PREFILTER_CARDINALITY_THRESHOLD = 2500;
 
     //DEFAULT VALUES
+    constexpr size_t DEFAULT_FILTER_BOOST_PERCENTAGE = 0;
     constexpr size_t DEFAULT_NUM_PARALLEL_INSERTS = 4;
     constexpr size_t DEFAULT_NUM_RECOVERY_THREADS = 16;
     constexpr size_t DEFAULT_MAX_MEMORY_GB = 24;
@@ -135,6 +136,11 @@ namespace settings {
     inline static size_t MAX_ELEMENTS_INCREMENT_TRIGGER = [] {
         const char* env = std::getenv("NDD_MAX_INCREMENT_TRIGGER");
         return env ? std::stoull(env) : DEFAULT_MAX_ELEMENTS_INCREMENT_TRIGGER;
+    }();
+
+    inline static size_t FILTER_BOOST_PERCENTAGE = [] {
+        const char* env = std::getenv("NDD_FILTER_BOOST_PERCENTAGE");
+        return env ? std::stoull(env) : DEFAULT_FILTER_BOOST_PERCENTAGE;
     }();
 
     // Number of parallel inserts. It will use this many threads to insert data in parallel

@@ -1181,8 +1181,16 @@ namespace hnswlib {
             // Progressive Fatigue Logic:
             
             // Base budget: ef * M0 (Standard Layer 0 complexity). 
-            size_t fatigue_base = ef * M0_;
-            size_t fatigue_tail = fatigue_base * 10; // Taper duration
+            size_t fatigue_base = ef * M0_ * 5;
+
+            // Apply filter boost if filter is active
+            if constexpr(!std::is_same_v<FilterFunctor, void>) {
+                 if (filter != nullptr && settings::FILTER_BOOST_PERCENTAGE > 0) {
+                     fatigue_base = fatigue_base * (100 + settings::FILTER_BOOST_PERCENTAGE) / 100;
+                 }
+            }
+
+            size_t fatigue_tail = fatigue_base * 5; // Taper duration
 
             while(!candidate_set.empty()) {
                 auto current_pair = candidate_set.top();
@@ -1248,7 +1256,7 @@ namespace hnswlib {
                         if (blind_bridge) {
                             // Check Fatigue
                              if (dist_computations > fatigue_base) {
-                                  // We are in the tapering region (Base -> 10*Base)
+                                  // We are in the tapering region
                                   // Linearly increase drop probability from 0% to 100%.
                                   
                                   size_t excess = dist_computations - fatigue_base;

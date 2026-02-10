@@ -155,7 +155,8 @@ install_dependencies_macos() {
 distro_factory() {
     # 1. Detect Kernel/Family
     OS_ARCH="$(uname -m)"
-    case "$(uname -s)" in
+    uname_s="$(uname -s)"
+    case "$uname_s" in
         Linux)
             OS_FAMILY="linux"
             ;;

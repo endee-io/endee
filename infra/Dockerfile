@@ -32,7 +32,8 @@ ARG BUILD_ARCH
 ENV BUILD_ARCH=${BUILD_ARCH}
 ARG DEBUG=false
 ENV DEBUG=${DEBUG}
-RUN chmod +x ./install.sh && \
+RUN sed -i 's/\r$//' ./install.sh && \
+    chmod +x ./install.sh && \
     if [ "$DEBUG" = "true" ]; then \
         ./install.sh --${BUILD_ARCH} --debug_all --skip-deps; \
     else \

@@ -1,0 +1,239 @@
+# Nexus Frontend
+
+## Overview
+Modern Next.js frontend for the Nexus AI Knowledge Network. Features interactive knowledge graph visualization using React Flow.
+
+## Tech Stack
+- **Framework**: Next.js 14 (App Router)
+- **Language**: TypeScript
+- **Styling**: Tailwind CSS
+- **Graph Visualization**: React Flow
+- **State Management**: Zustand
+- **HTTP Client**: Axios
+
+## Quick Start
+
+### Install Dependencies
+```bash
+npm install
+```
+
+### Configure Environment
+Create `.env.local`:
+```env
+NEXT_PUBLIC_API_URL=http://localhost:8000
+```
+
+### Run Development Server
+```bash
+npm run dev
+```
+
+Open [http://localhost:3000](http://localhost:3000)
+
+## Project Structure
+
+```
+src/
+├── app/
+│   ├── layout.tsx         # Root layout with metadata
+│   └── page.tsx           # Main application page
+├── components/
+│   ├── Header.tsx         # Application header
+│   ├── KnowledgeGraph.tsx # React Flow graph component
+│   ├── ControlPanel.tsx   # Document upload & search
+│   └── NodePanel.tsx      # Node details sidebar
+├── lib/
+│   └── api.ts             # API client utilities
+├── store/
+│   └── graphStore.ts      # Zustand state management
+├── types/
+│   └── index.ts           # TypeScript type definitions
+└── styles/
+    └── globals.css        # Global styles & React Flow customization
+```
+
+## Features
+
+### 1. Interactive Knowledge Graph
+- React Flow powered visualization
+- Smooth animations and interactions
+- Minimap for navigation
+- Background grid
+- Zoom and pan controls
+
+### 2. Document Upload
+- Drag & drop interface
+- Support for PDF, TXT, MD, DOCX
+- Real-time processing feedback
+- Automatic graph updates
+
+### 3. Semantic Search
+- Natural language queries
+- Real-time graph filtering
+- Predefined example queries
+- Similarity-based results
+
+### 4. Node Intelligence Panel
+- Detailed node information
+- Related concepts visualization
+- Connection statistics
+- Source document references
+
+## Component Documentation
+
+### KnowledgeGraph Component
+Renders the knowledge graph using React Flow.
+
+**Props:**
+- `nodes`: Array of graph nodes
+- `edges`: Array of graph edges
+- `onNodeClick`: Callback for node selection
+- `isLoading`: Loading state
+
+### ControlPanel Component
+Sidebar for document upload and search.
+
+**Features:**
+- File upload with validation
+- Semantic search interface
+- Example query shortcuts
+- Quick statistics
+
+### NodePanel Component
+Detailed view of selected node.
+
+**Features:**
+- Node summary display
+- Metadata information
+- Related concepts list
+- Connection statistics
+
+## State Management
+
+Using Zustand for global state:
+
+```typescript
+const { nodes, edges, fetchGraph, executeQuery, uploadDocument } = useGraphStore()
+```
+
+**Actions:**
+- `fetchGraph()` - Load full knowledge graph
+- `executeQuery(query)` - Execute semantic search
+- `uploadDocument(file)` - Upload and process document
+- `clearGraph()` - Reset graph state
+
+## API Integration
+
+API client configured in `lib/api.ts`:
+
+```typescript
+import { apiClient } from '@/lib/api'
+
+// Upload document
+await apiClient.uploadDocument(file)
+
+// Query graph
+const result = await apiClient.query('machine learning')
+
+// Get node details
+const details = await apiClient.getNodeDetails(nodeId)
+```
+
+## Styling
+
+### Tailwind Configuration
+Custom color palette for professional dark theme:
+- `primary`: Blue gradient colors
+- `dark`: Gray scale for dark mode
+
+### React Flow Customization
+Custom styles in `globals.css`:
+- Node hover effects
+- Edge animations
+- Custom scrollbar
+- Smooth transitions
+
+## Build & Deploy
+
+### Production Build
+```bash
+npm run build
+npm start
+```
+
+### Deploy to Vercel
+```bash
+# Install Vercel CLI
+npm i -g vercel
+
+# Deploy
+vercel
+```
+
+**Environment Variables on Vercel:**
+- `NEXT_PUBLIC_API_URL`: Backend API endpoint
+
+### Deploy to Netlify
+```bash
+# Build command
+npm run build
+
+# Publish directory
+.next
+```
+
+## Performance Optimization
+
+- **Code Splitting**: Automatic with Next.js App Router
+- **Image Optimization**: Next.js Image component
+- **Tree Shaking**: Webpack removes unused code
+- **React Flow**: Virtualized rendering for large graphs
+
+## Browser Support
+
+- Chrome/Edge: Latest 2 versions
+- Firefox: Latest 2 versions
+- Safari: Latest 2 versions
+
+## Development Tips
+
+### Hot Reload
+Changes auto-reload during development.
+
+### Type Safety
+TypeScript ensures type correctness:
+```bash
+npm run lint
+```
+
+### Debugging
+Use React DevTools and browser console.
+
+## Known Limitations
+
+- Graph layout is simple circular (can be improved with force-directed algorithms)
+- No persistent state (reloads clear selection)
+- Limited to 100 nodes for performance
+
+## Future Enhancements
+
+- [ ] Advanced graph layouts (force-directed, hierarchical)
+- [ ] Graph export (PNG, SVG, JSON)
+- [ ] Dark/light theme toggle
+- [ ] Mobile responsive design
+- [ ] Real-time updates via WebSocket
+- [ ] Graph search and filtering
+- [ ] Cluster visualization
+- [ ] Knowledge gap recommendations
+
+## Contributing
+
+1. Follow existing code style
+2. Use TypeScript strictly
+3. Test on multiple browsers
+4. Keep components focused and reusable
+
+## License
+
+See main project LICENSE

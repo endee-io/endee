@@ -215,7 +215,7 @@ namespace hnswlib {
                   size_t k,
                   size_t ef,
                   FilterFunctor* isIdAllowed,
-                  bool blind_bridge = true) const { // Default true as requested
+                  size_t filter_boost_percentage = settings::FILTER_BOOST_PERCENTAGE) const { // Default true as requested
             int x = 0;
             LOG_DEBUG("Inside searchKnn, element count: " << curElementsCount_);
             std::vector<std::pair<dist_t, idInt>> result;
@@ -285,9 +285,9 @@ namespace hnswlib {
                  std::vector<idhInt> l1_eps = {currObj};
                  std::vector<std::pair<dist_t, idhInt>> l1_res;
                  if(deletedElementsCount_) {
-                     l1_res = searchBaseLayer<false, true, FilterFunctor>(l1_eps, query_data, 1, M_, isIdAllowed, blind_bridge);
+                     l1_res = searchBaseLayer<false, true, FilterFunctor>(l1_eps, query_data, 1, M_, isIdAllowed, filter_boost_percentage);
                  } else {
-                     l1_res = searchBaseLayer<false, false, FilterFunctor>(l1_eps, query_data, 1, M_, isIdAllowed, blind_bridge);
+                     l1_res = searchBaseLayer<false, false, FilterFunctor>(l1_eps, query_data, 1, M_, isIdAllowed, filter_boost_percentage);
                  }
                  
                  for(size_t i = 0; i < std::min((size_t)2, l1_res.size()); ++i) {
@@ -301,10 +301,10 @@ namespace hnswlib {
             LOG_DEBUG("Starting search in level 0..");
             if(deletedElementsCount_) {
                 top_candidates = searchBaseLayer<false, true, FilterFunctor>(
-                        entry_points, query_data, 0, std::max(ef, k), isIdAllowed, blind_bridge);  // Level 0 for final search
+                        entry_points, query_data, 0, std::max(ef, k), isIdAllowed, filter_boost_percentage);  // Level 0 for final search
             } else {
                 top_candidates = searchBaseLayer<false, false, FilterFunctor>(
-                        entry_points, query_data, 0, std::max(ef, k), isIdAllowed, blind_bridge);  // Level 0 for final search
+                        entry_points, query_data, 0, std::max(ef, k), isIdAllowed, filter_boost_percentage);  // Level 0 for final search
             }
             LOG_DEBUG("Search in level 0 completed. Found " << top_candidates.size()
                                                             << " candidates");
@@ -320,12 +320,13 @@ namespace hnswlib {
         std::vector<std::pair<dist_t, idInt>>
         searchKnn(const void* query_data,
                   size_t k,
-                  size_t ef = settings::DEFAULT_EF_SEARCH,
-                  BaseFilterFunctor* isIdAllowed = nullptr) const override {
+                  size_t ef,
+                  BaseFilterFunctor* isIdAllowed = nullptr,
+                  size_t filter_boost_percentage = settings::FILTER_BOOST_PERCENTAGE) const override {
             if (isIdAllowed) {
-                 return searchKnn<BaseFilterFunctor>(query_data, k, ef, isIdAllowed);
+                 return searchKnn<BaseFilterFunctor>(query_data, k, ef, isIdAllowed, filter_boost_percentage);
             } else {
-                 return searchKnn<void>(query_data, k, ef, nullptr);
+                 return searchKnn<void>(query_data, k, ef, nullptr, filter_boost_percentage);
             }
         }
 
@@ -1095,7 +1096,12 @@ namespace hnswlib {
         // Returns a vector of top candidates sorted by similarity (1-distance) in reverse order
         template <bool is_insert, bool has_deletions, typename FilterFunctor = void>
         std::vector<std::pair<dist_t, idhInt>>
-        searchBaseLayer(const std::vector<idhInt>& ep_ids, const void* data_point, idhInt layer, size_t ef, FilterFunctor* filter = nullptr, bool blind_bridge = true) const {
+        searchBaseLayer(const std::vector<idhInt>& ep_ids, 
+                        const void* data_point, 
+                        idhInt layer, 
+                        size_t ef, 
+                        FilterFunctor* filter = nullptr, 
+                        size_t filter_boost_percentage = settings::FILTER_BOOST_PERCENTAGE) const {
             LOG_TIME("searchBaseLayer");
             VisitedList* vl = visited_list_pool_->getFreeVisitedList();
             vl_type* visited_array = vl->mass;
@@ -1185,8 +1191,8 @@ namespace hnswlib {
 
             // Apply filter boost if filter is active
             if constexpr(!std::is_same_v<FilterFunctor, void>) {
-                 if (filter != nullptr && settings::FILTER_BOOST_PERCENTAGE > 0) {
-                     fatigue_base = fatigue_base * (100 + settings::FILTER_BOOST_PERCENTAGE) / 100;
+                 if (filter != nullptr && filter_boost_percentage > 0) {
+                     fatigue_base = fatigue_base * (100 + filter_boost_percentage) / 100;
                  }
             }
 
@@ -1253,7 +1259,7 @@ namespace hnswlib {
                     }
 
                     if(!pass_filter) {
-                        if (blind_bridge) {
+                        if (filter_boost_percentage > 0) {
                             // Check Fatigue
                              if (dist_computations > fatigue_base) {
                                   // We are in the tapering region

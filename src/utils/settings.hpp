@@ -76,9 +76,9 @@ namespace settings {
 
     // Pre-filter threshold - use pre-filter when cardinality is below this value
     constexpr size_t PREFILTER_CARDINALITY_THRESHOLD = 10'000;
+    constexpr size_t FILTER_BOOST_PERCENTAGE = 0;
 
     //DEFAULT VALUES
-    constexpr size_t DEFAULT_FILTER_BOOST_PERCENTAGE = 0;
     constexpr size_t DEFAULT_NUM_PARALLEL_INSERTS = 4;
     constexpr size_t DEFAULT_NUM_RECOVERY_THREADS = 16;
     constexpr size_t DEFAULT_MAX_MEMORY_GB = 24;
@@ -138,11 +138,6 @@ namespace settings {
         return env ? std::stoull(env) : DEFAULT_MAX_ELEMENTS_INCREMENT_TRIGGER;
     }();
 
-    inline static size_t FILTER_BOOST_PERCENTAGE = [] {
-        const char* env = std::getenv("NDD_FILTER_BOOST_PERCENTAGE");
-        return env ? std::stoull(env) : DEFAULT_FILTER_BOOST_PERCENTAGE;
-    }();
-
     // Number of parallel inserts. It will use this many threads to insert data in parallel
     inline static size_t NUM_PARALLEL_INSERTS = [] {
         const char* env = std::getenv("NDD_NUM_PARALLEL_INSERTS");
@@ -186,6 +181,7 @@ namespace settings {
         oss << "MAX_ELEMENTS: " << MAX_ELEMENTS << "\n";
         oss << "MAX_ELEMENTS_INCREMENT: " << MAX_ELEMENTS_INCREMENT << "\n";
         oss << "MAX_ELEMENTS_INCREMENT_TRIGGER: " << MAX_ELEMENTS_INCREMENT_TRIGGER << "\n";
+        oss << "PREFILTER_CARDINALITY_THRESHOLD: " << PREFILTER_CARDINALITY_THRESHOLD << "\n";
         oss << "NUM_PARALLEL_INSERTS: " << NUM_PARALLEL_INSERTS << "\n";
         oss << "NUM_RECOVERY_THREADS: " << NUM_RECOVERY_THREADS << "\n";
         oss << "MAX_MEMORY_GB: " << MAX_MEMORY_GB << "\n";

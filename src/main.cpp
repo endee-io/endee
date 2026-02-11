@@ -708,6 +708,19 @@ int main(int argc, char** argv) {
                         return json_error(400, std::string("Invalid filter JSON: ") + e.what());
                     }
                 }
+
+                // Extract filter parameters (Option B from chat plan)
+                ndd::FilterParams filter_params;
+                if (body.has("filter_params")) {
+                     auto fp = body["filter_params"];
+                     if (fp.has("prefilter_threshold")) {
+                         filter_params.prefilter_threshold = static_cast<size_t>(fp["prefilter_threshold"].i());
+                     }
+                     if (fp.has("boost_percentage")) {
+                         filter_params.boost_percentage = static_cast<size_t>(fp["boost_percentage"].i());
+                     }
+                }
+
                 LOG_DEBUG("Filter: " << filter_array.dump());
                 try {
                     auto search_response = index_manager.searchKNN(index_id,
@@ -716,6 +729,7 @@ int main(int argc, char** argv) {
                                                                    sparse_values,
                                                                    k,
                                                                    filter_array,
+                                                                   filter_params,
                                                                    include_vectors,
                                                                    ef);
                     if(!search_response) {

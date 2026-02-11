@@ -6,8 +6,14 @@
 // to enable 64-bit IDs. Default is 32-bit for performance/memory efficiency.
 
 #include "../../third_party/roaring_bitmap/roaring.hh"
+#include "../utils/settings.hpp"
 
 namespace ndd {
+
+    struct FilterParams {
+        size_t prefilter_threshold = settings::PREFILTER_CARDINALITY_THRESHOLD;
+        size_t boost_percentage = settings::FILTER_BOOST_PERCENTAGE;
+    };
 
 #ifdef NDD_USE_64BIT_IDS
     // --- 64-bit Configuration ---

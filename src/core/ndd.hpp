@@ -1501,9 +1501,10 @@ public:
                                                             const std::vector<float>& query,
                                                             size_t k,
                                                             const nlohmann::json& filter_array,
+                                                            ndd::FilterParams params = {},
                                                             bool include_vectors = false,
                                                             size_t ef = 0) {
-        return searchKNN(index_id, query, {}, {}, k, filter_array, include_vectors, ef);
+        return searchKNN(index_id, query, {}, {}, k, filter_array, params, include_vectors, ef);
     }
 
     std::optional<std::vector<ndd::VectorResult>>
@@ -1513,6 +1514,7 @@ public:
               const std::vector<float>& sparse_values,
               size_t k,
               const nlohmann::json& filter_array,
+              ndd::FilterParams params = {},
               bool include_vectors = false,
               size_t ef = 0) {
         try {
@@ -1570,7 +1572,7 @@ public:
 
                     if (card == 0) {
                         // No results match filter
-                    } else if (card < settings::PREFILTER_CARDINALITY_THRESHOLD) {
+                    } else if (card < params.prefilter_threshold) {
                          // Strategy A: Brute Force on Small Subset
                          std::vector<ndd::idInt> valid_ids;
                          valid_ids.reserve(card);
@@ -1600,9 +1602,9 @@ public:
                         // Try to use optimized templated search if algorithm matches
                         auto* hnsw_alg = dynamic_cast<hnswlib::HierarchicalNSW<float>*>(entry.alg.get());
                         if (hnsw_alg) {
-                             dense_results = hnsw_alg->searchKnn(query_bytes.data(), k, effective_ef, &functor);
+                             dense_results = hnsw_alg->searchKnn(query_bytes.data(), k, effective_ef, &functor, params.boost_percentage);
                         } else {
-                             dense_results = entry.alg->searchKnn(query_bytes.data(), k, effective_ef, &functor);
+                             dense_results = entry.alg->searchKnn(query_bytes.data(), k, effective_ef, &functor, params.boost_percentage);
                         }
                     }
                 }
@@ -1705,7 +1707,7 @@ public:
                           << filtered_count << "/" << k
                           << "), checking pre-filter option. Cardinality: " << filter_cardinality);
 
-                if(filter_cardinality < settings::PREFILTER_CARDINALITY_THRESHOLD) {
+                if(filter_cardinality < params.prefilter_threshold) {
                     LOG_DEBUG("Using pre-filter approach due to poor post-filter results");
 
                     // Pre-filter: Get filtered IDs and do bruteforce search
@@ -1792,7 +1794,7 @@ public:
                 } else {
                     LOG_DEBUG("Filter cardinality too high for pre-filtering ("
                               << filter_cardinality
-                              << " >= " << settings::PREFILTER_CARDINALITY_THRESHOLD
+                              << " >= " << params.prefilter_threshold
                               << "), returning post-filter results");
                 }
             }

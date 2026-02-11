@@ -1259,29 +1259,29 @@ namespace hnswlib {
                     }
 
                     if(!pass_filter) {
-                        if (filter_boost_percentage > 0) {
-                            // Check Fatigue
-                             if (dist_computations > fatigue_base) {
-                                  // We are in the tapering region
-                                  // Linearly increase drop probability from 0% to 100%.
-                                  
-                                  size_t excess = dist_computations - fatigue_base;
-                                  
-                                  if (excess >= fatigue_tail) {
-                                      continue; // 100% drop (Hard Cap exceeded)
-                                  }
+                        // Check Fatigue
+                        if (dist_computations > fatigue_base) {
+                            // We are in the tapering region
+                            // Linearly increase drop probability from 0% to 100%.
+                            
+                            size_t excess = dist_computations - fatigue_base;
+                            
+                            if (excess >= fatigue_tail) {
+                                continue; // 100% drop (Hard Cap exceeded)
+                            }
 
-                                  // Prob = Excess / Tail_Length
-                                  size_t drop_prob = (excess * 255) / fatigue_tail; 
-                                  
-                                  size_t hash = (candidate_id * 104729) & 0xFF;
-                                  if (hash < drop_prob) continue;
-                             }
+                            // Prob = Excess / Tail_Length
+                            size_t drop_prob = (excess * 255) / fatigue_tail; 
+                            
+                            size_t hash = (candidate_id * 104729) & 0xFF;
+                            if (hash < drop_prob) continue;
+                        }
                              
-                             // Explore
-                             sim = curSimFunc(data_point, neighbor_data, curDistParam);
-                             dist_computations++;
-                             candidate_set.emplace(sim, candidate_id);
+                        // Explore
+                        sim = curSimFunc(data_point, neighbor_data, curDistParam);
+                        dist_computations++;
+                        if (top_candidates.size() < ef || sim > lowerBound) {
+                            candidate_set.emplace(sim, candidate_id);
                         }
                         continue;
                     }

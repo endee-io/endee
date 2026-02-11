@@ -21,6 +21,7 @@
 #include <shared_mutex>
 #include <limits>
 #include <cmath>
+#include "../core/types.hpp"
 
 #if defined(__x86_64__) || defined(_M_X64)
 #    include <immintrin.h>
@@ -241,7 +242,7 @@ namespace ndd {
         }
 
         // Search using BMW algorithm (DAAT)
-        std::vector<std::pair<ndd::idInt, float>> search(const SparseVector& query, size_t k) {
+        std::vector<std::pair<ndd::idInt, float>> search(const SparseVector& query, size_t k, const ndd::RoaringBitmap* filter = nullptr) {
             if(query.empty() || k == 0) {
                 return {};
             }
@@ -331,6 +332,20 @@ namespace ndd {
                 ndd::idInt pivot_doc_id = iterators[pivot_idx]->current_doc_id;
 
                 if(iterators[0]->current_doc_id == pivot_doc_id) {
+                    if(filter && !filter->contains(pivot_doc_id)) {
+                        // Skip document that doesn't match filter
+                        iterators[0]->next();
+                        for(size_t i = 1; i < iterators.size(); ++i) {
+                            if(iterators[i]->current_doc_id == pivot_doc_id) {
+                                iterators[i]->next();
+                            } else {
+                                break;  // Since sorted
+                            }
+                        }
+                        sort_iterators();
+                        continue;
+                    }
+
                     // Pivot is the first iterator, so we have a candidate
                     iterators[0]->advance(pivot_doc_id);  // Should be no-op
                     float score = iterators[0]->current_score * iterators[0]->term_weight;

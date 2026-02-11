@@ -1549,7 +1549,8 @@ public:
                         sparse_query.values.push_back(p.second);
                     }
 
-                    return entry.sparse_storage->search(sparse_query, k);
+                    const ndd::RoaringBitmap* filter_ptr = active_filter_bitmap.has_value() ? &(*active_filter_bitmap) : nullptr;
+                    return entry.sparse_storage->search(sparse_query, k, filter_ptr);
                 });
             }
 

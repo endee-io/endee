@@ -2,6 +2,7 @@
 
 #include "visited_list_pool.h"
 #include "hnswlib.h"
+#include "vector_cache.h"
 #include "log.hpp"
 #include "../utils/settings.hpp"
 #include "../quant/dispatch.hpp"
@@ -85,6 +86,13 @@ namespace hnswlib {
             LOG_DEBUG("Space initialized with data size: "
                       << data_size_ << ", dimension: " << dimension_
                       << ", quant_level: " << static_cast<int>(quant_level_));
+
+            // Initialize cache
+            size_t cache_bits = VectorCache::calculateCacheBits(maxElements_);
+            if (cache_bits > 0) {
+                vector_cache_ = std::make_unique<VectorCache>(data_size_, cache_bits);
+                LOG_DEBUG("Vector cache initialized for " << maxElements_ << " elements with " << (1 << cache_bits) << " slots");
+            }
 
             // Initialize upper layer space
             bool use_hybrid = true;
@@ -184,6 +192,10 @@ namespace hnswlib {
             // Upper layer calculation using runtime data size
             size += upper_layer_estimate
                     * (data_size_upper_ + sizeof(levelInt) + sizeLinksUpperLayers_);
+
+            if (vector_cache_) {
+                size += vector_cache_->getMemoryUsage();
+            }
 
             return size / GB;  // GB
         }
@@ -451,7 +463,14 @@ namespace hnswlib {
                         createSpace<float>(space_type_, dimension_, quant_level_));
             }
 
-            data_size_upper_ = space_upper_->get_data_size();
+            // Initialize cache for loaded index
+            size_t cache_bits = VectorCache::calculateCacheBits(maxElements_);
+            if (cache_bits > 0) {
+                 vector_cache_ = std::make_unique<VectorCache>(data_size_, cache_bits);
+                 LOG_DEBUG("Vector cache initialized for " << maxElements_ << " elements with " << (1 << cache_bits) << " slots");
+            }
+
+              data_size_upper_ = space_upper_->get_data_size();
             fstSimFuncUpper_ = space_upper_->get_sim_func();
             dist_func_param_upper_ = space_upper_->get_dist_func_param();
 
@@ -581,6 +600,12 @@ namespace hnswlib {
                 }
             }
             // TODO - Check this ..is it thread safe to comment this
+
+            // Put the data in cache. Will speed up initial data load
+            if (curLevel == 0 && vector_cache_) {
+                vector_cache_->insert(cur_c, static_cast<const uint8_t*>(datapoint));
+            }
+
             // std::unique_lock <std::shared_mutex> lock_el(getLinkListMutex(cur_c));
 
             // Put the data in level 0 memory.
@@ -797,6 +822,13 @@ namespace hnswlib {
         SIMFUNC<dist_t> fstSimFuncUpper_;
         void* dist_func_param_upper_{nullptr};
 
+        // Cache for vectors
+        mutable std::unique_ptr<VectorCache> vector_cache_;
+
+    public:
+        const VectorCache* getCache() const {
+             return vector_cache_.get();
+        }
         // Maps external label to internal id
         std::vector<idhInt> labelLookup_;
 
@@ -841,10 +873,21 @@ namespace hnswlib {
         // Modified function returning bool and filling buffer
         bool getDataByInternalId(idhInt internal_id, levelInt layer, uint8_t* buffer) const {
             if(layer == 0) {
+                // Check cache first
+                if (vector_cache_ && vector_cache_->get(internal_id, buffer)) {
+                    return true;
+                }
+
                 idInt external_label = getExternalLabel(internal_id);
                 if(vector_fetcher_) {
                     // Directly fetch to buffer
-                    return vector_fetcher_(external_label, buffer);
+                    bool success = vector_fetcher_(external_label, buffer);
+                    
+                    // Populate cache on successful fetch
+                    if (success && vector_cache_) {
+                         vector_cache_->insert(internal_id, buffer);
+                    }
+                    return success;
                 }
                 return false;
             } else {

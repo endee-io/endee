@@ -30,3 +30,9 @@ frontend/*
 
 # DS Store
 .DS_Store
+
+
+scripts/
+scripts/*
+.claude/
+.claude/*

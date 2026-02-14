@@ -964,8 +964,8 @@ public:
         // Initialize Sparse Storage if sparse_dim > 0
         std::unique_ptr<ndd::SparseVectorStorage> sparse_storage;
         if(sparse_dim > 0) {
-            std::string sparse_db_path = data_dir_ + "/" + index_id + "/sparse.db";
-            sparse_storage = std::make_unique<ndd::SparseVectorStorage>(sparse_db_path);
+            std::string sparse_storage_dir = data_dir_ + "/" + index_id + "/sparse";
+            sparse_storage = std::make_unique<ndd::SparseVectorStorage>(sparse_storage_dir);
             if(!sparse_storage->initialize()) {
                 throw std::runtime_error("Failed to initialize sparse storage for index: "
                                          + index_id);

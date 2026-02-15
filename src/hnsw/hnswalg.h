@@ -2,6 +2,7 @@
 
 #include "visited_list_pool.h"
 #include "hnswlib.h"
+#include "vector_cache.h"
 #include "log.hpp"
 #include "../utils/settings.hpp"
 #include "../quant/dispatch.hpp"
@@ -69,8 +70,6 @@ namespace hnswlib {
             quant_level_(quant_level),
             M_(M),
             M0_(M * 2),
-            maxM_(M_ + settings::MAX_EXTRA_NEIGHBORS),
-            maxM0_(M0_ + 2 * settings::MAX_EXTRA_NEIGHBORS),
             efConstruction_(std::max(ef_construction, M_)),
             linkListLocks_(settings::MAX_LINK_LIST_LOCKS),
             checksum_(checksum),
@@ -87,6 +86,13 @@ namespace hnswlib {
             LOG_DEBUG("Space initialized with data size: "
                       << data_size_ << ", dimension: " << dimension_
                       << ", quant_level: " << static_cast<int>(quant_level_));
+
+            // Initialize cache
+            size_t cache_bits = VectorCache::calculateCacheBits(maxElements_);
+            if (cache_bits > 0) {
+                vector_cache_ = std::make_unique<VectorCache>(data_size_, cache_bits);
+                LOG_DEBUG("Vector cache initialized for " << maxElements_ << " elements with " << (1 << cache_bits) << " slots");
+            }
 
             // Initialize upper layer space
             bool use_hybrid = true;
@@ -113,8 +119,6 @@ namespace hnswlib {
             if(M_ > settings::MAX_M) {
                 M_ = settings::MAX_M;
                 M0_ = M_ * 2;
-                maxM_ = M_ + settings::MAX_EXTRA_NEIGHBORS;
-                maxM0_ = M0_ + settings::MAX_EXTRA_NEIGHBORS;
                 LOG_DEBUG("Capping M parameter to settings::MAX_M" << settings::MAX_M);
             }
             //efConstruction cannot be more than MAX_EF_CONSTRUCT
@@ -128,8 +132,8 @@ namespace hnswlib {
             update_probability_generator_.seed(random_seed + 1);
 
             // links will also store number of linked elements in the first element
-            sizeLinksUpperLayers_ = sizeof(idhInt) + maxM_ * sizeof(idhInt);
-            sizeLinksBaseLayer_ = sizeof(idhInt) + maxM0_ * sizeof(idhInt);
+            sizeLinksUpperLayers_ = sizeof(idhInt) + M_ * sizeof(idhInt);
+            sizeLinksBaseLayer_ = sizeof(idhInt) + M0_ * sizeof(idhInt);
             // We are not storing the data in the level 0 memory, only the links and label
             sizeDataAtBaseLayer_ = sizeLinksBaseLayer_ + sizeof(flagInt) + sizeof(idInt);
             labelOffset_ = sizeLinksBaseLayer_ + sizeof(flagInt);
@@ -188,6 +192,10 @@ namespace hnswlib {
             // Upper layer calculation using runtime data size
             size += upper_layer_estimate
                     * (data_size_upper_ + sizeof(levelInt) + sizeLinksUpperLayers_);
+
+            if (vector_cache_) {
+                size += vector_cache_->getMemoryUsage();
+            }
 
             return size / GB;  // GB
         }
@@ -426,11 +434,9 @@ namespace hnswlib {
             if(maxElements_i > 0) {
                 maxElements_ = maxElements_i;
             }
-            maxM_ = M_ + settings::MAX_EXTRA_NEIGHBORS;
-            maxM0_ = M0_ + 2 * settings::MAX_EXTRA_NEIGHBORS;
             // links will also store number of linked elements
-            sizeLinksUpperLayers_ = sizeof(idInt) + maxM_ * sizeof(idInt);
-            sizeLinksBaseLayer_ = sizeof(idInt) + maxM0_ * sizeof(idInt);
+            sizeLinksUpperLayers_ = sizeof(idInt) + M_ * sizeof(idInt);
+            sizeLinksBaseLayer_ = sizeof(idInt) + M0_ * sizeof(idInt);
             // We are not storing the data in the level 0 memory, only the links and labels
             sizeDataAtBaseLayer_ = sizeLinksBaseLayer_ + sizeof(flagInt) + sizeof(idInt);
             labelOffset_ = sizeLinksBaseLayer_ + sizeof(flagInt);
@@ -457,7 +463,14 @@ namespace hnswlib {
                         createSpace<float>(space_type_, dimension_, quant_level_));
             }
 
-            data_size_upper_ = space_upper_->get_data_size();
+            // Initialize cache for loaded index
+            size_t cache_bits = VectorCache::calculateCacheBits(maxElements_);
+            if (cache_bits > 0) {
+                 vector_cache_ = std::make_unique<VectorCache>(data_size_, cache_bits);
+                 LOG_DEBUG("Vector cache initialized for " << maxElements_ << " elements with " << (1 << cache_bits) << " slots");
+            }
+
+              data_size_upper_ = space_upper_->get_data_size();
             fstSimFuncUpper_ = space_upper_->get_sim_func();
             dist_func_param_upper_ = space_upper_->get_dist_func_param();
 
@@ -587,6 +600,12 @@ namespace hnswlib {
                 }
             }
             // TODO - Check this ..is it thread safe to comment this
+
+            // Put the data in cache. Will speed up initial data load
+            if (curLevel == 0 && vector_cache_) {
+                vector_cache_->insert(cur_c, static_cast<const uint8_t*>(datapoint));
+            }
+
             // std::unique_lock <std::shared_mutex> lock_el(getLinkListMutex(cur_c));
 
             // Put the data in level 0 memory.
@@ -749,8 +768,6 @@ namespace hnswlib {
         std::string indexId_;
         size_t M_{0};
         size_t M0_{0};
-        size_t maxM_{0};
-        size_t maxM0_{0};
         size_t efConstruction_{0};
         size_t ef_{0};
         SpaceType space_type_;  // Now using SpaceType
@@ -805,6 +822,13 @@ namespace hnswlib {
         SIMFUNC<dist_t> fstSimFuncUpper_;
         void* dist_func_param_upper_{nullptr};
 
+        // Cache for vectors
+        mutable std::unique_ptr<VectorCache> vector_cache_;
+
+    public:
+        const VectorCache* getCache() const {
+             return vector_cache_.get();
+        }
         // Maps external label to internal id
         std::vector<idhInt> labelLookup_;
 
@@ -849,10 +873,21 @@ namespace hnswlib {
         // Modified function returning bool and filling buffer
         bool getDataByInternalId(idhInt internal_id, levelInt layer, uint8_t* buffer) const {
             if(layer == 0) {
+                // Check cache first
+                if (vector_cache_ && vector_cache_->get(internal_id, buffer)) {
+                    return true;
+                }
+
                 idInt external_label = getExternalLabel(internal_id);
                 if(vector_fetcher_) {
                     // Directly fetch to buffer
-                    return vector_fetcher_(external_label, buffer);
+                    bool success = vector_fetcher_(external_label, buffer);
+                    
+                    // Populate cache on successful fetch
+                    if (success && vector_cache_) {
+                         vector_cache_->insert(internal_id, buffer);
+                    }
+                    return success;
                 }
                 return false;
             } else {
@@ -908,18 +943,21 @@ namespace hnswlib {
         }
 
         // This function is used to get the neighbors based on heuristic
-        // We let the neighbors grow beyond M and then prune them based on heuristic
+        // We let the neighbors grow beyond M (now curM) and then prune them based on heuristic
         // The input is a sorted list (reverse order) by similarity
         std::vector<std::pair<dist_t, idhInt>>
         getNeighborsByHeuristic2(const std::vector<std::pair<dist_t, idhInt>>& candidates_sorted,
-                                 size_t M,
+                                 size_t curM,
                                  levelInt level) {
-            if(candidates_sorted.size() <= M) {
+            if(candidates_sorted.size() <= curM) {
                 return candidates_sorted;
             }
 
             std::vector<std::pair<dist_t, idhInt>> result;
-            result.reserve(M);
+            result.reserve(curM);
+
+            std::vector<std::pair<dist_t, idhInt>> fill_back_ids;
+            fill_back_ids.reserve(candidates_sorted.size() - curM);
 
             // Generic awareness
             auto curSimFunc = (level == 0) ? fstSimFunc_ : fstSimFuncUpper_;
@@ -930,7 +968,7 @@ namespace hnswlib {
             std::vector<uint8_t> selected_buf(curDataSize);  // Only used for level 0
 
             for(const auto& candidate : candidates_sorted) {
-                if(result.size() == M) {
+                if(result.size() == curM) {
                     break;
                 }
 
@@ -973,7 +1011,23 @@ namespace hnswlib {
 
                 if(good) {
                     result.push_back(candidate);
+                } else {
+                    fill_back_ids.push_back(candidate);
                 }
+            }
+
+            size_t current_backfill_buffer = (level == 0) ? (settings::BACKFILL_BUFFER * 2)
+                                                          : settings::BACKFILL_BUFFER;
+
+            size_t target_backfill_size = (curM > current_backfill_buffer)
+                                                  ? (curM - current_backfill_buffer)
+                                                  : 0;
+
+            for(const auto& fb : fill_back_ids) {
+                if(result.size() >= target_backfill_size) {
+                    break;
+                }
+                result.push_back(fb);
             }
 
             return result;
@@ -988,7 +1042,6 @@ namespace hnswlib {
                                   levelInt level) {
             LOG_TIME("mutuallyConnectNewElement");
 
-            size_t curMaxM = level ? maxM_ : maxM0_;
             size_t curM = level ? M_ : M0_;
 
             // Generic awareness
@@ -1036,7 +1089,7 @@ namespace hnswlib {
                 idhInt sz = getListCount(ll_other);
                 idhInt* data = (ll_other + 1);
 
-                if(sz < curMaxM) {
+                if(sz < curM) {
                     data[sz] = cur_c;
                     setListCount(ll_other, sz + 1);
                 } else {

@@ -28,6 +28,7 @@ namespace settings {
     constexpr size_t MAX_M = 512;
     constexpr size_t DEFAULT_EF_CONSTRUCT = 128;
     constexpr size_t MIN_EF_CONSTRUCT = 8;
+    constexpr size_t BACKFILL_BUFFER = 2; // Keep 2 slots free for high quality neighbors
     constexpr size_t MAX_EF_CONSTRUCT = 4096;
     constexpr size_t DEFAULT_EF_SEARCH = 128;
     constexpr size_t MIN_K = 1;
@@ -92,6 +93,8 @@ namespace settings {
     constexpr size_t DEFAULT_MAX_ELEMENTS = 100'000;
     constexpr size_t DEFAULT_MAX_ELEMENTS_INCREMENT = 100'000;
     constexpr size_t DEFAULT_MAX_ELEMENTS_INCREMENT_TRIGGER = 50'000;
+    constexpr size_t DEFAULT_VECTOR_CACHE_PERCENTAGE = 15;
+    constexpr size_t DEFAULT_VECTOR_CACHE_MIN_BITS = 17;
     const std::string DEFAULT_SERVER_ID = "unknown";
 
     //For Backups
@@ -136,6 +139,16 @@ namespace settings {
     inline static size_t MAX_ELEMENTS_INCREMENT_TRIGGER = [] {
         const char* env = std::getenv("NDD_MAX_INCREMENT_TRIGGER");
         return env ? std::stoull(env) : DEFAULT_MAX_ELEMENTS_INCREMENT_TRIGGER;
+    }();
+
+    inline static size_t VECTOR_CACHE_PERCENTAGE = [] {
+        const char* env = std::getenv("NDD_VECTOR_CACHE_PERCENTAGE");
+        return env ? std::stoull(env) : DEFAULT_VECTOR_CACHE_PERCENTAGE;
+    }();
+
+    inline static size_t VECTOR_CACHE_MIN_BITS = [] {
+        const char* env = std::getenv("NDD_VECTOR_CACHE_MIN_BITS");
+        return env ? std::stoull(env) : DEFAULT_VECTOR_CACHE_MIN_BITS;
     }();
 
     // Number of parallel inserts. It will use this many threads to insert data in parallel

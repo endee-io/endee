@@ -783,6 +783,19 @@ int main(int argc, char** argv) {
                             }
                         }
 
+                        if(item.has("meta")) {
+                            auto meta_str = std::string(item["meta"].s());
+                            vec.meta.assign(meta_str.begin(), meta_str.end());
+                        }
+
+                        if(item.has("filter")) {
+                            vec.filter = std::string(item["filter"].s());
+                        }
+
+                        if(item.has("norm")) {
+                            vec.norm = static_cast<float>(item["norm"].d());
+                        }
+
                         if(item.has("vector")) {
                             for(const auto& v : item["vector"]) {
                                 vec.vector.push_back(static_cast<float>(v.d()));

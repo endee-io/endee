@@ -1391,6 +1391,10 @@ public:
                 entry.vector_storage->deleteFilter(numeric_id, meta.filter);
                 // Mark as deleted in HNSW index
                 entry.alg->markDelete(numeric_id);
+                // Delete from sparse storage if hybrid index
+                if(entry.sparse_storage) {
+                    entry.sparse_storage->delete_vector(numeric_id);
+                }
             }
             // Add the list to write ahead log using IndexManager's method
             logDeletions(entry.index_id, numeric_ids);

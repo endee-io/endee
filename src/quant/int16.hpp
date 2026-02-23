@@ -8,7 +8,7 @@
 
 namespace ndd {
     namespace quant {
-        namespace int16d {
+        namespace int16 {
 
             constexpr float INT16_SCALE =
                     32767.0f;  // Max value for 16-bit signed integer quantization
@@ -1051,33 +1051,33 @@ namespace ndd {
                 return out_vec;
             }
 
-        }  // namespace int16d
+        }  // namespace int16
 
         class Int16Quantizer : public Quantizer {
         public:
-            std::string name() const override { return "int16d"; }
+            std::string name() const override { return "int16"; }
             QuantizationLevel level() const override { return QuantizationLevel::INT16; }
 
             QuantizerDispatch getDispatch() const override {
                 QuantizerDispatch d;
-                d.dist_l2 = &int16d::L2Sqr;
-                d.dist_ip = &int16d::InnerProduct;
-                d.dist_cosine = &int16d::Cosine;
-                d.sim_l2 = &int16d::L2SqrSim;
-                d.sim_ip = &int16d::InnerProductSim;
-                d.sim_cosine = &int16d::CosineSim;
-                d.quantize = &int16d::quantize;
-                d.dequantize = &int16d::dequantize;
-                d.quantize_to_int8 = &int16d::quantize_to_int8;
-                d.get_storage_size = &int16d::get_storage_size;
-                d.extract_scale = &int16d::extract_scale;
+                d.dist_l2 = &int16::L2Sqr;
+                d.dist_ip = &int16::InnerProduct;
+                d.dist_cosine = &int16::Cosine;
+                d.sim_l2 = &int16::L2SqrSim;
+                d.sim_ip = &int16::InnerProductSim;
+                d.sim_cosine = &int16::CosineSim;
+                d.quantize = &int16::quantize;
+                d.dequantize = &int16::dequantize;
+                d.quantize_to_int8 = &int16::quantize_to_int8;
+                d.get_storage_size = &int16::get_storage_size;
+                d.extract_scale = &int16::extract_scale;
                 return d;
             }
         };
 
         // Register INT16
         static RegisterQuantizer
-                reg_int16(QuantizationLevel::INT16, "int16d", std::make_shared<Int16Quantizer>());
+                reg_int16(QuantizationLevel::INT16, "int16", std::make_shared<Int16Quantizer>());
 
     }  // namespace quant
 }  // namespace ndd

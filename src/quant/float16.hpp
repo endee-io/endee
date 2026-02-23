@@ -6,7 +6,7 @@
 #include <limits>
 #include "../hnsw/hnswlib.h"
 #include "common.hpp"
-#include "int8d.hpp"
+#include "int8.hpp"
 
 namespace ndd {
     namespace quant {

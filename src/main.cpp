@@ -341,10 +341,16 @@ int main(int argc, char** argv) {
                                               + std::to_string(settings::MAX_EF_CONSTRUCT));
                 }
 
-                // Get quantization level (default to INT8)
-                ndd::quant::QuantizationLevel quant_level =
-                        body.has("precision") ? stringToQuantLevel(body["precision"].s())
-                                              : ndd::quant::QuantizationLevel::INT8;
+                // Get quantization level (default to INT16)
+                std::string precision = body.has("precision") ? std::string(body["precision"].s()) : "int16";
+
+                if(precision == "int8d") {
+                    precision = "int8";
+                } else if(precision == "int16d") {
+                    precision = "int16";
+                }
+
+                ndd::quant::QuantizationLevel quant_level = stringToQuantLevel(precision);
 
                 // Validate quantization level
                 if(quant_level == ndd::quant::QuantizationLevel::UNKNOWN) {

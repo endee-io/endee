@@ -1,7 +1,7 @@
 #pragma once
 #include "../hnsw/hnswlib.h"
 #include "../quant/common.hpp"
-#include "int8d.hpp"
+#include "int8.hpp"
 #include <vector>
 #include <cmath>
 #include <cstring>
@@ -18,15 +18,15 @@ namespace hnswlib {
                 const float* f_in = static_cast<const float*>(in);
                 std::vector<float> input(f_in, f_in + dim);
 #if defined(USE_SVE2)
-                return ndd::quant::int8d::quantize_vector_fp32_to_int8_buffer_sve(input);
+                return ndd::quant::int8::quantize_vector_fp32_to_int8_buffer_sve(input);
 #elif defined(USE_AVX512)
-                return ndd::quant::int8d::quantize_vector_fp32_to_int8_buffer_avx512(input);
+                return ndd::quant::int8::quantize_vector_fp32_to_int8_buffer_avx512(input);
 #elif defined(USE_AVX2)
-                return ndd::quant::int8d::quantize_vector_fp32_to_int8_buffer_avx2(input);
+                return ndd::quant::int8::quantize_vector_fp32_to_int8_buffer_avx2(input);
 #elif defined(USE_NEON)
-                return ndd::quant::int8d::quantize_vector_fp32_to_int8_buffer_neon(input);
+                return ndd::quant::int8::quantize_vector_fp32_to_int8_buffer_neon(input);
 #else
-                return ndd::quant::int8d::quantize_vector_fp32_to_int8_buffer(input);
+                return ndd::quant::int8::quantize_vector_fp32_to_int8_buffer(input);
 #endif
             }
 

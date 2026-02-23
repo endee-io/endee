@@ -8,8 +8,8 @@
 // Include all quantizer implementations to ensure they are registered
 #include "float16.hpp"
 #include "float32.hpp"
-#include "int8d.hpp"
-#include "int16d.hpp"
+#include "int8.hpp"
+#include "int16.hpp"
 #include "binary.hpp"
 
 namespace ndd {

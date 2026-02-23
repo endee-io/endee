@@ -8,7 +8,7 @@
 
 namespace ndd {
     namespace quant {
-        namespace int8d {
+        namespace int8 {
 
             constexpr float INT8_SCALE = 127.0f;  // Max value for 8-bit signed integer quantization
 
@@ -916,35 +916,35 @@ namespace ndd {
                 return std::vector<uint8_t>(ptr, ptr + size);
             }
 
-        }  // namespace int8d
+        }  // namespace int8
 
         class Int8Quantizer : public ndd::quant::Quantizer {
         public:
-            std::string name() const override { return "int8d"; }
+            std::string name() const override { return "int8"; }
             ndd::quant::QuantizationLevel level() const override {
                 return ndd::quant::QuantizationLevel::INT8;
             }
 
             ndd::quant::QuantizerDispatch getDispatch() const override {
                 ndd::quant::QuantizerDispatch d;
-                d.dist_l2 = &int8d::L2Sqr;
-                d.dist_ip = &int8d::InnerProduct;
-                d.dist_cosine = &int8d::Cosine;
-                d.sim_l2 = &int8d::L2SqrSim;
-                d.sim_ip = &int8d::InnerProductSim;
-                d.sim_cosine = &int8d::CosineSim;
-                d.quantize = &int8d::quantize;
-                d.dequantize = &int8d::dequantize;
-                d.quantize_to_int8 = &int8d::quantize_to_int8_identity;
-                d.get_storage_size = &int8d::get_storage_size;
-                d.extract_scale = &int8d::extract_scale;
+                d.dist_l2 = &int8::L2Sqr;
+                d.dist_ip = &int8::InnerProduct;
+                d.dist_cosine = &int8::Cosine;
+                d.sim_l2 = &int8::L2SqrSim;
+                d.sim_ip = &int8::InnerProductSim;
+                d.sim_cosine = &int8::CosineSim;
+                d.quantize = &int8::quantize;
+                d.dequantize = &int8::dequantize;
+                d.quantize_to_int8 = &int8::quantize_to_int8_identity;
+                d.get_storage_size = &int8::get_storage_size;
+                d.extract_scale = &int8::extract_scale;
                 return d;
             }
         };
 
         // Register INT8
         static ndd::quant::RegisterQuantizer reg_int8(ndd::quant::QuantizationLevel::INT8,
-                                                      "int8d",
+                                                      "int8",
                                                       std::make_shared<Int8Quantizer>());
 
     }  // namespace quant

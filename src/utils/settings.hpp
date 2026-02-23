@@ -89,6 +89,7 @@ namespace settings {
     constexpr size_t DEFAULT_SERVER_PORT = 8080;
     const std::string DEFAULT_SERVER_TYPE = "OSS";
     const std::string DEFAULT_DATA_DIR = "/mnt/data";
+    const std::string DEFAULT_SUBINDEX = "DEFAULT";
     constexpr size_t DEFAULT_MAX_ACTIVE_INDICES = 64;
     constexpr size_t DEFAULT_MAX_ELEMENTS = 100'000;
     constexpr size_t DEFAULT_MAX_ELEMENTS_INCREMENT = 100'000;

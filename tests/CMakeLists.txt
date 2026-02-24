@@ -36,10 +36,5 @@ target_include_directories(ndd_filter_test PRIVATE
 # Add other necessary definitions
 target_compile_definitions(ndd_filter_test PRIVATE MDB_MAXKEYSIZE=512)
 
-# SIMD flags if needed (copying from root CMake might be needed if filter/roaring depends on it, 
-# but usually for unit tests basic flags or inheriting form parent context helps if we used a lib)
-# For now, let's assume standard compilation is enough unless Roaring requires it explicitly.
-# Actually Roaring usually does runtime dispatch.
-
 include(GoogleTest)
 gtest_discover_tests(ndd_filter_test)

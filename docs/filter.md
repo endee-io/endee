@@ -74,12 +74,12 @@ Returns documents where the field value is **strictly greater than** the specifi
 
 **Implementation:** Uses `range(value+1, UINT32_MAX)` after sortable conversion. Edge case: returns empty bitmap if value equals maximum sortable value.
 
-#### `$ge` - Greater Than or Equal To (Inclusive)
+#### `$gte` - Greater Than or Equal To (Inclusive)
 Returns documents where the field value is **greater than or equal to** the specified value.
 
 **Syntax:**
 ```json
-[{"field_name": {"$ge": value}}]
+[{"field_name": {"$gte": value}}]
 ```
 
 **Supported Types:** Numeric fields only (integers and floats)
@@ -87,10 +87,10 @@ Returns documents where the field value is **greater than or equal to** the spec
 **Examples:**
 ```json
 // Find users 25 or older
-[{"age": {"$ge": 25}}]
+[{"age": {"$gte": 25}}]
 
 // Find products with price at least 100
-[{"price": {"$ge": 100.0}}]
+[{"price": {"$gte": 100.0}}]
 ```
 
 **Implementation:** Uses `range(value, UINT32_MAX)` after sortable conversion.
@@ -116,12 +116,12 @@ Returns documents where the field value is **strictly less than** the specified 
 
 **Implementation:** Uses `range(0, value-1)` after sortable conversion. Edge case: returns empty bitmap if value equals minimum sortable value (0).
 
-#### `$le` - Less Than or Equal To (Inclusive)
+#### `$lte` - Less Than or Equal To (Inclusive)
 Returns documents where the field value is **less than or equal to** the specified value.
 
 **Syntax:**
 ```json
-[{"field_name": {"$le": value}}]
+[{"field_name": {"$lte": value}}]
 ```
 
 **Supported Types:** Numeric fields only (integers and floats)
@@ -129,21 +129,21 @@ Returns documents where the field value is **less than or equal to** the specifi
 **Examples:**
 ```json
 // Find users 30 or younger
-[{"age": {"$le": 30}}]
+[{"age": {"$lte": 30}}]
 
 // Find products with price up to 100 (inclusive)
-[{"price": {"$le": 100.0}}]
+[{"price": {"$lte": 100.0}}]
 
 // Combine: find products between 10 and 100 (inclusive)
 [
-  {"price": {"$ge": 10.0}},
-  {"price": {"$le": 100.0}}
+  {"price": {"$gte": 10.0}},
+  {"price": {"$lte": 100.0}}
 ]
 ```
 
 **Implementation:** Uses `range(0, value)` after sortable conversion.
 
-**Note:** All comparison operators work with both positive and negative numbers, including floats. You can combine operators to create precise ranges (e.g., `$ge` + `$le` for inclusive range, `$gt` + `$lt` for exclusive range).
+**Note:** All comparison operators work with both positive and negative numbers, including floats. You can combine operators to create precise ranges (e.g., `$gte` + `$lte` for inclusive range, `$gt` + `$lt` for exclusive range).
 
 ---
 

@@ -248,7 +248,7 @@ TEST_F(FilterTest, GeOperatorInteger) {
 
     // Query: age >= 25
     json query = json::array({
-        {{"age", {{"$ge", 25}}}}
+        {{"age", {{"$gte", 25}}}}
     });
 
     auto ids = filter->getIdsMatchingFilter(query);
@@ -275,9 +275,9 @@ TEST_F(FilterTest, GtGeOperatorFloat) {
     auto ids_gt = filter->getIdsMatchingFilter(query_gt);
     EXPECT_EQ(ids_gt.size(), 2); // IDs 3, 4
 
-    // Test $ge
+    // Test $gte
     json query_ge = json::array({
-        {{"price", {{"$ge", 10.5}}}}
+        {{"price", {{"$gte", 10.5}}}}
     });
     auto ids_ge = filter->getIdsMatchingFilter(query_ge);
     EXPECT_EQ(ids_ge.size(), 3); // IDs 2, 3, 4
@@ -349,7 +349,7 @@ TEST_F(FilterTest, GtGeOperatorNegativeNumbers) {
 
     // Query: temperature >= -5
     json query_ge = json::array({
-        {{"temperature", {{"$ge", -5}}}}
+        {{"temperature", {{"$gte", -5}}}}
     });
     auto ids_ge = filter->getIdsMatchingFilter(query_ge);
     EXPECT_EQ(ids_ge.size(), 3); // IDs 2, 3, 4 (-5, 0, 5)
@@ -385,7 +385,7 @@ TEST_F(FilterTest, LeOperatorInteger) {
 
     // Query: age <= 30
     json query = json::array({
-        {{"age", {{"$le", 30}}}}
+        {{"age", {{"$lte", 30}}}}
     });
 
     auto ids = filter->getIdsMatchingFilter(query);
@@ -412,9 +412,9 @@ TEST_F(FilterTest, LtLeOperatorFloat) {
     auto ids_lt = filter->getIdsMatchingFilter(query_lt);
     EXPECT_EQ(ids_lt.size(), 2); // IDs 1, 2
 
-    // Test $le
+    // Test $lte
     json query_le = json::array({
-        {{"price", {{"$le", 15.0}}}}
+        {{"price", {{"$lte", 15.0}}}}
     });
     auto ids_le = filter->getIdsMatchingFilter(query_le);
     EXPECT_EQ(ids_le.size(), 3); // IDs 1, 2, 3
@@ -443,10 +443,10 @@ TEST_F(FilterTest, ComparisonRangeEquivalence) {
     filter->add_filters_from_json(3, R"({"age": 30})");
     filter->add_filters_from_json(4, R"({"age": 35})");
 
-    // Test: $ge 25 AND $le 30 should equal $range [25, 30]
+    // Test: $gte 25 AND $lte 30 should equal $range [25, 30]
     json query_comparison = json::array({
-        {{"age", {{"$ge", 25}}}},
-        {{"age", {{"$le", 30}}}}
+        {{"age", {{"$gte", 25}}}},
+        {{"age", {{"$lte", 30}}}}
     });
     auto ids_comp = filter->getIdsMatchingFilter(query_comparison);
 

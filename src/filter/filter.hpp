@@ -349,11 +349,11 @@ public:
                     or_result = numeric_index_->range(field, sortable_val + 1, UINT32_MAX);
                 }
 
-            } else if(op == "$ge") {
+            } else if(op == "$gte") {
                 // Greater than or equal (inclusive): value >= N
                 if(type != FieldType::Number) {
                     throw std::runtime_error(
-                            "$ge operator is only supported for numeric fields");
+                            "$gte operator is only supported for numeric fields");
                 }
 
                 uint32_t sortable_val;
@@ -362,7 +362,7 @@ public:
                 } else if(val.is_number()) {
                     sortable_val = ndd::filter::float_to_sortable(val.get<float>());
                 } else {
-                    throw std::runtime_error("$ge value must be a number");
+                    throw std::runtime_error("$gte value must be a number");
                 }
 
                 // Greater than or equal is implemented as range [value, MAX]
@@ -392,11 +392,11 @@ public:
                     or_result = numeric_index_->range(field, 0, sortable_val - 1);
                 }
 
-            } else if(op == "$le") {
+            } else if(op == "$lte") {
                 // Less than or equal (inclusive): value <= N
                 if(type != FieldType::Number) {
                     throw std::runtime_error(
-                            "$le operator is only supported for numeric fields");
+                            "$lte operator is only supported for numeric fields");
                 }
 
                 uint32_t sortable_val;
@@ -405,7 +405,7 @@ public:
                 } else if(val.is_number()) {
                     sortable_val = ndd::filter::float_to_sortable(val.get<float>());
                 } else {
-                    throw std::runtime_error("$le value must be a number");
+                    throw std::runtime_error("$lte value must be a number");
                 }
 
                 // Less than or equal is implemented as range [0, value]

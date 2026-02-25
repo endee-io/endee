@@ -243,7 +243,7 @@ namespace ndd {
             return removeDocumentInternal(txn, doc_id, vec);
         }
 
-        // Search using BMW algorithm (DAAT
+        // Search using BMW algorithm (DAAT)
         std::vector<std::pair<ndd::idInt, float>> search(const SparseVector& query,
                                                         size_t k,
                                                         const ndd::RoaringBitmap* filter = nullptr)

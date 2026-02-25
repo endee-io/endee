@@ -42,6 +42,8 @@ private:
             throw std::runtime_error("Failed to set geometry");
         }
 
+        mdbx_env_set_maxdbs(env_, settings::MAX_NR_SUBINDEX);
+
         rc = mdbx_env_open(
                 env_, path_.c_str(), MDBX_WRITEMAP | MDBX_MAPASYNC | MDBX_NORDAHEAD, 0664);
         if(rc != MDBX_SUCCESS) {
@@ -54,7 +56,7 @@ private:
             throw std::runtime_error("Failed to begin transaction");
         }
 
-        rc = mdbx_dbi_open(txn, nullptr, MDBX_CREATE | MDBX_INTEGERKEY, &dbi_);
+        rc = mdbx_dbi_open(txn, settings::DEFAULT_SUBINDEX.c_str(), MDBX_CREATE | MDBX_INTEGERKEY, &dbi_);
         if(rc != MDBX_SUCCESS) {
             mdbx_txn_abort(txn);
             throw std::runtime_error("Failed to open database");
@@ -63,7 +65,7 @@ private:
         rc = mdbx_txn_commit(txn);
         if(rc != MDBX_SUCCESS) {
             throw std::runtime_error("Failed to commit transaction: "
-                                     + std::string(mdbx_strerror(rc)));
+                                        + std::string(mdbx_strerror(rc)));
         }
     }
 

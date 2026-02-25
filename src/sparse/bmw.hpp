@@ -21,6 +21,7 @@
 #include <shared_mutex>
 #include <unordered_set>
 #include <limits>
+#include <cstdint>
 #include <cmath>
 #include "../core/types.hpp"
 
@@ -293,13 +294,6 @@ namespace ndd {
 
             // Helper to sort iterators by current doc ID
             auto sort_iterators = [&]() {
-#if defined(NDD_BMW_USE_STD_SORT)
-                std::sort(iterators.begin(),
-                          iterators.end(),
-                          [](BlockIterator* a, BlockIterator* b) {
-                              return a->current_doc_id < b->current_doc_id;
-                          });
-#else
                 if(iterators.size() < 2) {
                     return;
                 }
@@ -318,7 +312,6 @@ namespace ndd {
                         break;
                     }
                 }
-#endif
             };
 
             sort_iterators();
@@ -340,43 +333,6 @@ namespace ndd {
                 if(iterators.empty()) {
                     break;
                 }
-
-#if defined(NDD_BMW_EXHAUSTIVE_DAAT)
-                ndd::idInt current_doc_id = iterators.front()->current_doc_id;
-
-                if(filter && !filter->contains(current_doc_id)) {
-                    for(size_t i = 0; i < iterators.size(); ++i) {
-                        if(iterators[i]->current_doc_id == current_doc_id) {
-                            iterators[i]->next();
-                        }
-                    }
-                    sort_iterators();
-                    continue;
-                }
-
-                float score = 0.0f;
-                for(size_t i = 0; i < iterators.size(); ++i) {
-                    if(iterators[i]->current_doc_id == current_doc_id) {
-                        score += iterators[i]->current_score * iterators[i]->term_weight;
-                        iterators[i]->next();
-                    }
-                }
-
-                if(top_k.size() < k) {
-                    top_k.emplace(current_doc_id, score);
-                    if(top_k.size() == k) {
-                        threshold = top_k.top().score;
-                    }
-                } else if(score > threshold) {
-                    top_k.pop();
-                    top_k.emplace(current_doc_id, score);
-                    threshold = top_k.top().score;
-                }
-
-                sort_iterators();
-                continue;
-#else
-
                 if(remaining_global_upper_bound < 0.0f) {
                     remaining_global_upper_bound = 0.0f;
                 }
@@ -446,18 +402,10 @@ namespace ndd {
                         threshold = top_k.top().score;
                     }
                 } else {
-#if defined(NDD_BMW_LEGACY_ADVANCE_ALL_PREDECESSORS)
-                    for(size_t i = 0; i < pivot_idx; ++i) {
-                        iterators[i]->advance(pivot_doc_id);
-                    }
-#else
                     // Standard WAND/BMW behavior: advance only the first iterator to the pivot.
                     iterators[0]->advance(pivot_doc_id);
-#endif
                 }
-
                 sort_iterators();
-#endif
             }
 
             // Clean up
@@ -490,7 +438,7 @@ namespace ndd {
             }
 
             auto entries = loadBlock(txn, term_id, start_doc_id);
-            if(entries.size() <= MAX_BLOCK_SIZE) {
+            if(entries.size() <= settings::MAX_BMW_BLOCK_SIZE) {
                 return true;
             }
 
@@ -595,7 +543,7 @@ namespace ndd {
         }
 
         std::vector<BlockIdx>::iterator findBlockIterator(std::vector<BlockIdx>& blocks,
-                                                          ndd::idInt doc_id) {
+                                                            ndd::idInt doc_id) {
             size_t first_idx = firstRealBlockIndex(blocks);
             if(first_idx >= blocks.size()) {
                 return blocks.end();
@@ -603,11 +551,11 @@ namespace ndd {
 
             auto begin_it = blocks.begin() + static_cast<std::ptrdiff_t>(first_idx);
             auto it = std::upper_bound(begin_it,
-                                       blocks.end(),
-                                       doc_id,
-                                       [](ndd::idInt doc_id, const BlockIdx& block) {
-                                           return doc_id < block.start_doc_id;
-                                       });
+                                        blocks.end(),
+                                        doc_id,
+                                        [](ndd::idInt doc_id, const BlockIdx& block) {
+                                            return doc_id < block.start_doc_id;
+                                        });
 
             if(it == begin_it) {
                 return it;
@@ -624,11 +572,11 @@ namespace ndd {
 
             auto begin_it = blocks.begin() + static_cast<std::ptrdiff_t>(first_idx);
             auto it = std::upper_bound(begin_it,
-                                       blocks.end(),
-                                       doc_id,
-                                       [](ndd::idInt doc_id, const BlockIdx& block) {
-                                           return doc_id < block.start_doc_id;
-                                       });
+                                        blocks.end(),
+                                        doc_id,
+                                        [](ndd::idInt doc_id, const BlockIdx& block) {
+                                            return doc_id < block.start_doc_id;
+                                        });
 
             if(it == begin_it) {
                 return it;
@@ -639,15 +587,17 @@ namespace ndd {
         /**
          * The quantize and dequantize functions are there to reduce the memory
          * and storage footprint of the sparse values (float 32 to int8).
+         *
+         * XXX: Here we are assuming that sparse vectors can never have -ve values.
          */
         // Helper for uint8 quantization
         static inline uint8_t quantize(float val, float max_val) {
-            if(max_val <= 1e-9f) {
+            if(max_val <= settings::NEAR_ZERO) {
                 return 0;
             }
-            float scaled = (val / max_val) * 255.0f;
-            if(scaled >= 255.0f) {
-                return 255;
+            float scaled = (val / max_val) * UINT8_MAX;
+            if(scaled >= UINT8_MAX) {
+                return UINT8_MAX;
             }
             if (scaled <= 0.0f)   return 0;
 
@@ -656,12 +606,12 @@ namespace ndd {
 
         static inline float dequantize(uint8_t val, float max_val) {
             // If max_val is near zero, the result is effectively zero
-            if (max_val <= 1e-9f) {
+            if (max_val <= settings::NEAR_ZERO) {
                 return 0.0f;
             }
 
             // Use a single multiplier to avoid multiple floating point ops
-            const float scale = max_val / 255.0f;
+            const float scale = max_val / UINT8_MAX;
             return static_cast<float>(val) * scale;
         }
 
@@ -697,10 +647,10 @@ namespace ndd {
             MDBX_txn* txn;
 
             BlockIterator(uint32_t tid,
-                          float weight,
-                          const std::vector<BlockIdx>* blks,
-                          BMWIndex* idx,
-                          MDBX_txn* t) :
+                            float weight,
+                            const std::vector<BlockIdx>* blks,
+                            BMWIndex* idx,
+                            MDBX_txn* t) :
                 term_id(tid),
                 term_weight(weight),
                 blocks(blks),
@@ -813,18 +763,11 @@ namespace ndd {
                         auto diff_ptr = static_cast<const uint32_t*>(doc_diffs_ptr);
                         current_doc_id = block_meta.start_doc_id + diff_ptr[current_entry_idx];
                     }
-#ifdef NDD_USE_64BIT_IDS
-                    else {
-                        auto diff_ptr = static_cast<const uint64_t*>(doc_diffs_ptr);
-                        current_doc_id = block_meta.start_doc_id + diff_ptr[current_entry_idx];
-                    }
-#else
                     else {
                         current_doc_id = std::numeric_limits<ndd::idInt>::max();
                         current_block_idx = blocks->size();
                         return;
                     }
-#endif
                     current_score = valueAt(current_entry_idx, block_meta.block_max_value);
                     return;
                 }
@@ -837,18 +780,11 @@ namespace ndd {
                         auto diff_ptr = static_cast<const uint32_t*>(doc_diffs_ptr);
                         current_doc_id = block_meta.start_doc_id + diff_ptr[current_entry_idx];
                     }
-#ifdef NDD_USE_64BIT_IDS
-                    else {
-                        auto diff_ptr = static_cast<const uint64_t*>(doc_diffs_ptr);
-                        current_doc_id = block_meta.start_doc_id + diff_ptr[current_entry_idx];
-                    }
-#else
                     else {
                         current_doc_id = std::numeric_limits<ndd::idInt>::max();
                         current_block_idx = blocks->size();
                         return;
                     }
-#endif
                         current_score = valueAt(current_entry_idx, block_meta.block_max_value);
                     return;
                 }
@@ -920,8 +856,8 @@ namespace ndd {
                 const auto& block_meta = (*blocks)[current_block_idx];
                 if(target_doc_id > block_meta.start_doc_id) {
                     ndd::idInt diff = target_doc_id - block_meta.start_doc_id;
-                    // If diff > 65535, we know it's not in this 16-bit block
-                    if(diff > 65535) {
+                    // If diff > UINT16_MAX, we know it's not in this 16-bit block
+                    if(diff > UINT16_MAX) {
                         current_entry_idx = block_data_size;
                     } else {
                         current_entry_idx = index->findEntryIndexSIMD16(
@@ -971,22 +907,11 @@ namespace ndd {
                 const auto& block_meta = (*blocks)[current_block_idx];
                 if(target_doc_id > block_meta.start_doc_id) {
                     ndd::idInt diff = target_doc_id - block_meta.start_doc_id;
-
-#ifdef NDD_USE_64BIT_IDS
-                    // 64-bit ID build: Supports 32-bit compressed blocks and 64-bit full blocks.
-                    // Note: 16-bit blocks are handled by advance16/SIMD16.
-                    current_entry_idx = index->findEntryIndexGeneric(
-                            doc_diffs_ptr, block_data_size, current_entry_idx, diff, diff_bits);
-#else
-                    // 32-bit ID build: Supports only 32-bit blocks here.
-                    // diff fits in 32 bits.
                     current_entry_idx =
                             index->findEntryIndexSIMD32(static_cast<const uint32_t*>(doc_diffs_ptr),
                                                         block_data_size,
                                                         current_entry_idx,
                                                         static_cast<uint32_t>(diff));
-#endif
-
                     advanceToNextLive32();
                 }
             }
@@ -1011,7 +936,6 @@ namespace ndd {
         mutable std::shared_mutex mutex_;
 
         // Block management constants
-        static constexpr size_t MAX_BLOCK_SIZE = 128;
 
         // Optimized SIMD search for 16-bit diffs
         size_t findEntryIndexSIMD16(const uint16_t* doc_diffs,
@@ -1192,31 +1116,11 @@ namespace ndd {
                                      size_t start_idx,
                                      ndd::idInt target_diff,
                                      uint8_t bits) {
-// In 64-bit mode, we might encounter 32-bit compressed blocks or 64-bit blocks
-#ifdef NDD_USE_64BIT_IDS
-            if(bits == 32) {
-                if(target_diff > 0xFFFFFFFFULL) {
-                    return size;  // Optimization: target exceeds max possible value in 32-bit block
-                }
-                return findEntryIndexSIMD32(static_cast<const uint32_t*>(doc_diffs),
-                                            size,
-                                            start_idx,
-                                            static_cast<uint32_t>(target_diff));
-            } else {
-                size_t idx = start_idx;
-                const uint64_t* ptr = static_cast<const uint64_t*>(doc_diffs);
-                while(idx < size && ptr[idx] < target_diff) {
-                    idx++;
-                }
-                return idx;
-            }
-#else
             // In 32-bit mode, we only expect 32-bit blocks here (16-bit handled by SIMD16)
             return findEntryIndexSIMD32(static_cast<const uint32_t*>(doc_diffs),
                                         size,
                                         start_idx,
                                         static_cast<uint32_t>(target_diff));
-#endif
         }
 
         // Find next non-zero value (live entry)
@@ -1486,16 +1390,6 @@ namespace ndd {
                             entries[i].value = dequantize(val_ptr[i], header->block_max_value);
                         }
                     }
-#ifdef NDD_USE_64BIT_IDS
-                    else if(header->diff_bits == 64) {
-                        val_ptr = ptr + n * sizeof(uint64_t);
-                        const uint64_t* diffs = static_cast<const uint64_t*>(diff_ptr);
-                        for(size_t i = 0; i < n; ++i) {
-                            entries[i].doc_diff = diffs[i];
-                            entries[i].value = dequantize(val_ptr[i], header->block_max_value);
-                        }
-                    }
-#endif
                     else {
                         LOG_ERROR("Unsupported block diff_bits: " << (int)header->diff_bits);
                     }
@@ -1518,16 +1412,6 @@ namespace ndd {
                             entries[i].value = val_ptr[i];
                         }
                     }
-#ifdef NDD_USE_64BIT_IDS
-                    else if(header->diff_bits == 64) {
-                        val_ptr = reinterpret_cast<const float*>(ptr + n * sizeof(uint64_t));
-                        const uint64_t* diffs = static_cast<const uint64_t*>(diff_ptr);
-                        for(size_t i = 0; i < n; ++i) {
-                            entries[i].doc_diff = diffs[i];
-                            entries[i].value = val_ptr[i];
-                        }
-                    }
-#endif
                     else {
                         LOG_ERROR("Unsupported block diff_bits: " << (int)header->diff_bits);
                     }
@@ -1585,22 +1469,11 @@ namespace ndd {
 #endif
             header.alignment_pad = 0;
 
-// Decide diff width (User requested 16-bit blocks when possible)
-#ifdef NDD_USE_64BIT_IDS
-            if(max_diff < 65536) {
-                header.diff_bits = 16;
-            } else if(max_diff < 4294967296ULL) {
-                header.diff_bits = 32;
-            } else {
-                header.diff_bits = 64;
-            }
-#else
-            if(max_diff < 65536) {
+            if(max_diff <= UINT16_MAX) {
                 header.diff_bits = 16;
             } else {
                 header.diff_bits = 32;
             }
-#endif
 
             size_t diff_size = header.diff_bits / 8;
 #if defined(NDD_BMW_STORE_FLOAT_VALUES)
@@ -1631,16 +1504,6 @@ namespace ndd {
                 }
                 ptr += n * sizeof(uint32_t);
             }
-#ifdef NDD_USE_64BIT_IDS
-            else {
-                // 64-bit case
-                uint64_t* diffs = reinterpret_cast<uint64_t*>(ptr);
-                for(size_t i = 0; i < n; ++i) {
-                    diffs[i] = static_cast<uint64_t>(entries[i].doc_diff);
-                }
-                ptr += n * sizeof(uint64_t);
-            }
-#endif
 
             // Copy values
 #if defined(NDD_BMW_STORE_FLOAT_VALUES)
@@ -1769,11 +1632,6 @@ namespace ndd {
                 } else if(header->diff_bits == 32) {
                     diff_size = sizeof(uint32_t);
                 }
-#ifdef NDD_USE_64BIT_IDS
-                else if(header->diff_bits == 64) {
-                    diff_size = sizeof(uint64_t);
-                }
-#endif
                 else {
                     return {nullptr, nullptr, 0, 0, 0};
                 }
@@ -1813,13 +1671,13 @@ namespace ndd {
             // Find the appropriate block
             auto block_it = findBlockIterator(blocks, doc_id);
 
-            // Check if we need to split due to range (if > 65535, cannot fit in uint16 diff)
+            // Check if we need to split due to range (if > UINT16_MAX, cannot fit in uint16 diff)
             // This is a constraint for 16-bit blocks. If we enable mix, we don't strict need to
             // check unless we want to force 16-bit.
 
             bool force_new_block = false;
             if(block_it != blocks.end() && block_it->start_doc_id <= doc_id) {
-                if((doc_id - block_it->start_doc_id) >= 65536) {
+                if((doc_id - block_it->start_doc_id) > UINT16_MAX) {
                     force_new_block = true;
                 }
             }
@@ -1868,7 +1726,7 @@ namespace ndd {
             }
 
             // Check if block needs splitting
-            if(block_entries.size() > MAX_BLOCK_SIZE) {
+            if(block_entries.size() > settings::MAX_BMW_BLOCK_SIZE) {
                 BlockHeader header;
                 bool saved = saveBlock(txn, term_id, block_it->start_doc_id, block_entries, header);
                 if(!saved) {

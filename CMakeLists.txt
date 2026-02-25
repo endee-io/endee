@@ -80,11 +80,13 @@ if(ND_DEBUG)
     add_definitions(-DND_DEBUG)
 endif()
 
+
 # SIMD Optimization Options
 option(USE_AVX512 "Enable AVX512 (F, BW, VNNI, FP16)" OFF)
 option(USE_AVX2   "Enable AVX2 (FMA, F16C)" OFF)
 option(USE_SVE2   "Enable SVE2 (INT8/16, FP16)" OFF)
 option(USE_NEON   "Enable NEON (FP16, DotProd)" OFF)
+option(NDD_BMW_STORE_FLOAT_VALUES "Store raw float 32 values in BMW index (no quantization)" OFF)
 
 # Check if any SIMD option is selected
 if(NOT USE_AVX512 AND NOT USE_AVX2 AND NOT USE_SVE2 AND NOT USE_NEON)
@@ -289,6 +291,10 @@ elseif(USE_NEON)
         target_compile_options(${NDD_BINARY_NAME} PRIVATE -march=armv8.2-a+fp16+fp16fml+dotprod)
     endif()
     target_compile_definitions(${NDD_BINARY_NAME} PRIVATE USE_NEON)
+endif()
+
+if(NDD_BMW_STORE_FLOAT_VALUES)
+    target_compile_definitions(${NDD_BINARY_NAME} PRIVATE NDD_BMW_STORE_FLOAT_VALUES)
 endif()
 
 # Add ASIO definitions

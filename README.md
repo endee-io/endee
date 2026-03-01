@@ -1,3 +1,51 @@
+# 🎯 Internship Submission – AI Research Assistant (Built on Endee)
+
+This fork extends **Endee (nD) Vector Database** to build a complete Retrieval-Augmented Generation (RAG) system.
+
+## 🚀 What I Built
+
+Inside the `research_assistant/` folder, I implemented:
+
+- Dynamic document ingestion
+- 384-dimensional MiniLM embeddings
+- Endee vector indexing (cosine similarity)
+- MessagePack response decoding
+- Semantic search pipeline
+- Groq Llama 3.3 70B integration
+- Gradio-based interactive UI
+
+## 🧠 System Architecture
+User Query
+↓
+MiniLM Embedding (384-dim)
+↓
+Endee Vector Search
+↓
+Top-K Retrieval
+↓
+Context Injection
+↓
+Groq Llama 3.3 70B
+↓
+Grounded Answer
+
+
+## 📂 Project Location
+
+The full implementation is inside:
+research_assistant/
+See:research_assistant/README.md 
+
+for detailed setup and usage instructions.
+
+---
+
+
+
+
+
+
+
 # Endee: High-Performance Open Source Vector Database
 
 **Endee (nD)** is a specialized, high-performance vector database built for speed and efficiency. This guide covers supported platforms, dependency requirements, and detailed build instructions using both our automated installer and manual CMake configuration.

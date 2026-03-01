@@ -1,0 +1,6 @@
+venv/
+research_assistant/venv/
+__pycache__/
+*.pyc
+.env
+research_assistant/data/documents.json

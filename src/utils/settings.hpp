@@ -28,7 +28,7 @@ namespace settings {
     constexpr size_t MAX_M = 512;
     constexpr size_t DEFAULT_EF_CONSTRUCT = 128;
     constexpr size_t MIN_EF_CONSTRUCT = 8;
-    constexpr size_t BACKFILL_BUFFER = 2; // Keep 2 slots free for high quality neighbors
+    constexpr size_t BACKFILL_BUFFER = 4; // Keep 3 slots free for high quality neighbors
     constexpr size_t MAX_EF_CONSTRUCT = 4096;
     constexpr size_t DEFAULT_EF_SEARCH = 128;
     constexpr size_t MIN_K = 1;
@@ -41,9 +41,6 @@ namespace settings {
     constexpr size_t NUM_SERVER_THREADS = 0;
     // Number of save mutexes for parallel saves
     constexpr size_t NUM_INDEX_SAVE_MUTEXES = 16;
-
-    // We allow some extra neighbors before pruning
-    constexpr size_t MAX_EXTRA_NEIGHBORS = 3;
 
     // MDBX default map sizes. Growth step and initial size are the same for all databases.
     // System tables
@@ -62,6 +59,9 @@ namespace settings {
     constexpr size_t MAX_LINK_LIST_LOCKS = 65536;
 
     // Sparse Storage settings
+    constexpr uint16_t MAX_BLOCK_SIZE = 128;    // Number of elements in a block
+    constexpr uint32_t DEFAULT_VOCAB_SIZE = 0;  // 0 means dense vectors only
+    constexpr uint8_t DEFAULT_QUANT_BITS = 8;
     constexpr size_t MAX_BMW_BLOCK_SIZE = 128;
     constexpr float NEAR_ZERO = 1e-9f;
 
@@ -93,7 +93,7 @@ namespace settings {
     constexpr size_t DEFAULT_MAX_ELEMENTS_INCREMENT = 100'000;
     constexpr size_t DEFAULT_MAX_ELEMENTS_INCREMENT_TRIGGER = 50'000;
     constexpr size_t DEFAULT_VECTOR_CACHE_PERCENTAGE = 15;
-    constexpr size_t DEFAULT_VECTOR_CACHE_MIN_BITS = 17;
+    constexpr size_t DEFAULT_VECTOR_CACHE_MIN_BITS = 17; // Minimum 128K entries in cache
     const std::string DEFAULT_SERVER_ID = "unknown";
 
     //For Backups
@@ -142,7 +142,7 @@ namespace settings {
 
     inline static size_t VECTOR_CACHE_PERCENTAGE = [] {
         const char* env = std::getenv("NDD_VECTOR_CACHE_PERCENTAGE");
-        return env ? std::stoull(env) : DEFAULT_VECTOR_CACHE_PERCENTAGE;
+        return env ? std::min<size_t>(std::stoull(env), 100) : DEFAULT_VECTOR_CACHE_PERCENTAGE;
     }();
 
     inline static size_t VECTOR_CACHE_MIN_BITS = [] {

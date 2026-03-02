@@ -3,10 +3,8 @@
 #include "../utils/settings.hpp"
 #include <vector>
 #include <mutex>
-#include <shared_mutex>
 #include <atomic>
 #include <cstring>
-#include <array>
 #include <limits>
 #include <cstdlib>
 #include <string>
@@ -15,28 +13,25 @@ namespace hnswlib {
 
 class VectorCache {
 public:
-    inline static size_t VECTOR_CACHE_PERCENTAGE = settings::VECTOR_CACHE_PERCENTAGE;
 
-    inline static size_t VECTOR_CACHE_MIN_BITS = settings::VECTOR_CACHE_MIN_BITS;
-    static constexpr uint8_t MAX_COUNTER = 2; // Sticky replacement policy
     // Helper to calculate required cache bits based on element count and percentage
-    static size_t calculateCacheBits(size_t element_count, size_t cache_percent = VECTOR_CACHE_PERCENTAGE) {
+    static size_t calculateCacheBits(size_t element_count, size_t cache_percent = settings::VECTOR_CACHE_PERCENTAGE) {
         if (element_count == 0 || cache_percent == 0) return 0;
         
         size_t target_elements = (element_count * cache_percent) / 100;
         
         // Calculate bits needed: 2^bits >= target_elements
-        size_t bits = 0;
-        while ((1ULL << bits) < target_elements) {
-            bits++;
+        size_t cache_bits = 0;
+        while ((1ULL << cache_bits) < target_elements) {
+            cache_bits++;
         }
         
         // Enforce minimum bits
-        if (bits < VECTOR_CACHE_MIN_BITS) {
-            bits = VECTOR_CACHE_MIN_BITS;
+        if (cache_bits < settings::VECTOR_CACHE_MIN_BITS) {
+            cache_bits = settings::VECTOR_CACHE_MIN_BITS;
         }
 
-        return bits;
+        return cache_bits;
     }
 
 private:
@@ -46,18 +41,14 @@ private:
     size_t vectorCacheDataSize_ = 0;
     size_t data_size_ = 0;
     uint8_t* vectorCache_ = nullptr;
-    
-    static constexpr size_t CACHE_STRIPE_BITS = 8; // 256 stripes
-    static constexpr size_t CACHE_STRIPE_COUNT = 1 << CACHE_STRIPE_BITS;
-    static constexpr size_t CACHE_STRIPE_MASK = CACHE_STRIPE_COUNT - 1;
-    mutable std::array<std::shared_mutex, CACHE_STRIPE_COUNT> vectorCacheStripeMutexes_;
+    std::atomic<uint8_t>* slotLife_ = nullptr;
     
     static constexpr idInt INVALID_ID = static_cast<idInt>(-1);
 
-    std::shared_mutex& getCacheStripeMutex(size_t cache_index) const {
-        size_t stripe_id = cache_index & CACHE_STRIPE_MASK;
-        return vectorCacheStripeMutexes_[stripe_id];
-    }
+    static constexpr uint8_t SLOT_LIFE_INVALID = 0;
+    static constexpr uint8_t SLOT_LIFE_COLD = 1;
+    static constexpr uint8_t SLOT_LIFE_WARM = 2;
+    static constexpr uint8_t SLOT_LIFE_HOT = 3;
 
 public:
     VectorCache() = default;
@@ -72,12 +63,20 @@ public:
             delete[] vectorCache_;
             vectorCache_ = nullptr;
         }
+        if (slotLife_) {
+            delete[] slotLife_;
+            slotLife_ = nullptr;
+        }
     }
     
     void init(size_t data_size, size_t cache_bits) {
         if (vectorCache_) {
             delete[] vectorCache_;
             vectorCache_ = nullptr;
+        }
+        if (slotLife_) {
+            delete[] slotLife_;
+            slotLife_ = nullptr;
         }
 
         if (cache_bits == 0) {
@@ -93,88 +92,120 @@ public:
         cacheBits_ = cache_bits;
         cacheSize_ = 1 << cacheBits_;
         cacheMask_ = cacheSize_ - 1;
-        // Layout: [idInt] [uint8_t counter] [data...]
-        vectorCacheDataSize_ = data_size_ + sizeof(idInt) + sizeof(uint8_t);
+        vectorCacheDataSize_ = data_size_ + sizeof(idInt);
         
         vectorCache_ = new uint8_t[cacheSize_ * vectorCacheDataSize_];
+        slotLife_ = new std::atomic<uint8_t>[cacheSize_];
         
         // Initialize all entries to INVALID_ID
         for (size_t i = 0; i < cacheSize_; i++) {
-            uint8_t* entry = vectorCache_ + i * vectorCacheDataSize_;
-            idInt* id_ptr = reinterpret_cast<idInt*>(entry);
+            idInt* id_ptr = reinterpret_cast<idInt*>(vectorCache_ + i * vectorCacheDataSize_);
             *id_ptr = INVALID_ID;
-            // Also zero out counter/data for cleanliness
-            *(entry + sizeof(idInt)) = 0;
+            slotLife_[i].store(SLOT_LIFE_INVALID, std::memory_order_relaxed);
         }
     }
     
-    bool get(idInt internal_id, uint8_t* buffer) const {
-        if (!vectorCache_) return false;
-        
-        size_t index = internal_id & cacheMask_;
-        uint8_t* entry = vectorCache_ + index * vectorCacheDataSize_;
-        
-        std::shared_lock<std::shared_mutex> lock(getCacheStripeMutex(index));
-        
-        idInt* stored_id = reinterpret_cast<idInt*>(entry);
-        if (*stored_id == internal_id) {
-            // Hit! Reset counter to MAX_COUNTER (stickiness)
-            // Optimization: Only write if currently different to avoid cache line invalidation (False Sharing)
-            uint8_t* counter_ptr = entry + sizeof(idInt);
-            auto atomic_counter = reinterpret_cast<std::atomic<uint8_t>*>(counter_ptr);
-            
-            if (atomic_counter->load(std::memory_order_relaxed) < MAX_COUNTER) {
-                 atomic_counter->store(MAX_COUNTER, std::memory_order_relaxed);
-            }
+    size_t getCacheIndex(idInt internal_id) const {
+        return internal_id & cacheMask_;
+    }
 
-            memcpy(buffer, entry + sizeof(idInt) + sizeof(uint8_t), data_size_);
-            return true;
+    // Not thread-safe. Caller must hold the appropriate cache stripe lock.
+    const uint8_t* getPointer(idInt internal_id) {
+        if (!vectorCache_ || !slotLife_) return nullptr;
+
+        size_t index = getCacheIndex(internal_id);
+        
+        // If life is invalid, we treat it as a miss regardless of ID
+        if (slotLife_[index].load(std::memory_order_relaxed) == SLOT_LIFE_INVALID) {
+            return nullptr;
         }
-        return false;
+
+        uint8_t* entry = vectorCache_ + index * vectorCacheDataSize_;
+        idInt* stored_id = reinterpret_cast<idInt*>(entry);
+        if (*stored_id != internal_id) {
+            return nullptr;
+        }
+
+        slotLife_[index].store(SLOT_LIFE_HOT, std::memory_order_relaxed);
+        return entry + sizeof(idInt);
     }
-    
+
+    // Not thread-safe. Caller must hold the appropriate cache stripe lock.
+    const uint8_t* getPointer(idInt internal_id) const {
+        return const_cast<VectorCache*>(this)->getPointer(internal_id);
+    }
+
+    // Not thread-safe. Caller must hold the appropriate cache stripe lock.
     void insert(idInt internal_id, const uint8_t* data) {
-        if (!vectorCache_) return;
+        if (!vectorCache_ || !slotLife_) return;
         
-        size_t index = internal_id & cacheMask_;
+        size_t index = getCacheIndex(internal_id);
         uint8_t* entry = vectorCache_ + index * vectorCacheDataSize_;
-        
-        std::unique_lock<std::shared_mutex> lock(getCacheStripeMutex(index));
-        
+
         idInt* stored_id = reinterpret_cast<idInt*>(entry);
-        // Use atomic consistently to avoid UB, though we are under unique_lock
-        auto atomic_counter = reinterpret_cast<std::atomic<uint8_t>*>(entry + sizeof(idInt));
-        uint8_t* data_ptr = entry + sizeof(idInt) + sizeof(uint8_t);
+
+        // Same id: refresh value and restore life.
+        if (*stored_id == internal_id) {
+            memcpy(entry + sizeof(idInt), data, data_size_);
+            slotLife_[index].store(SLOT_LIFE_HOT, std::memory_order_relaxed);
+            return;
+        }
+
+        // Different id: three-life policy (eviction protocol).
+        // life == SLOT_LIFE_HOT (3) -> demote to WARM (2), do not replace now.
+        // life == SLOT_LIFE_WARM (2) -> demote to COLD (1), do not replace now.
+        // life == SLOT_LIFE_COLD (1) or INVALID (0) -> replace slot and set life to WARM (2)
+        // Newly inserted items start as WARM. They must be accessed again to become HOT.
+        uint8_t life = slotLife_[index].load(std::memory_order_relaxed);
+        if (life == SLOT_LIFE_HOT) {
+            slotLife_[index].store(SLOT_LIFE_WARM, std::memory_order_relaxed);
+            return;
+        } else if (life == SLOT_LIFE_WARM) {
+            slotLife_[index].store(SLOT_LIFE_COLD, std::memory_order_relaxed);
+            return;
+        }
+
+        *stored_id = internal_id;
+        memcpy(entry + sizeof(idInt), data, data_size_);
+        slotLife_[index].store(SLOT_LIFE_WARM, std::memory_order_relaxed);
+    }
+
+    // Not thread-safe. Caller must hold the appropriate cache stripe lock.
+    void update(idInt internal_id, const uint8_t* data) {
+        if(!vectorCache_ || !slotLife_) return;
+
+        size_t index = getCacheIndex(internal_id);
+        uint8_t* entry = vectorCache_ + index * vectorCacheDataSize_;
+        idInt* stored_id = reinterpret_cast<idInt*>(entry);
+
+        if(*stored_id != internal_id) {
+            return;
+        }
+
+        *stored_id = internal_id;
+        memcpy(entry + sizeof(idInt), data, data_size_);
+        slotLife_[index].store(1, std::memory_order_relaxed);
+    }
+
+    // Atomically invalidate the slot for a given id, forcing a fetch on the next read.
+    // Thread-safe without a cache stripe lock due to atomic memory ordering, 
+    // provided the caller accepts eventual consistency (next reader will miss and lock to fetch).
+    void invalidateSlot(idInt internal_id) {
+        if(!vectorCache_ || !slotLife_) return;
+
+        size_t index = getCacheIndex(internal_id);
+
+        // Only invalidate if the slot currently belongs to this ID, preventing us from accidentally 
+        // invalidating another vector if an eviction happened between our read and invalidate.
+        uint8_t* entry = vectorCache_ + index * vectorCacheDataSize_;
+        idInt* stored_id = reinterpret_cast<idInt*>(entry);
 
         if (*stored_id == internal_id) {
-            // Update existing
-            atomic_counter->store(MAX_COUNTER, std::memory_order_relaxed);
-            memcpy(data_ptr, data, data_size_);
-            return;
+            // Note: Data race risk with readers. Even if we set slotLife to INVALID right now, 
+            // a reader might have just checked slotLife and is now about to read `stored_id`.
+            // Because of this, we set slotLife so FUTURE readers instantly miss.
+            slotLife_[index].store(SLOT_LIFE_INVALID, std::memory_order_release);
         }
-        
-        if (*stored_id == INVALID_ID) {
-            // Empty slot
-            *stored_id = internal_id;
-            atomic_counter->store(MAX_COUNTER, std::memory_order_relaxed);
-            memcpy(data_ptr, data, data_size_);
-            return;
-        }
-
-        // Collision with different vector
-        uint8_t c = atomic_counter->load(std::memory_order_relaxed);
-        if (c > 0) {
-            c--;
-            atomic_counter->store(c, std::memory_order_relaxed);
-        }
-        
-        if (c == 0) {
-            // Replace
-            *stored_id = internal_id;
-            atomic_counter->store(MAX_COUNTER, std::memory_order_relaxed);
-            memcpy(data_ptr, data, data_size_);
-        }
-        // Else: reject new vector, keep old one (thrashing protection)
     }
     
     size_t getCacheBits() const { return cacheBits_; }

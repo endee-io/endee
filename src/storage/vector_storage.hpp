@@ -209,6 +209,40 @@ public:
         }
     }
 
+    // Batch fetch: retrieves multiple vectors in a single MDBX read transaction.
+    // labels: array of external numeric IDs to fetch
+    // buffers: pre-allocated flat buffer of size (count * bytes_per_vector_)
+    // success: output array of bool indicating which fetches succeeded
+    // Returns number of successful fetches
+    size_t get_vectors_batch_into(const ndd::idInt* labels, uint8_t* buffers,
+                                  bool* success, size_t count) const {
+        if(count == 0) return 0;
+
+        MDBX_txn* txn;
+        int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_RDONLY, &txn);
+        if(rc != MDBX_SUCCESS) {
+            for(size_t i = 0; i < count; i++) success[i] = false;
+            return 0;
+        }
+
+        size_t fetched = 0;
+        for(size_t i = 0; i < count; i++) {
+            MDBX_val key{const_cast<ndd::idInt*>(&labels[i]), sizeof(ndd::idInt)};
+            MDBX_val data;
+            rc = mdbx_get(txn, dbi_, &key, &data);
+            if(rc == MDBX_SUCCESS && data.iov_len == bytes_per_vector_) {
+                std::memcpy(buffers + i * bytes_per_vector_, data.iov_base, bytes_per_vector_);
+                success[i] = true;
+                fetched++;
+            } else {
+                success[i] = false;
+            }
+        }
+
+        mdbx_txn_abort(txn);
+        return fetched;
+    }
+
     // Batch operations with raw bytes
     void
     store_vectors_batch(const std::vector<std::pair<ndd::idInt, std::vector<uint8_t>>>& batch) {
@@ -679,6 +713,12 @@ public:
 
     bool get_vector(ndd::idInt numeric_id, uint8_t* buffer) const {
         return vector_store_->get_vector_bytes(numeric_id, buffer);
+    }
+
+    // Batch fetch: multiple vectors in one MDBX txn
+    size_t get_vectors_batch_into(const ndd::idInt* labels, uint8_t* buffers,
+                                  bool* success, size_t count) const {
+        return vector_store_->get_vectors_batch_into(labels, buffers, success, count);
     }
 
     std::vector<std::pair<ndd::idInt, std::vector<uint8_t>>>

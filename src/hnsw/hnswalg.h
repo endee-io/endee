@@ -44,6 +44,15 @@ namespace hnswlib {
                                                 std::vector<distance_type>,
                                                 CompareBySecond<distance_type>>;
         using VectorFetcher = std::function<bool(idInt, uint8_t*)>;
+        // Batch fetcher: fetches multiple vectors in one MDBX txn
+        // Args: labels array, output buffers (flat, count*vector_size), success flags, count
+        // Returns: number of successful fetches
+        using VectorFetcherBatch = std::function<size_t(const idInt*, uint8_t*, bool*, size_t)>;
+        using SimBatchFunc = void (*)(const void* query,
+                          const void* const* vectors,
+                          size_t count,
+                          const void* params,
+                          float* out);
 
     public:
         // Constructors and destructor
@@ -91,29 +100,12 @@ namespace hnswlib {
             size_t cache_bits = VectorCache::calculateCacheBits(maxElements_);
             if (cache_bits > 0) {
                 vector_cache_ = std::make_unique<VectorCache>(data_size_, cache_bits);
-                LOG_DEBUG("Vector cache initialized for " << maxElements_ << " elements with " << (1 << cache_bits) << " slots");
+                LOG_DEBUG("Vector cache initialized for " << maxElements_ << " elements with " << (1ULL << cache_bits) << " slots");
+                size_t cache_bytes = vector_cache_->getMemoryUsage();
+                LOG_DEBUG("Vector cache allocated: " << cache_bytes << " bytes (" << (cache_bytes / MB) << " MB)");
             }
 
-            // Initialize upper layer space
-            bool use_hybrid = true;
-            if(quant_level_ == ndd::quant::QuantizationLevel::BINARY) {
-                use_hybrid = false;
-            }
-
-            if(use_hybrid) {
-                space_upper_ = std::unique_ptr<SpaceInterface<float>>(createSpace<float>(
-                        space_type_, dimension_, ndd::quant::QuantizationLevel::INT8));
-                LOG_DEBUG("Upper layer initialized with Hybrid Quantization (INT8)");
-            } else {
-                space_upper_ = std::unique_ptr<SpaceInterface<float>>(
-                        createSpace<float>(space_type_, dimension_, quant_level_));
-                LOG_DEBUG("Upper layer initialized with same space as base layer");
-            }
-
-            data_size_upper_ = space_upper_->get_data_size();
-            fstSimFuncUpper_ = space_upper_->get_sim_func();
-            dist_func_param_upper_ = space_upper_->get_dist_func_param();
-            LOG_DEBUG("Upper layer data size: " << data_size_upper_);
+            LOG_DEBUG("Unified layer data size: " << data_size_);
 
             // M_ cannot be more than settings::MAX_M
             if(M_ > settings::MAX_M) {
@@ -166,6 +158,7 @@ namespace hnswlib {
         SpaceInterface<dist_t>* getSpace() const { return space_.get(); }
         size_t getDataSize() const { return data_size_; }
         void setVectorFetcher(VectorFetcher fetcher) { vector_fetcher_ = fetcher; }
+        void setVectorFetcherBatch(VectorFetcherBatch fetcher) { vector_fetcher_batch_ = fetcher; }
         size_t getDimension() const { return dimension_; }
         size_t getM() const { return M_; }
         size_t getEfConstruction() const { return efConstruction_; }
@@ -189,29 +182,15 @@ namespace hnswlib {
             // Approximate level > 0 count
             size_t upper_layer_estimate = maxElements_ / M_;
 
-            // Upper layer calculation using runtime data size
-            size += upper_layer_estimate
-                    * (data_size_upper_ + sizeof(levelInt) + sizeLinksUpperLayers_);
+                // Upper layer calculation using runtime data size
+                size += upper_layer_estimate
+                    * (data_size_ + sizeof(levelInt) + sizeLinksUpperLayers_);
 
             if (vector_cache_) {
                 size += vector_cache_->getMemoryUsage();
             }
 
             return size / GB;  // GB
-        }
-
-        // Helper to get data representation for upper layers
-        std::vector<uint8_t> getUpperLayerRepresentation(const void* datapoint) {
-            if(data_size_upper_ == data_size_) {
-                // If sizes match, just copy (No hybrid quantization or Same Space)
-                std::vector<uint8_t> res(data_size_);
-                memcpy(res.data(), datapoint, data_size_);
-                return res;
-            }
-
-            // Hybrid quantization enabled (INT8)
-            auto dispatch = ndd::quant::get_quantizer_dispatch(quant_level_);
-            return dispatch.quantize_to_int8(datapoint, dimension_);
         }
 
         // Cache management getters/setters
@@ -224,7 +203,6 @@ namespace hnswlib {
                   size_t ef,
                   FilterFunctor* isIdAllowed,
                   size_t filter_boost_percentage = settings::FILTER_BOOST_PERCENTAGE) const { // Default true as requested
-            int x = 0;
             LOG_DEBUG("Inside searchKnn, element count: " << curElementsCount_);
             std::vector<std::pair<dist_t, idInt>> result;
             if(curElementsCount_ == 0) {
@@ -234,25 +212,19 @@ namespace hnswlib {
             idhInt currObj = entryPoint_;
             dist_t curSim;
 
-            // Prepare query data for upper layers
-            std::vector<uint8_t> query_data_upper;
             if(maxLevel_ > 0) {
-                query_data_upper =
-                        const_cast<HierarchicalNSW*>(this)->getUpperLayerRepresentation(query_data);
-
                 // Use direct pointer for upper layers
                 const uint8_t* ep_data = getUpperLayerDataPtr(currObj);
                 if(!ep_data) {
                     return result;
                 }
 
-                curSim = fstSimFuncUpper_(
-                        query_data_upper.data(), ep_data, dist_func_param_upper_);
+                curSim = fstSimFunc_(query_data, ep_data, dist_func_param_);
             }
 
             dist_t s;
-            // Upper layer traversal - greedy search
-            for(levelInt level = maxLevel_; level > 1; level--) {
+            // Upper layer traversal - greedy search (levels maxLevel_ down to 1)
+            for(levelInt level = maxLevel_; level > 0; level--) {
                 bool changed = true;
                 while(changed) {
                     changed = false;
@@ -266,6 +238,11 @@ namespace hnswlib {
                     int size = getListCount(ll_cur);
                     idhInt* data = (idhInt*)(ll_cur + 1);
 
+                    std::vector<idhInt> valid_candidates;
+                    valid_candidates.reserve(size);
+                    std::vector<const void*> candidate_ptrs;
+                    candidate_ptrs.reserve(size);
+
                     for(int i = 0; i < size; i++) {
                         idhInt candidate = data[i];
                         if(candidate >= curElementsCount_) {
@@ -276,12 +253,27 @@ namespace hnswlib {
                         if(!candidate_data) {
                             continue;
                         }
-                        s = fstSimFuncUpper_(
-                                query_data_upper.data(), candidate_data, dist_func_param_upper_);
 
+                        valid_candidates.push_back(candidate);
+                        candidate_ptrs.push_back(candidate_data);
+                    }
+
+                    if(valid_candidates.empty()) {
+                        continue;
+                    }
+
+                    std::vector<dist_t> sims;
+                    computeBatchSimilaritiesFromPtrs(query_data,
+                                                     candidate_ptrs,
+                                                     fstSimFunc_,
+                                                     dist_func_param_,
+                                                     sims);
+
+                    for(size_t i = 0; i < valid_candidates.size(); ++i) {
+                        s = sims[i];
                         if(s > curSim) {
                             curSim = s;
-                            currObj = candidate;
+                            currObj = valid_candidates[i];
                             changed = true;
                         }
                     }
@@ -290,17 +282,7 @@ namespace hnswlib {
 
             std::vector<idhInt> entry_points;
             if (maxLevel_ > 0) {
-                 std::vector<idhInt> l1_eps = {currObj};
-                 std::vector<std::pair<dist_t, idhInt>> l1_res;
-                 if(deletedElementsCount_) {
-                     l1_res = searchBaseLayer<false, true, FilterFunctor>(l1_eps, query_data, 1, M_, isIdAllowed, filter_boost_percentage);
-                 } else {
-                     l1_res = searchBaseLayer<false, false, FilterFunctor>(l1_eps, query_data, 1, M_, isIdAllowed, filter_boost_percentage);
-                 }
-                 
-                 for(size_t i = 0; i < std::min((size_t)2, l1_res.size()); ++i) {
-                     entry_points.push_back(l1_res[i].second);
-                 }
+                entry_points.push_back(currObj);
             } else {
                 entry_points.push_back(entryPoint_);
             }
@@ -380,9 +362,8 @@ namespace hnswlib {
                     continue;
                 }
 
-                // Use data_size_upper_
-                level = *reinterpret_cast<levelInt*>(dataUpperLayer_[i].get() + data_size_upper_);
-                total_size = data_size_upper_ + sizeof(levelInt) + level * sizeLinksUpperLayers_;
+                level = *reinterpret_cast<levelInt*>(dataUpperLayer_[i].get() + data_size_);
+                total_size = data_size_ + sizeof(levelInt) + level * sizeLinksUpperLayers_;
 
                 writeBinaryPOD(output, static_cast<idhInt>(i));  // write ID
                 output.write(reinterpret_cast<char*>(dataUpperLayer_[i].get()),
@@ -449,30 +430,13 @@ namespace hnswlib {
             fstSimFunc_ = space_->get_sim_func();
             dist_func_param_ = space_->get_dist_func_param();
 
-            // Initialize upper layer space
-            bool use_hybrid = true;
-            if(quant_level_ == ndd::quant::QuantizationLevel::BINARY) {
-                use_hybrid = false;
-            }
-
-            if(use_hybrid) {
-                space_upper_ = std::unique_ptr<SpaceInterface<float>>(createSpace<float>(
-                        space_type_, dimension_, ndd::quant::QuantizationLevel::INT8));
-            } else {
-                space_upper_ = std::unique_ptr<SpaceInterface<float>>(
-                        createSpace<float>(space_type_, dimension_, quant_level_));
-            }
-
             // Initialize cache for loaded index
             size_t cache_bits = VectorCache::calculateCacheBits(maxElements_);
+            LOG_INFO("Calculated cache bits for loaded index: " << cache_bits);
             if (cache_bits > 0) {
                  vector_cache_ = std::make_unique<VectorCache>(data_size_, cache_bits);
-                 LOG_DEBUG("Vector cache initialized for " << maxElements_ << " elements with " << (1 << cache_bits) << " slots");
+                 LOG_DEBUG("Vector cache initialized for " << maxElements_ << " elements with " << (1ULL << cache_bits) << " slots");
             }
-
-              data_size_upper_ = space_upper_->get_data_size();
-            fstSimFuncUpper_ = space_upper_->get_sim_func();
-            dist_func_param_upper_ = space_upper_->get_dist_func_param();
 
             // Allocate memory and load level 0 data
             dataBaseLayer_ = (char*)malloc(maxElements_ * sizeDataAtBaseLayer_);
@@ -515,7 +479,7 @@ namespace hnswlib {
 
                 size_t header_size;
                 // Step 1: Read vector + level header
-                header_size = data_size_upper_ + sizeof(levelInt);
+                header_size = data_size_ + sizeof(levelInt);
 
                 std::vector<uint8_t> header_buf(header_size);
                 input.read(reinterpret_cast<char*>(header_buf.data()), header_size);
@@ -524,7 +488,7 @@ namespace hnswlib {
                 }
 
                 levelInt level;
-                level = *reinterpret_cast<levelInt*>(header_buf.data() + data_size_upper_);
+                level = *reinterpret_cast<levelInt*>(header_buf.data() + data_size_);
 
                 size_t total_size = header_size + level * sizeLinksUpperLayers_;
 
@@ -554,21 +518,15 @@ namespace hnswlib {
             // VECTOR_CACHE_PERCENTAGE) adjustCacheForElementCount(curElementsCount_);
         }
 
-        // Adjust cache bits based on element count and percentage threshold
-        // cache_percent: percentage of element count the cache should cover (e.g., 5 for 5%)
-        // void adjustCacheForElementCount(size_t element_count) {
-        // Cache adjustment is now handled externally or disabled
-        // }
 
         template <bool is_new> void addPoint(const void* datapoint, idInt label) {
             LOG_TIME("addPoint");
 
-            // Generate upper layer representation
-            std::vector<uint8_t> datapoint_upper = getUpperLayerRepresentation(datapoint);
+            std::unique_lock<std::shared_mutex> update_lock(index_lock_, std::defer_lock);
 
-            //std::shared_lock<std::shared_mutex> lock(index_lock_);
             idhInt cur_c = 0;
             levelInt curLevel = 0;
+            idhInt update_seed = INVALID_ID;
             if(is_new) {
                 // Adding a new point
                 // Using fetch_add (or post-increment) ensures unique IDs even under contention.
@@ -586,33 +544,65 @@ namespace hnswlib {
             } else {
                 idhInt searchId = labelLookup_[label];
                 if(searchId != INVALID_ID) {
+                    if(searchId == entryPoint_) {
+                        update_lock.lock();
+                    }
+
                     // If the element is deleted, mark is undeleted first before calling update
                     // point
                     if(isMarkedDeleted(searchId)) {
                         unmarkDeletedInternal(searchId);
                     }
                     curLevel = getElementLevel(searchId);
-                    removeAllConnections(searchId, curLevel);
+
+                    // If we're updating the current entry point, pick an alternate traversal seed
+                    // before disconnecting this node. Starting from a just-disconnected entry
+                    // point can degrade into self-only reinsertion.
+                    if(searchId == entryPoint_) {
+                        // Scan from higher levels down, and accept the first valid non-deleted neighbor.
+                        for(int level = curLevel; level >= 0 && update_seed == INVALID_ID; --level) {
+                            idhInt* ll_self = reinterpret_cast<idhInt*>(
+                                    level == 0 ? get_linklist0(searchId)
+                                               : get_linklist(searchId, level));
+                            if(!ll_self) {
+                                continue;
+                            }
+                            idhInt sz = getListCount(ll_self);
+                            idhInt* neighbors = ll_self + 1;
+                            for(idhInt i = 0; i < sz; ++i) {
+                                idhInt candidate = neighbors[i];
+                                if(candidate == searchId || candidate >= curElementsCount_) {
+                                    continue;
+                                }
+                                if(isMarkedDeleted(candidate)) {
+                                    continue;
+                                }
+                                update_seed = candidate;
+                                break;
+                            }
+                        }
+
+                    }
+
+                    removeAllConnections2(searchId, curLevel);
                     cur_c = searchId;
                 } else {
                     LOG_DEBUG("Label not found, can't update the point" << label);
                     return;
                 }
             }
-            // TODO - Check this ..is it thread safe to comment this
-
-            // Put the data in cache. Will speed up initial data load
-            if (curLevel == 0 && vector_cache_) {
-                vector_cache_->insert(cur_c, static_cast<const uint8_t*>(datapoint));
+            // Update cached value only if this id is already present in cache.
+            // Do not insert on add/update path; cold ids can be populated on read hot path.
+            if constexpr(!is_new) {
+                if(vector_cache_) {
+                    // Fast atomic invalidation instead of taking a cache lock that can deadlock.
+                    // The cache will automatically refresh this vector on the next read miss.
+                    vector_cache_->invalidateSlot(cur_c);
+                }
             }
 
             // std::unique_lock <std::shared_mutex> lock_el(getLinkListMutex(cur_c));
 
-            // Put the data in level 0 memory.
-            // if (curLevel == 0) {
-            //      memcpy(dataBaseLayer_ + cur_c * sizeDataAtBaseLayer_ + sizeDataAtBaseLayer_ -
-            //      data_size_, datapoint, data_size_);
-            // }
             // Initialize level 0 links
             // TODO - check if it is required
             {
@@ -624,15 +614,15 @@ namespace hnswlib {
             size_t total_size;
             if(curLevel > 0) {
 
-                total_size = data_size_upper_ + sizeof(levelInt) + curLevel * sizeLinksUpperLayers_;
+                total_size = data_size_ + sizeof(levelInt) + curLevel * sizeLinksUpperLayers_;
 
                 auto mem = std::make_unique<uint8_t[]>(total_size);
 
-                // copy vector
-                memcpy(mem.get(), datapoint_upper.data(), data_size_upper_);
-                memcpy(mem.get() + data_size_upper_, &curLevel, sizeof(levelInt));
+                                // copy vector
+                                memcpy(mem.get(), datapoint, data_size_);
+                                memcpy(mem.get() + data_size_, &curLevel, sizeof(levelInt));
                 // zero initialize linklists
-                memset(mem.get() + data_size_upper_ + sizeof(levelInt),
+                                memset(mem.get() + data_size_ + sizeof(levelInt),
                        0,
                        curLevel * sizeLinksUpperLayers_);
 
@@ -645,11 +635,13 @@ namespace hnswlib {
 
                 // IMPORTANT: Check if this element has a higher level than the current max
                 bool has_higher_level = (curLevel > maxlevelcopy);
-                idhInt currObj = entryPoint_;
+                idhInt currObj = (update_seed != INVALID_ID) ? update_seed : entryPoint_;
+                levelInt seed_level = getElementLevel(currObj);
+                levelInt start_search_level = std::min(maxlevelcopy, seed_level);
 
                 // Traverse to find closest neighbors at each level
                 // Greedy search till the current level
-                for(int level = maxlevelcopy; level > curLevel; level--) {
+                for(int level = start_search_level; level > curLevel; level--) {
                     bool changed = true;
                     while(changed) {
                         changed = false;
@@ -661,25 +653,23 @@ namespace hnswlib {
                         int size = getListCount((idhInt*)ll_cur);
                         idhInt* datal = (idhInt*)(ll_cur + 1);
 
-                        std::vector<uint8_t> curr_vec(data_size_upper_);
-                        if(!getDataByInternalId(currObj, level, curr_vec.data())) {
+                        const uint8_t* curr_data = getUpperLayerDataPtr(currObj);
+                        if(!curr_data) {
                             continue;
                         }
 
-                        dist_t curr_sim = fstSimFuncUpper_(datapoint_upper.data(),
-                                                           curr_vec.data(),
-                                                           dist_func_param_upper_);
+                        dist_t curr_sim = fstSimFunc_(datapoint, curr_data, dist_func_param_);
 
                         for(int i = 0; i < size; i++) {
                             idhInt candidate_id = datal[i];
                             dist_t s;
-                            std::vector<uint8_t> candidate_vec(data_size_upper_);
-                            if(!getDataByInternalId(candidate_id, level, candidate_vec.data())) {
+                            
+                            const uint8_t* candidate_data = getUpperLayerDataPtr(candidate_id);
+                            if(!candidate_data) {
                                 continue;
                             }
-                            s = fstSimFuncUpper_(datapoint_upper.data(),
-                                                 candidate_vec.data(),
-                                                 dist_func_param_upper_);
+                            
+                            s = fstSimFunc_(datapoint, candidate_data, dist_func_param_);
 
                             if(s > curr_sim) {
                                 curr_sim = s;
@@ -691,10 +681,11 @@ namespace hnswlib {
                 }
 
                 // Add connections from curLevel down to 0
-                for(int level = std::min(curLevel, maxlevelcopy); level >= 0; level--) {
+                levelInt connect_start_level = std::min(curLevel, start_search_level);
+                for(int level = connect_start_level; level >= 0; level--) {
                     std::vector<std::pair<dist_t, idhInt>> sorted_candidates;
                     
-                    const void* level_datapoint = (level == 0) ? datapoint : datapoint_upper.data();
+                    const void* level_datapoint = datapoint;
                     
                     std::vector<idhInt> cur_eps = {currObj};
                     if(deletedElementsCount_) {
@@ -776,11 +767,10 @@ namespace hnswlib {
         uint64_t flags_{0};  //Not using flags now. We can use it in future for various options
         std::unique_ptr<SpaceInterface<dist_t>> space_;
 
-        std::unique_ptr<SpaceInterface<dist_t>> space_upper_;
-
         size_t dimension_;
 
         VectorFetcher vector_fetcher_;
+        VectorFetcherBatch vector_fetcher_batch_;
         mutable std::shared_mutex index_lock_;
 
         size_t maxElements_{0};
@@ -817,13 +807,30 @@ namespace hnswlib {
         SIMFUNC<dist_t> fstSimFunc_;
         void* dist_func_param_{nullptr};
 
-        // Unified upper layer data parameters
-        size_t data_size_upper_{0};
-        SIMFUNC<dist_t> fstSimFuncUpper_;
-        void* dist_func_param_upper_{nullptr};
-
         // Cache for vectors
         mutable std::unique_ptr<VectorCache> vector_cache_;
+        static constexpr size_t CACHE_LOCK_STRIPE_BITS = 10; // 1024 striped locks in HNSW
+        static constexpr size_t CACHE_LOCK_STRIPE_COUNT = 1 << CACHE_LOCK_STRIPE_BITS;
+        static constexpr size_t CACHE_LOCK_STRIPE_MASK = CACHE_LOCK_STRIPE_COUNT - 1;
+        mutable std::array<std::shared_mutex, CACHE_LOCK_STRIPE_COUNT> vectorCacheLocks_;
+
+        struct CacheReadView {
+            std::shared_lock<std::shared_mutex> lock;
+            const uint8_t* data = nullptr;
+
+            explicit operator bool() const {
+                return data != nullptr;
+            }
+        };
+
+        std::shared_mutex& getCacheMutex(idhInt internal_id) const {
+            size_t cache_index = static_cast<size_t>(internal_id);
+            if(vector_cache_) {
+                cache_index = vector_cache_->getCacheIndex(internal_id);
+            }
+            size_t stripe_id = cache_index & CACHE_LOCK_STRIPE_MASK;
+            return vectorCacheLocks_[stripe_id];
+        }
 
     public:
         const VectorCache* getCache() const {
@@ -870,35 +877,230 @@ namespace hnswlib {
             return dataUpperLayer_[internal_id].get();
         }
 
-        // Modified function returning bool and filling buffer
-        bool getDataByInternalId(idhInt internal_id, levelInt layer, uint8_t* buffer) const {
+        // Modified function returning bool and filling buffer.
+        // For upper-layer vectors, data is returned zero-copy via cache_read_handle only.
+        // For layer 0, callers can optionally receive zero-copy cache hits via cache_read_handle.
+        bool getDataByInternalId(idhInt internal_id,
+                                 levelInt layer,
+                                 uint8_t* buffer,
+                                 CacheReadView* cache_read_handle = nullptr) const {
+            if(cache_read_handle) {
+                *cache_read_handle = CacheReadView();
+            }
+
+            const uint8_t* upper_ptr = getUpperLayerDataPtr(internal_id);
+            if(upper_ptr) {
+                if(cache_read_handle) {
+                    cache_read_handle->data = upper_ptr;
+                    return true;
+                }
+                return false;
+            }
+
             if(layer == 0) {
                 // Check cache first
-                if (vector_cache_ && vector_cache_->get(internal_id, buffer)) {
-                    return true;
+                if(vector_cache_) {
+                    if(cache_read_handle) {
+                        cache_read_handle->lock =
+                                std::shared_lock<std::shared_mutex>(getCacheMutex(internal_id));
+                        const uint8_t* cached_ptr = vector_cache_->getPointer(internal_id);
+                        if(cached_ptr) {
+                            cache_read_handle->data = cached_ptr;
+                            return true;
+                        }
+                        cache_read_handle->lock.unlock();
+                    }
+
+                    if(buffer) {
+                        std::shared_lock<std::shared_mutex> lock(getCacheMutex(internal_id));
+                        const uint8_t* cached_ptr = vector_cache_->getPointer(internal_id);
+                        if(cached_ptr) {
+                            memcpy(buffer, cached_ptr, data_size_);
+                            return true;
+                        }
+                    }
                 }
 
                 idInt external_label = getExternalLabel(internal_id);
-                if(vector_fetcher_) {
+                if(vector_fetcher_ && buffer) {
                     // Directly fetch to buffer
                     bool success = vector_fetcher_(external_label, buffer);
                     
                     // Populate cache on successful fetch
                     if (success && vector_cache_) {
-                         vector_cache_->insert(internal_id, buffer);
+                        std::unique_lock<std::shared_mutex> write_lock(getCacheMutex(internal_id), std::try_to_lock);
+                        if(write_lock.owns_lock()) {
+                            vector_cache_->insert(internal_id, buffer);
+                        }
                     }
                     return success;
                 }
                 return false;
-            } else {
-                // FALLBACK: ideally callers should use getUpperLayerDataPtr
-                if(dataUpperLayer_[internal_id] == nullptr) {
-                    return false;
-                }
-                memcpy(buffer, dataUpperLayer_[internal_id].get(), data_size_upper_);
-                return true;
             }
+
+            // layer > 0 path with no upper-layer blob available
             return false;
+        }
+
+        // Batch fetch for level 0: check upper-layer data/cache first, then fetch misses in one MDBX txn.
+        // internal_ids: array of internal IDs to fetch
+        // buffers: flat output buffer, count * data_size_ bytes
+        // success: output array of bools
+        // count: number of IDs
+        // data_ptrs: optional per-item pointers to fetched data (zero-copy for upper-layer)
+        void getDataByInternalIdBatch(const idhInt* internal_ids, uint8_t* buffers,
+                                       bool* success, size_t count,
+                                       const void** data_ptrs = nullptr) const {
+            // Phase 1: Check cache for all IDs, collect misses
+            std::vector<size_t> miss_indices;      // index into the batch
+            std::vector<idInt> miss_labels;         // external labels for MDBX lookup
+            miss_indices.reserve(count);
+            miss_labels.reserve(count);
+
+            for(size_t i = 0; i < count; i++) {
+                uint8_t* buf = buffers + i * data_size_;
+                if(data_ptrs) {
+                    data_ptrs[i] = nullptr;
+                }
+
+                const uint8_t* upper_ptr = getUpperLayerDataPtr(internal_ids[i]);
+                if(upper_ptr) {
+                    if(data_ptrs) {
+                        data_ptrs[i] = upper_ptr;
+                    } else {
+                        std::memcpy(buf, upper_ptr, data_size_);
+                    }
+                    success[i] = true;
+                    continue;
+                }
+
+                if(vector_cache_) {
+                    std::shared_lock<std::shared_mutex> lock(getCacheMutex(internal_ids[i]));
+                    const uint8_t* cached_ptr = vector_cache_->getPointer(internal_ids[i]);
+                    if(cached_ptr) {
+                        std::memcpy(buf, cached_ptr, data_size_);
+                        if(data_ptrs) {
+                            data_ptrs[i] = buf;
+                        }
+                        success[i] = true;
+                        continue;
+                    }
+                }
+
+                success[i] = false;
+                miss_indices.push_back(i);
+                miss_labels.push_back(getExternalLabel(internal_ids[i]));
+            }
+
+            // Phase 2: Batch fetch all misses in one MDBX txn
+            if(!miss_indices.empty() && vector_fetcher_batch_) {
+                // Temp buffers for the batch fetch
+                std::vector<uint8_t> miss_buffers(miss_indices.size() * data_size_);
+                auto miss_success = std::make_unique<bool[]>(miss_indices.size());
+                std::memset(miss_success.get(), 0, miss_indices.size() * sizeof(bool));
+
+                vector_fetcher_batch_(miss_labels.data(), miss_buffers.data(),
+                                      miss_success.get(), miss_indices.size());
+
+                // Phase 3: Copy results back and populate cache
+                for(size_t mi = 0; mi < miss_indices.size(); mi++) {
+                    size_t i = miss_indices[mi];
+                    if(miss_success[mi]) {
+                        uint8_t* buf = buffers + i * data_size_;
+                        std::memcpy(buf, miss_buffers.data() + mi * data_size_, data_size_);
+                        if(data_ptrs) {
+                            data_ptrs[i] = buf;
+                        }
+                        success[i] = true;
+                        // Populate cache
+                        if(vector_cache_) {
+                                std::unique_lock<std::shared_mutex> write_lock(
+                                    getCacheMutex(internal_ids[i]), std::try_to_lock);
+                            if(write_lock.owns_lock()) {
+                                vector_cache_->insert(internal_ids[i], buf);
+                            }
+                        }
+                    }
+                }
+            } else if(!miss_indices.empty() && vector_fetcher_) {
+                // Fallback: single-fetch for each miss
+                for(size_t mi = 0; mi < miss_indices.size(); mi++) {
+                    size_t i = miss_indices[mi];
+                    uint8_t* buf = buffers + i * data_size_;
+                    bool ok = vector_fetcher_(miss_labels[mi], buf);
+                    success[i] = ok;
+                    if(ok && data_ptrs) {
+                        data_ptrs[i] = buf;
+                    }
+                    if(ok && vector_cache_) {
+                        std::unique_lock<std::shared_mutex> write_lock(
+                                getCacheMutex(internal_ids[i]), std::try_to_lock);
+                        if(write_lock.owns_lock()) {
+                            vector_cache_->insert(internal_ids[i], buf);
+                        }
+                    }
+                }
+            }
+        }
+
+        SimBatchFunc resolveBatchSimFunc() const {
+            ndd::quant::QuantizerDispatch dispatch;
+            try {
+                dispatch = ndd::quant::get_quantizer_dispatch(quant_level_);
+            } catch(...) {
+                return nullptr;
+            }
+
+            switch(space_type_) {
+                case L2_SPACE:
+                    return dispatch.sim_l2_batch;
+                case IP_SPACE:
+                    return dispatch.sim_ip_batch;
+                case COSINE_SPACE:
+                    return dispatch.sim_cosine_batch;
+                default:
+                    return nullptr;
+            }
+        }
+
+        void computeBatchSimilaritiesFromPtrs(const void* query_data,
+                                              const std::vector<const void*>& vector_ptrs,
+                                              SIMFUNC<dist_t> fallback_sim_func,
+                                              void* dist_param,
+                                              std::vector<dist_t>& out_sims) const {
+            out_sims.clear();
+            if(vector_ptrs.empty()) {
+                return;
+            }
+
+            out_sims.resize(vector_ptrs.size());
+
+            SimBatchFunc batch_func = resolveBatchSimFunc();
+            if(!batch_func) {
+                for(size_t i = 0; i < vector_ptrs.size(); ++i) {
+                    out_sims[i] = fallback_sim_func(query_data, vector_ptrs[i], dist_param);
+                }
+                return;
+            }
+
+            if constexpr(std::is_same_v<dist_t, float>) {
+                batch_func(query_data,
+                           vector_ptrs.data(),
+                           vector_ptrs.size(),
+                           dist_param,
+                           out_sims.data());
+            } else {
+                std::vector<float> sim_out(vector_ptrs.size());
+                batch_func(query_data,
+                           vector_ptrs.data(),
+                           vector_ptrs.size(),
+                           dist_param,
+                           sim_out.data());
+
+                for(size_t i = 0; i < sim_out.size(); ++i) {
+                    out_sims[i] = static_cast<dist_t>(sim_out[i]);
+                }
+            }
         }
 
         char* get_linklist0(idhInt internal_id) const {
@@ -912,7 +1114,7 @@ namespace hnswlib {
             // int levels = getElementLevel(id);
             // if (level > levels) return nullptr;
             return reinterpret_cast<char*>(
-                    dataUpperLayer_[id].get() + data_size_upper_ + sizeof(levelInt)
+                    dataUpperLayer_[id].get() + data_size_ + sizeof(levelInt)
                     + (level - 1) * sizeLinksUpperLayers_
 
             );
@@ -939,7 +1141,7 @@ namespace hnswlib {
             if(!dataUpperLayer_[id]) {
                 return 0;
             }
-            return *reinterpret_cast<const levelInt*>(dataUpperLayer_[id].get() + data_size_upper_);
+            return *reinterpret_cast<const levelInt*>(dataUpperLayer_[id].get() + data_size_);
         }
 
         // This function is used to get the neighbors based on heuristic
@@ -960,12 +1162,17 @@ namespace hnswlib {
             fill_back_ids.reserve(candidates_sorted.size() - curM);
 
             // Generic awareness
-            auto curSimFunc = (level == 0) ? fstSimFunc_ : fstSimFuncUpper_;
-            auto curDistParam = (level == 0) ? dist_func_param_ : dist_func_param_upper_;
-            size_t curDataSize = (level == 0) ? data_size_ : data_size_upper_;
+            auto curSimFunc = fstSimFunc_;
+            auto curDistParam = dist_func_param_;
+            size_t curDataSize = data_size_;
 
             std::vector<uint8_t> cand_buf(curDataSize);      // Only used for level 0
-            std::vector<uint8_t> selected_buf(curDataSize);  // Only used for level 0
+            // Cache selected vectors to avoid redundant re-fetches in inner loop
+            // Without this, each selected vector is re-fetched O(candidates) times → O(M²) fetches
+            std::vector<std::vector<uint8_t>> selected_vecs_cache;  // Only used for level 0
+            if(level == 0) {
+                selected_vecs_cache.reserve(curM);
+            }
 
             for(const auto& candidate : candidates_sorted) {
                 if(result.size() == curM) {
@@ -973,9 +1180,15 @@ namespace hnswlib {
                 }
 
                 const void* cand_vec = nullptr;
+                CacheReadView cand_cache_handle;
                 if(level == 0) {
-                    if(getDataByInternalId(candidate.second, level, cand_buf.data())) {
-                        cand_vec = cand_buf.data();
+                    if(getDataByInternalId(candidate.second,
+                                           level,
+                                           cand_buf.data(),
+                                           &cand_cache_handle)) {
+                        cand_vec = cand_cache_handle
+                                   ? static_cast<const void*>(cand_cache_handle.data)
+                                   : static_cast<const void*>(cand_buf.data());
                     }
                 } else {
                     cand_vec = getUpperLayerDataPtr(candidate.second);
@@ -987,14 +1200,12 @@ namespace hnswlib {
 
                 bool good = true;
                 dist_t sim;
-                for(const auto& selected : result) {
+                for(size_t si = 0; si < result.size(); si++) {
                     const void* selected_vec_ptr = nullptr;
                     if(level == 0) {
-                        if(getDataByInternalId(selected.second, level, selected_buf.data())) {
-                            selected_vec_ptr = selected_buf.data();
-                        }
+                        selected_vec_ptr = selected_vecs_cache[si].data();
                     } else {
-                        selected_vec_ptr = getUpperLayerDataPtr(selected.second);
+                        selected_vec_ptr = getUpperLayerDataPtr(result[si].second);
                     }
 
                     if(!selected_vec_ptr) {
@@ -1011,6 +1222,12 @@ namespace hnswlib {
 
                 if(good) {
                     result.push_back(candidate);
+                    // Cache the vector data so inner loop never re-fetches it
+                    if(level == 0) {
+                        selected_vecs_cache.emplace_back(
+                            static_cast<const uint8_t*>(cand_vec),
+                            static_cast<const uint8_t*>(cand_vec) + curDataSize);
+                    }
                 } else {
                     fill_back_ids.push_back(candidate);
                 }
@@ -1045,9 +1262,9 @@ namespace hnswlib {
             size_t curM = level ? M_ : M0_;
 
             // Generic awareness
-            auto curSimFunc = (level == 0) ? fstSimFunc_ : fstSimFuncUpper_;
-            auto curDistParam = (level == 0) ? dist_func_param_ : dist_func_param_upper_;
-            size_t curDataSize = (level == 0) ? data_size_ : data_size_upper_;
+            auto curSimFunc = fstSimFunc_;
+            auto curDistParam = dist_func_param_;
+            size_t curDataSize = data_size_;
 
             auto selected = getNeighborsByHeuristic2(sorted_candidates, curM, level);
             if(selected.empty()) {  // the graph is empty or disconnected
@@ -1094,9 +1311,15 @@ namespace hnswlib {
                     setListCount(ll_other, sz + 1);
                 } else {
                     const void* neighbor_data = nullptr;
+                    CacheReadView neighbor_cache_handle;
                     if(level == 0) {
-                        if(getDataByInternalId(neighbor, level, neighbor_buf.data())) {
-                            neighbor_data = neighbor_buf.data();
+                        if(getDataByInternalId(neighbor,
+                                               level,
+                                               neighbor_buf.data(),
+                                               &neighbor_cache_handle)) {
+                            neighbor_data = neighbor_cache_handle
+                                            ? static_cast<const void*>(neighbor_cache_handle.data)
+                                            : static_cast<const void*>(neighbor_buf.data());
                         }
                     } else {
                         neighbor_data = getUpperLayerDataPtr(neighbor);
@@ -1115,9 +1338,15 @@ namespace hnswlib {
                     for(size_t j = 0; j < sz; j++) {
                         dist_t sim;
                         const void* other_neighbor_data = nullptr;
+                        CacheReadView other_cache_handle;
                         if(level == 0) {
-                            if(getDataByInternalId(data[j], level, data_buf.data())) {
-                                other_neighbor_data = data_buf.data();
+                            if(getDataByInternalId(data[j],
+                                                   level,
+                                                   data_buf.data(),
+                                                   &other_cache_handle)) {
+                                other_neighbor_data = other_cache_handle
+                                                      ? static_cast<const void*>(other_cache_handle.data)
+                                                      : static_cast<const void*>(data_buf.data());
                             }
                         } else {
                             other_neighbor_data = getUpperLayerDataPtr(data[j]);
@@ -1164,9 +1393,9 @@ namespace hnswlib {
             min_heap_pq top_candidates;
 
             // Generic awareness
-            auto curSimFunc = (layer == 0) ? fstSimFunc_ : fstSimFuncUpper_;
-            auto curDistParam = (layer == 0) ? dist_func_param_ : dist_func_param_upper_;
-            size_t curDataSize = (layer == 0) ? data_size_ : data_size_upper_;
+            auto curSimFunc = fstSimFunc_;
+            auto curDistParam = dist_func_param_;
+            size_t curDataSize = data_size_;
             std::vector<uint8_t> buffer;
             if(layer == 0) {
                 buffer.resize(curDataSize);
@@ -1184,9 +1413,15 @@ namespace hnswlib {
                 dist_t sim = std::numeric_limits<dist_t>::lowest();
                 if(!has_deletions || !isMarkedDeleted(ep_id)) {
                     const void* vec_data = nullptr;
+                    CacheReadView ep_cache_handle;
                     if(layer == 0) {
-                        if(getDataByInternalId(ep_id, layer, buffer.data())) {
-                            vec_data = buffer.data();
+                        if(getDataByInternalId(ep_id,
+                                               layer,
+                                               buffer.data(),
+                                               &ep_cache_handle)) {
+                            vec_data = ep_cache_handle
+                                       ? static_cast<const void*>(ep_cache_handle.data)
+                                       : static_cast<const void*>(buffer.data());
                         }
                     } else {
                         vec_data = getUpperLayerDataPtr(ep_id);
@@ -1276,83 +1511,151 @@ namespace hnswlib {
                 idhInt size = getListCount((idhInt*)data);
                 idhInt* datal = (idhInt*)(data + 1);
 
-                for(idhInt j = 0; j < size; j++) {
-                    idhInt candidate_id = *(datal + j);
-                    if(visited_array[candidate_id] == visited_array_tag) {
-                        continue;
-                    }
-                    visited_array[candidate_id] = visited_array_tag;
-                    if(has_deletions && isMarkedDeleted(candidate_id)) {
-                        continue;
+                // --- Batch prefetch path for layer 0 ---
+                if(layer == 0) {
+                    // Phase 1: Collect valid (non-visited, non-deleted) candidate IDs
+                    std::vector<idhInt> valid_ids;
+                    valid_ids.reserve(size);
+                    for(idhInt j = 0; j < size; j++) {
+                        idhInt candidate_id = *(datal + j);
+                        if(visited_array[candidate_id] == visited_array_tag) continue;
+                        visited_array[candidate_id] = visited_array_tag;
+                        if(has_deletions && isMarkedDeleted(candidate_id)) continue;
+                        valid_ids.push_back(candidate_id);
                     }
 
-                    dist_t sim;
-                    const void* neighbor_data = nullptr;
-                    if(layer == 0) {
-                        if(getDataByInternalId(candidate_id, layer, buffer.data())) {
-                            neighbor_data = buffer.data();
+                    if(valid_ids.empty()) continue;
+
+                    // Phase 2: Batch fetch all vectors
+                    std::vector<uint8_t> batch_buffers(valid_ids.size() * data_size_);
+                    std::vector<const void*> batch_ptrs(valid_ids.size(), nullptr);
+                    auto batch_success = std::make_unique<bool[]>(valid_ids.size());
+                    std::memset(batch_success.get(), 0, valid_ids.size() * sizeof(bool));
+                    getDataByInternalIdBatch(valid_ids.data(), batch_buffers.data(),
+                                             batch_success.get(), valid_ids.size(),
+                                             batch_ptrs.data());
+
+                    // Phase 3: Process fetched vectors
+                    std::vector<idhInt> pass_filter_candidate_ids;
+                    pass_filter_candidate_ids.reserve(valid_ids.size());
+                    std::vector<const void*> pass_filter_ptrs;
+                    pass_filter_ptrs.reserve(valid_ids.size());
+
+                    for(size_t vi = 0; vi < valid_ids.size(); vi++) {
+                        if(!batch_success[vi]) continue;
+
+                        idhInt candidate_id = valid_ids[vi];
+                        const void* neighbor_data = batch_ptrs[vi];
+                        if(!neighbor_data) {
+                            continue;
                         }
-                    } else {
-                        neighbor_data = getUpperLayerDataPtr(candidate_id);
+
+                        bool pass_filter = true;
+                        if constexpr(!std::is_same_v<FilterFunctor, void>) {
+                            if(filter != nullptr) {
+                                if(!(*filter)(getExternalLabel(candidate_id))) {
+                                    pass_filter = false;
+                                }
+                            }
+                        }
+
+                        if(!pass_filter) {
+                            if(dist_computations > fatigue_base) {
+                                size_t excess = dist_computations - fatigue_base;
+                                if(excess >= fatigue_tail) continue;
+                                size_t drop_prob = (excess * 255) / fatigue_tail;
+                                size_t hash = (candidate_id * 104729) & 0xFF;
+                                if(hash < drop_prob) continue;
+                            }
+
+                            dist_t sim = curSimFunc(data_point, neighbor_data, curDistParam);
+                            dist_computations++;
+                            if(top_candidates.size() < ef || sim > lowerBound) {
+                                candidate_set.emplace(sim, candidate_id);
+                            }
+                            continue;
+                        }
+
+                        pass_filter_candidate_ids.push_back(candidate_id);
+                        pass_filter_ptrs.push_back(neighbor_data);
                     }
 
-                    if(!neighbor_data) {
-                        continue;
-                    }
+                    std::vector<dist_t> pass_filter_sims;
+                    computeBatchSimilaritiesFromPtrs(data_point,
+                                             pass_filter_ptrs,
+                                             curSimFunc,
+                                             curDistParam,
+                                             pass_filter_sims);
 
-                    // Check filter BEFORE computing distance
-                    // Treats filtered nodes as non-existent (traverses a subgraph)
-                    bool pass_filter = true;
-                    if constexpr(!std::is_same_v<FilterFunctor, void>) {
-                        if (filter != nullptr) {
-                            if (!(*filter)(getExternalLabel(candidate_id))) {
-                                pass_filter = false;
+                    for(size_t pi = 0; pi < pass_filter_candidate_ids.size(); ++pi) {
+                        idhInt candidate_id = pass_filter_candidate_ids[pi];
+                        dist_t sim = pass_filter_sims[pi];
+                        dist_computations++;
+
+                        if(top_candidates.size() < ef || sim > lowerBound) {
+                            candidate_set.emplace(sim, candidate_id);
+                            if(!has_deletions || !isMarkedDeleted(candidate_id)) {
+                                top_candidates.emplace(sim, candidate_id);
+                                if(top_candidates.size() > ef) {
+                                    top_candidates.pop();
+                                }
+                                if(!top_candidates.empty()) {
+                                    lowerBound = top_candidates.top().first;
+                                }
                             }
                         }
                     }
+                } else {
+                    // --- Upper layer path: data is in-memory, no batching needed ---
+                    for(idhInt j = 0; j < size; j++) {
+                        idhInt candidate_id = *(datal + j);
+                        if(visited_array[candidate_id] == visited_array_tag) continue;
+                        visited_array[candidate_id] = visited_array_tag;
+                        if(has_deletions && isMarkedDeleted(candidate_id)) continue;
 
-                    if(!pass_filter) {
-                        // Check Fatigue
-                        if (dist_computations > fatigue_base) {
-                            // We are in the tapering region
-                            // Linearly increase drop probability from 0% to 100%.
-                            
-                            size_t excess = dist_computations - fatigue_base;
-                            
-                            if (excess >= fatigue_tail) {
-                                continue; // 100% drop (Hard Cap exceeded)
+                        const void* neighbor_data = getUpperLayerDataPtr(candidate_id);
+                        if(!neighbor_data) continue;
+
+                        bool pass_filter = true;
+                        if constexpr(!std::is_same_v<FilterFunctor, void>) {
+                            if (filter != nullptr) {
+                                if (!(*filter)(getExternalLabel(candidate_id))) {
+                                    pass_filter = false;
+                                }
                             }
-
-                            // Prob = Excess / Tail_Length
-                            size_t drop_prob = (excess * 255) / fatigue_tail; 
-                            
-                            size_t hash = (candidate_id * 104729) & 0xFF;
-                            if (hash < drop_prob) continue;
                         }
-                             
-                        // Explore
+
+                        dist_t sim;
+                        if(!pass_filter) {
+                            if (dist_computations > fatigue_base) {
+                                size_t excess = dist_computations - fatigue_base;
+                                if (excess >= fatigue_tail) continue;
+                                size_t drop_prob = (excess * 255) / fatigue_tail;
+                                size_t hash = (candidate_id * 104729) & 0xFF;
+                                if (hash < drop_prob) continue;
+                            }
+                            sim = curSimFunc(data_point, neighbor_data, curDistParam);
+                            dist_computations++;
+                            if (top_candidates.size() < ef || sim > lowerBound) {
+                                candidate_set.emplace(sim, candidate_id);
+                            }
+                            continue;
+                        }
+
                         sim = curSimFunc(data_point, neighbor_data, curDistParam);
                         dist_computations++;
-                        if (top_candidates.size() < ef || sim > lowerBound) {
+
+                        if(top_candidates.size() < ef || sim > lowerBound) {
                             candidate_set.emplace(sim, candidate_id);
-                        }
-                        continue;
-                    }
-
-                    sim = curSimFunc(data_point, neighbor_data, curDistParam);
-                    dist_computations++; // Count valid computations too
-
-                    if(top_candidates.size() < ef || sim > lowerBound) {
-                        candidate_set.emplace(sim, candidate_id);
-
-                        if(!has_deletions || !isMarkedDeleted(candidate_id)) {
-                             top_candidates.emplace(sim, candidate_id);
-                             if(top_candidates.size() > ef) {
-                                 top_candidates.pop();
-                             }
-                             if(!top_candidates.empty()) {
-                                 lowerBound = top_candidates.top().first;
-                             }
+                            if(!has_deletions || !isMarkedDeleted(candidate_id)) {
+                                top_candidates.emplace(sim, candidate_id);
+                                if(top_candidates.size() > ef) {
+                                    top_candidates.pop();
+                                }
+                                if(!top_candidates.empty()) {
+                                    lowerBound = top_candidates.top().first;
+                                }
+                            }
                         }
                     }
                 }
@@ -1368,6 +1671,8 @@ namespace hnswlib {
             std::reverse(sorted_candidates.begin(), sorted_candidates.end());
             return sorted_candidates;
         }
+        // This function removes all connections to and from the target element across all levels
+        // There is a new version removeAllConnections2 that tries to reconnect neighbors to each other instead of just removing the target element from their lists 
         void removeAllConnections(idhInt internal_id, levelInt elem_level) {
 
             for(int level = 0; level <= elem_level; ++level) {
@@ -1401,6 +1706,149 @@ namespace hnswlib {
                 // Now clear own links (make neighbor count 0)
                 std::unique_lock<std::shared_mutex> lock_self(getLinkListMutex(internal_id));
                 setListCount(ll_self, 0);
+            }
+        }
+        // This is a more efficient version of removeAllConnections that reconnects neighbors to each other  
+        // instead of just removing the target element from their lists
+        void removeAllConnections2(idhInt internal_id, levelInt elem_level) {
+            auto containsNeighborNoLock = [this](idhInt* linklist, idhInt target) {
+                idhInt sz = getListCount(linklist);
+                idhInt* data = linklist + 1;
+                for(idhInt i = 0; i < sz; ++i) {
+                    if(data[i] == target) {
+                        return true;
+                    }
+                }
+                return false;
+            };
+
+            auto connectPair = [&](idhInt left, idhInt right, levelInt level) {
+                if(left == right || left >= curElementsCount_ || right >= curElementsCount_) {
+                    return;
+                }
+
+                size_t max_degree = level ? M_ : M0_;
+                auto& left_mutex = getLinkListMutex(left);
+                auto& right_mutex = getLinkListMutex(right);
+
+                if(&left_mutex == &right_mutex) {
+                    std::unique_lock<std::shared_mutex> lock(left_mutex);
+
+                    idhInt* ll_left = (idhInt*)get_linklist(left, level);
+                    idhInt* ll_right = (idhInt*)get_linklist(right, level);
+                    if(!ll_left || !ll_right) {
+                        return;
+                    }
+
+                    if(containsNeighborNoLock(ll_left, right)
+                       || containsNeighborNoLock(ll_right, left)) {
+                        return;
+                    }
+
+                    idhInt left_sz = getListCount(ll_left);
+                    idhInt right_sz = getListCount(ll_right);
+                    if(left_sz >= static_cast<idhInt>(max_degree)
+                       || right_sz >= static_cast<idhInt>(max_degree)) {
+                        return;
+                    }
+
+                    (ll_left + 1)[left_sz] = right;
+                    (ll_right + 1)[right_sz] = left;
+                    setListCount(ll_left, left_sz + 1);
+                    setListCount(ll_right, right_sz + 1);
+                    return;
+                }
+
+                idhInt first_id = left < right ? left : right;
+                idhInt second_id = left < right ? right : left;
+
+                auto& first_mutex = getLinkListMutex(first_id);
+                auto& second_mutex = getLinkListMutex(second_id);
+
+                std::unique_lock<std::shared_mutex> first_lock(first_mutex);
+                std::unique_lock<std::shared_mutex> second_lock(second_mutex);
+
+                idhInt* ll_left = (idhInt*)get_linklist(left, level);
+                idhInt* ll_right = (idhInt*)get_linklist(right, level);
+                if(!ll_left || !ll_right) {
+                    return;
+                }
+                if(containsNeighborNoLock(ll_left, right)
+                   || containsNeighborNoLock(ll_right, left)) {
+                    return;
+                }
+
+                idhInt left_sz = getListCount(ll_left);
+                idhInt right_sz = getListCount(ll_right);
+                if(left_sz >= static_cast<idhInt>(max_degree)
+                   || right_sz >= static_cast<idhInt>(max_degree)) {
+                    return;
+                }
+
+                (ll_left + 1)[left_sz] = right;
+                (ll_right + 1)[right_sz] = left;
+                setListCount(ll_left, left_sz + 1);
+                setListCount(ll_right, right_sz + 1);
+            };
+
+            for(int level = 0; level <= elem_level; ++level) {
+                idhInt* ll_self = (idhInt*)get_linklist(internal_id, level);
+                if(!ll_self) {
+                    continue;
+                }
+                std::vector<idhInt> level_neighbors;
+
+                {
+                    std::unique_lock<std::shared_mutex> lock_self(getLinkListMutex(internal_id));
+
+                    idhInt size = getListCount(ll_self);
+                    idhInt* neighbors = (idhInt*)(ll_self + 1);
+                    level_neighbors.reserve(size);
+
+                    for(idhInt i = 0; i < size; ++i) {
+                        idhInt neighbor_id = neighbors[i];
+                        if(neighbor_id >= curElementsCount_ || neighbor_id == internal_id) {
+                            continue;
+                        }
+                        level_neighbors.push_back(neighbor_id);
+                    }
+
+                    setListCount(ll_self, 0);
+                }
+
+                std::sort(level_neighbors.begin(), level_neighbors.end());
+                level_neighbors.erase(
+                        std::unique(level_neighbors.begin(), level_neighbors.end()),
+                        level_neighbors.end());
+
+                for(idhInt neighbor_id : level_neighbors) {
+                    std::unique_lock<std::shared_mutex> lock_neighbor(getLinkListMutex(neighbor_id));
+                    idhInt* ll_other = (idhInt*)get_linklist(neighbor_id, level);
+                    if(!ll_other) {
+                        continue;
+                    }
+
+                    idhInt sz = getListCount(ll_other);
+                    idhInt* data = (idhInt*)(ll_other + 1);
+
+                    idhInt new_size = 0;
+                    for(idhInt j = 0; j < sz; ++j) {
+                        if(data[j] != internal_id) {
+                            data[new_size++] = data[j];
+                        }
+                    }
+                    setListCount(ll_other, new_size);
+                }
+
+                size_t left = 0;
+                if(!level_neighbors.empty()) {
+                    size_t right = level_neighbors.size() - 1;
+                    while(left < right) {
+                        connectPair(level_neighbors[left], level_neighbors[right], level);
+                        ++left;
+                        --right;
+                    }
+                }
             }
         }
     };

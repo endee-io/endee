@@ -465,6 +465,180 @@ namespace hnswlib {
                 return InnerProductSim(pVect1, pVect2, params_ptr);
             }
 
+            static constexpr size_t kBatchTileSizeF32 =
+#if defined(USE_AVX512)
+                    1024;
+#elif defined(USE_AVX2)
+                    512;
+#elif defined(USE_SVE2)
+                    512;
+#elif defined(USE_NEON)
+                    256;
+#else
+                    128;
+#endif
+
+            static void SimilarityBatchTiled(const void* query,
+                                             const void* const* vectors,
+                                             size_t count,
+                                             const void* params,
+                                             float* out,
+                                             bool l2_metric) {
+                if(count == 0) {
+                    return;
+                }
+
+                const DistParams* dist_params = reinterpret_cast<const DistParams*>(params);
+                const size_t dim = dist_params->dim;
+                const float* query_vec = reinterpret_cast<const float*>(query);
+
+                std::vector<float> dot_acc(count, 0.0f);
+                std::vector<float> vec_sq_acc;
+                if(l2_metric) {
+                    vec_sq_acc.assign(count, 0.0f);
+                }
+
+                float query_sq_acc = 0.0f;
+                const size_t tile = std::min(dim, kBatchTileSizeF32);
+
+                for(size_t block_start = 0; block_start < dim; block_start += tile) {
+                    const size_t block_len = std::min(tile, dim - block_start);
+                    const float* q_ptr = query_vec + block_start;
+
+                    for(size_t d = 0; d < block_len; ++d) {
+                        query_sq_acc += q_ptr[d] * q_ptr[d];
+                    }
+
+                    for(size_t i = 0; i < count; ++i) {
+                        const float* v_ptr = reinterpret_cast<const float*>(vectors[i]) + block_start;
+                        float dot = dot_acc[i];
+                        float vec_sq = l2_metric ? vec_sq_acc[i] : 0.0f;
+
+                        size_t d = 0;
+#if defined(USE_AVX512)
+                        __m512 dot_vec = _mm512_setzero_ps();
+                        __m512 sq_vec = _mm512_setzero_ps();
+                        for(; d + 16 <= block_len; d += 16) {
+                            __m512 qv = _mm512_loadu_ps(q_ptr + d);
+                            __m512 vv = _mm512_loadu_ps(v_ptr + d);
+                            dot_vec = _mm512_fmadd_ps(qv, vv, dot_vec);
+                            if(l2_metric) {
+                                sq_vec = _mm512_fmadd_ps(vv, vv, sq_vec);
+                            }
+                        }
+                        dot += _mm512_reduce_add_ps(dot_vec);
+                        if(l2_metric) {
+                            vec_sq += _mm512_reduce_add_ps(sq_vec);
+                        }
+#elif defined(USE_AVX2)
+                        __m256 dot_vec = _mm256_setzero_ps();
+                        __m256 sq_vec = _mm256_setzero_ps();
+                        for(; d + 8 <= block_len; d += 8) {
+                            __m256 qv = _mm256_loadu_ps(q_ptr + d);
+                            __m256 vv = _mm256_loadu_ps(v_ptr + d);
+#if defined(__FMA__)
+                            dot_vec = _mm256_fmadd_ps(qv, vv, dot_vec);
+                            if(l2_metric) {
+                                sq_vec = _mm256_fmadd_ps(vv, vv, sq_vec);
+                            }
+#else
+                            dot_vec = _mm256_add_ps(dot_vec, _mm256_mul_ps(qv, vv));
+                            if(l2_metric) {
+                                sq_vec = _mm256_add_ps(sq_vec, _mm256_mul_ps(vv, vv));
+                            }
+#endif
+                        }
+                        {
+                            __m128 lo = _mm256_castps256_ps128(dot_vec);
+                            __m128 hi = _mm256_extractf128_ps(dot_vec, 1);
+                            __m128 s = _mm_add_ps(lo, hi);
+                            s = _mm_hadd_ps(s, s);
+                            s = _mm_hadd_ps(s, s);
+                            dot += _mm_cvtss_f32(s);
+                        }
+                        if(l2_metric) {
+                            __m128 lo = _mm256_castps256_ps128(sq_vec);
+                            __m128 hi = _mm256_extractf128_ps(sq_vec, 1);
+                            __m128 s = _mm_add_ps(lo, hi);
+                            s = _mm_hadd_ps(s, s);
+                            s = _mm_hadd_ps(s, s);
+                            vec_sq += _mm_cvtss_f32(s);
+                        }
+#elif defined(USE_NEON)
+                        float32x4_t dot_vec = vdupq_n_f32(0.0f);
+                        float32x4_t sq_vec = vdupq_n_f32(0.0f);
+                        for(; d + 4 <= block_len; d += 4) {
+                            float32x4_t qv = vld1q_f32(q_ptr + d);
+                            float32x4_t vv = vld1q_f32(v_ptr + d);
+                            dot_vec = vfmaq_f32(dot_vec, qv, vv);
+                            if(l2_metric) {
+                                sq_vec = vfmaq_f32(sq_vec, vv, vv);
+                            }
+                        }
+                        dot += vaddvq_f32(dot_vec);
+                        if(l2_metric) {
+                            vec_sq += vaddvq_f32(sq_vec);
+                        }
+#elif defined(USE_SVE2)
+                        size_t lane = svcntw();
+                        for(; d + lane <= block_len; d += lane) {
+                            svbool_t pg = svwhilelt_b32(0, lane);
+                            svfloat32_t qv = svld1_f32(pg, q_ptr + d);
+                            svfloat32_t vv = svld1_f32(pg, v_ptr + d);
+                            dot += svaddv_f32(pg, svmul_f32_x(pg, qv, vv));
+                            if(l2_metric) {
+                                vec_sq += svaddv_f32(pg, svmul_f32_x(pg, vv, vv));
+                            }
+                        }
+#endif
+
+                        for(; d < block_len; ++d) {
+                            dot += q_ptr[d] * v_ptr[d];
+                            if(l2_metric) {
+                                vec_sq += v_ptr[d] * v_ptr[d];
+                            }
+                        }
+
+                        dot_acc[i] = dot;
+                        if(l2_metric) {
+                            vec_sq_acc[i] = vec_sq;
+                        }
+                    }
+                }
+
+                for(size_t i = 0; i < count; ++i) {
+                    if(l2_metric) {
+                        out[i] = -(query_sq_acc + vec_sq_acc[i] - 2.0f * dot_acc[i]);
+                    } else {
+                        out[i] = dot_acc[i];
+                    }
+                }
+            }
+
+            static void L2SqrSimBatch(const void* query,
+                                      const void* const* vectors,
+                                      size_t count,
+                                      const void* params,
+                                      float* out) {
+                SimilarityBatchTiled(query, vectors, count, params, out, true);
+            }
+
+            static void InnerProductSimBatch(const void* query,
+                                             const void* const* vectors,
+                                             size_t count,
+                                             const void* params,
+                                             float* out) {
+                SimilarityBatchTiled(query, vectors, count, params, out, false);
+            }
+
+            static void CosineSimBatch(const void* query,
+                                       const void* const* vectors,
+                                       size_t count,
+                                       const void* params,
+                                       float* out) {
+                SimilarityBatchTiled(query, vectors, count, params, out, false);
+            }
+
             static float
             InnerProductDistance(const void* pVect1, const void* pVect2, const void* params_ptr) {
                 const DistParams* params = reinterpret_cast<const DistParams*>(params_ptr);
@@ -551,6 +725,9 @@ namespace ndd {
                 d.sim_l2 = &hnswlib::quant::float32::L2SqrSim;
                 d.sim_ip = &hnswlib::quant::float32::InnerProductSim;
                 d.sim_cosine = &hnswlib::quant::float32::CosineSim;
+                d.sim_l2_batch = &hnswlib::quant::float32::L2SqrSimBatch;
+                d.sim_ip_batch = &hnswlib::quant::float32::InnerProductSimBatch;
+                d.sim_cosine_batch = &hnswlib::quant::float32::CosineSimBatch;
                 d.quantize = &hnswlib::quant::float32::quantize;
                 d.dequantize = &hnswlib::quant::float32::dequantize;
                 d.quantize_to_int8 = &hnswlib::quant::float32::quantize_to_int8;

@@ -45,6 +45,28 @@ namespace ndd {
             float (*sim_ip)(const void* v1, const void* v2, const void* params);
             float (*sim_cosine)(const void* v1, const void* v2, const void* params);
 
+            // Batch similarity functions
+            // query: single query vector
+            // vectors: array of pointers to candidate vectors
+            // count: number of candidates
+            // params: metric params (same as scalar path)
+            // out: output similarities, length == count
+            void (*sim_l2_batch)(const void* query,
+                                 const void* const* vectors,
+                                 size_t count,
+                                 const void* params,
+                                 float* out);
+            void (*sim_ip_batch)(const void* query,
+                                 const void* const* vectors,
+                                 size_t count,
+                                 const void* params,
+                                 float* out);
+            void (*sim_cosine_batch)(const void* query,
+                                     const void* const* vectors,
+                                     size_t count,
+                                     const void* params,
+                                     float* out);
+
             // Conversion functions
             std::vector<uint8_t> (*quantize)(const std::vector<float>& in);
             std::vector<float> (*dequantize)(const uint8_t* in, size_t dim);

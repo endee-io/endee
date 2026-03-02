@@ -879,6 +879,10 @@ public:
             return vs->get_vector(label, buffer);
         });
 
+        alg->setVectorFetcherBatch([vs = vector_storage](const ndd::idInt* labels, uint8_t* buffers, bool* success, size_t count) -> size_t {
+            return vs->get_vectors_batch_into(labels, buffers, success, count);
+        });
+
         // Create WAL during index creation
         getOrCreateWAL(index_id);
 
@@ -982,6 +986,10 @@ public:
             return vs->get_vector(label, buffer);
         });
 
+        alg->setVectorFetcherBatch([vs = vector_storage](const ndd::idInt* labels, uint8_t* buffers, bool* success, size_t count) -> size_t {
+            return vs->get_vectors_batch_into(labels, buffers, success, count);
+        });
+
         LOG_DEBUG("Loaded index: " << index_id);
         LOG_DEBUG("Created space for index: " << index_id);
 
@@ -1076,6 +1084,10 @@ public:
         // Set the vector fetcher to use our storage
         new_alg->setVectorFetcher([vs = entry.vector_storage](ndd::idInt label, uint8_t* buffer) {
             return vs->get_vector(label, buffer);
+        });
+
+        new_alg->setVectorFetcherBatch([vs = entry.vector_storage](const ndd::idInt* labels, uint8_t* buffers, bool* success, size_t count) -> size_t {
+            return vs->get_vectors_batch_into(labels, buffers, success, count);
         });
 
         // Replace the algorithm in the existing entry

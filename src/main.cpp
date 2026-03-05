@@ -416,11 +416,16 @@ int main(int argc, char** argv) {
 
                 try {
                     std::pair<bool, std::string> result =
-                            index_manager.createBackup(index_id, backup_name);
+                            index_manager.createBackupAsync(index_id, backup_name);
                     if(!result.first) {
                         return json_error(400, result.second);
                     }
-                    return crow::response(201, "Backup created successfully");
+
+                    // Return 202 Accepted with backup_name as job_id
+                    crow::json::wvalue response;
+                    response["backup_name"] = result.second;
+                    response["status"] = "in_progress";
+                    return crow::response(202, response.dump());
                 } catch(const std::exception& e) {
                     return json_error(500, e.what());
                 }
@@ -432,7 +437,7 @@ int main(int argc, char** argv) {
             .methods("GET"_method)([&index_manager, &app](const crow::request& req) {
                 auto& ctx = app.get_context<AuthMiddleware>(req);
                 try {
-                    auto backups = index_manager.listBackups();
+                    auto backups = index_manager.listBackups(ctx.username);
                     nlohmann::json result_json = backups;
                     crow::response res;
                     res.code = 200;
@@ -460,7 +465,7 @@ int main(int argc, char** argv) {
 
                 try {
                     std::pair<bool, std::string> result =
-                            index_manager.restoreBackup(backup_name, target_index_name);
+                            index_manager.restoreBackup(backup_name, target_index_name, ctx.username);
                     if(!result.first) {
                         return json_error(400, result.second);
                     }
@@ -477,7 +482,7 @@ int main(int argc, char** argv) {
                                                              const std::string& backup_name) {
                 auto& ctx = app.get_context<AuthMiddleware>(req);
                 try {
-                    std::pair<bool, std::string> result = index_manager.deleteBackup(backup_name);
+                    std::pair<bool, std::string> result = index_manager.deleteBackup(backup_name, ctx.username);
                     if(!result.first) {
                         return json_error(400, result.second);
                     }
@@ -487,29 +492,32 @@ int main(int argc, char** argv) {
                 }
             });
 
-    // Download Backup
+    // Download Backup - accepts auth token via query param or works without auth if disabled
     CROW_ROUTE(app, "/api/v1/backups/<string>/download")
-            .CROW_MIDDLEWARES(app, AuthMiddleware)
-            .methods("GET"_method)([&index_manager, &app](const crow::request& req,
-                                                          const std::string& backup_name) {
-                auto& ctx = app.get_context<AuthMiddleware>(req);
+            .methods("GET"_method)([&](const crow::request& req, const std::string& backup_name) {
                 try {
-                    std::string backup_tar =
-                            settings::DATA_DIR + "/backups/" + backup_name + ".tar.gz";
-                    if(!std::filesystem::exists(backup_tar)) {
+                    if(settings::AUTH_ENABLED) {
+                        std::string token =
+                                req.url_params.get("token") ? req.url_params.get("token") : "";
+                        if(token != settings::AUTH_TOKEN) {
+                            return json_error(401, "Unauthorized");
+                        }
+                    }
+
+                    std::string backup_file =
+                            settings::DATA_DIR + "/backups/" + settings::DEFAULT_USERNAME + "/" + backup_name + ".tar";
+
+                    if(!std::filesystem::exists(backup_file)) {
                         return json_error(404, "Backup not found");
                     }
-                    std::string file_content = read_file(backup_tar);
-                    if(file_content.empty()) {
-                        return json_error(500, "Failed to read backup file");
-                    }
+
+
                     crow::response response;
-                    response.set_header("Content-Type", "application/gzip");
+                    response.set_static_file_info_unsafe(backup_file);
+                    response.set_header("Content-Type", "application/x-tar");
                     response.set_header("Content-Disposition",
-                                        "attachment; filename=\"" + backup_name + ".tar.gz\"");
-                    response.set_header("Content-Length", std::to_string(file_content.size()));
+                                        "attachment; filename=\"" + backup_name + ".tar\"");
                     response.set_header("Cache-Control", "no-cache");
-                    response.body = std::move(file_content);
                     return response;
                 } catch(const std::exception& e) {
                     return json_error(500, e.what());
@@ -539,11 +547,11 @@ int main(int argc, char** argv) {
                             // Get filename from Content-Disposition
                             if(content_disposition.params.count("filename")) {
                                 backup_name = content_disposition.params.at("filename");
-                                // check if backup name ends with .tar.gz
-                                if(backup_name.ends_with(".tar.gz")) {
-                                    backup_name = backup_name.substr(0, backup_name.size() - 7);
+                                // check if backup name ends with .tar
+                                if(backup_name.ends_with(".tar")) {
+                                    backup_name = backup_name.substr(0, backup_name.size() - 4);
                                 } else {
-                                    return json_error(400, "Invalid backup file extension");
+                                    return json_error(400, "Invalid backup file extension. Expected .tar file");
                                 }
                             }
                             file_content = part.body;
@@ -567,8 +575,9 @@ int main(int argc, char** argv) {
                     }
 
                     // Check if backup already exists
-                    std::string backup_path =
-                            settings::DATA_DIR + "/backups/" + backup_name + ".tar.gz";
+                    std::string user_backup_dir = settings::DATA_DIR + "/backups/" + ctx.username;
+                    std::filesystem::create_directories(user_backup_dir);
+                    std::string backup_path = user_backup_dir + "/" + backup_name + ".tar";
                     if(std::filesystem::exists(backup_path)) {
                         return json_error(409,
                                           "Backup with name '" + backup_name + "' already exists");
@@ -589,6 +598,48 @@ int main(int argc, char** argv) {
                     }
 
                     return crow::response(201, "Backup uploaded successfully");
+                } catch(const std::exception& e) {
+                    return json_error(500, e.what());
+                }
+            });
+
+    // Get active backup status for current user
+    CROW_ROUTE(app, "/api/v1/backups/active")
+            .CROW_MIDDLEWARES(app, AuthMiddleware)
+            .methods("GET"_method)([&index_manager, &app](const crow::request& req) {
+                auto& ctx = app.get_context<AuthMiddleware>(req);
+                try {
+                    auto active = index_manager.getActiveBackup(ctx.username);
+                    crow::json::wvalue response;
+                    if (active) {
+                        response["active"] = true;
+                        response["backup_name"] = active->backup_name;
+                        response["index_id"] = active->index_id;
+                    } else {
+                        response["active"] = false;
+                    }
+                    return crow::response(200, response.dump());
+                } catch(const std::exception& e) {
+                    return json_error(500, e.what());
+                }
+            });
+
+    // Get backup info
+    CROW_ROUTE(app, "/api/v1/backups/<string>/info")
+            .CROW_MIDDLEWARES(app, AuthMiddleware)
+            .methods("GET"_method)([&index_manager, &app](const crow::request& req,
+                                                          const std::string& backup_name) {
+                auto& ctx = app.get_context<AuthMiddleware>(req);
+                try {
+                    auto info = index_manager.getBackupInfo(backup_name, ctx.username);
+                    if (info.empty()) {
+                        return json_error(404, "Backup not found or metadata missing");
+                    }
+                    crow::response res;
+                    res.code = 200;
+                    res.set_header("Content-Type", "application/json");
+                    res.body = info.dump();
+                    return res;
                 } catch(const std::exception& e) {
                     return json_error(500, e.what());
                 }
@@ -629,19 +680,27 @@ int main(int argc, char** argv) {
     // Delete index
     CROW_ROUTE(app, "/api/v1/index/<string>/delete")
             .CROW_MIDDLEWARES(app, AuthMiddleware)
-            .methods("DELETE"_method)(
-                    [&index_manager, &app](const crow::request& req, std::string index_name) {
-                        auto& ctx = app.get_context<AuthMiddleware>(req);
+            .methods("DELETE"_method)([&index_manager, &app](const crow::request& req,
+                                                             std::string index_name) {
+                auto& ctx = app.get_context<AuthMiddleware>(req);
 
-                        // Format full index_id
-                        std::string index_id = ctx.username + "/" + index_name;
+                // Format full index_id
+                std::string index_id = ctx.username + "/" + index_name;
 
-                        if(index_manager.deleteIndex(index_id)) {
-                            return crow::response(200, "Index deleted successfully");
-                        } else {
-                            return json_error(404, "Index not found");
-                        }
-                    });
+                try {
+                    if(index_manager.deleteIndex(index_id)) {
+                        return crow::response(200, "Index deleted successfully");
+                    } else {
+                        return json_error(404, "Index not found");
+                    }
+                } catch(const std::runtime_error& e) {
+                    return json_error(400, e.what());
+                } catch(const std::exception& e) {
+                    return json_error_500(ctx.username,
+                                          req.url,
+                                          std::string("Failed to delete index: ") + e.what());
+                }
+            });
 
     // Search
     CROW_ROUTE(app, "/api/v1/index/<string>/search")
@@ -1004,6 +1063,8 @@ int main(int argc, char** argv) {
                     size_t count = index_manager.updateFilters(index_id, updates);
                     return crow::response(200, std::to_string(count) + " filters updated");
 
+                } catch(const std::runtime_error& e) {
+                    return json_error(400, e.what());
                 } catch(const std::exception& e) {
                     return json_error_500(ctx.username,
                                           req.url,

@@ -197,13 +197,14 @@ distro_factory() {
 # ****************************************
 
 add_frontend() {
-    log "pulling frontend"
+    VERSION="v1.1.0"
+    log "Pulling frontend version ${VERSION}"
     mkdir -p $script_dir/frontend
     cd $script_dir/frontend
-    curl -L -o react-dist.zip https://github.com/EndeeLabs/endee-web-ui/releases/download/v1.0.2/endee-web-ui.zip
+    curl -fL -o react-dist.zip https://github.com/EndeeLabs/endee-web-ui/releases/download/${VERSION}/dist.zip
     unzip -o react-dist.zip
     rm react-dist.zip
-    log "frontend added"
+    log "Frontend version ${VERSION} added"
 }
 
 # ****************************************

@@ -13,7 +13,6 @@
 #include "quant_vector.hpp"
 #include "wal.hpp"
 #include "../quant/dispatch.hpp"
-#include "../utils/archive_utils.hpp"
 #include <memory>
 #include <deque>
 #include <unordered_map>
@@ -28,8 +27,6 @@
 #include <random>
 #include <type_traits>
 #include <future>
-
-#define MAX_BACKUP_NAME_LENGTH 200
 
 struct IndexConfig {
     size_t dim;
@@ -139,6 +136,8 @@ struct PersistenceConfig {
     bool save_on_shutdown{true};
 };
 
+#include "../storage/backup_store.hpp"
+
 class IndexManager {
 private:
     std::deque<std::string> indices_list_;
@@ -156,6 +155,8 @@ private:
     std::atomic<bool> running_{true};
     // Write-ahead log for each index
     std::unordered_map<std::string, std::unique_ptr<WriteAheadLog>> wal_logs_;
+    BackupStore backup_store_;
+    void executeBackupJob(const std::string& index_id, const std::string& backup_name);
 
     // New methods to handle WAL
     WriteAheadLog* getOrCreateWAL(const std::string& index_id) {
@@ -470,10 +471,9 @@ public:
                  const std::string& data_dir,
                  const PersistenceConfig& persistence_config = PersistenceConfig{}) :
         data_dir_(data_dir),
-        persistence_config_(persistence_config) {
+        persistence_config_(persistence_config),
+        backup_store_(data_dir) {
         std::filesystem::create_directories(data_dir);
-        // Create backups directory for default system user
-        std::filesystem::create_directories(data_dir + "/backups");
         metadata_manager_ = std::make_unique<MetadataManager>(data_dir);
         // Start the autosave thread
         autosave_thread_ = std::thread(&IndexManager::autosaveLoop, this);
@@ -554,247 +554,7 @@ public:
         return true;
     }
 
-    // Helper method to validate backup names
-    std::pair<bool, std::string> validateBackupName(const std::string& backup_name) const {
-        if(backup_name.empty()) {
-            return std::make_pair(false, "Backup name cannot be empty");
-        }
 
-        // Check length limit (most filesystems limit to 255 chars)
-        if(backup_name.length() > MAX_BACKUP_NAME_LENGTH) {
-            return std::make_pair(false,
-                                  "Backup name too long (max "
-                                          + std::to_string(MAX_BACKUP_NAME_LENGTH)
-                                          + " characters)");
-        }
-
-        // Use regex to check for alphanumeric, underscores, and hyphens
-        static const std::regex backup_name_regex("^[a-zA-Z0-9_-]+$");
-        if(!std::regex_match(backup_name, backup_name_regex)) {
-            return std::make_pair(false,
-                                  "Invalid backup name: only alphanumeric, underscores, "
-                                  "and hyphens allowed");
-        }
-
-        return std::make_pair(true, "");
-    }
-
-    // Backup methods
-    std::pair<bool, std::string> createBackup(const std::string& index_id,
-                                              const std::string& backup_name) {
-        // 1. Validate backup name
-        std::pair<bool, std::string> result = validateBackupName(backup_name);
-        if(!result.first) {
-            return result;
-        }
-
-        // 2. Parse user and index name
-        std::string user_id, index_name;
-        size_t pos = index_id.find('/');
-        if(pos != std::string::npos) {
-            user_id = index_id.substr(0, pos);
-            index_name = index_id.substr(pos + 1);
-        } else {
-            return {false, "Invalid index ID format"};
-        }
-
-        // 3. Get index entry and lock
-        auto& entry = getIndexEntry(index_id);
-        std::lock_guard<std::mutex> operation_lock(entry.operation_mutex);
-
-        // 4. Force save
-        saveIndexInternal(entry);
-
-        // 5. Prepare paths - simplified for single-user system
-        std::string backup_dir_root = data_dir_ + "/backups";
-        std::string backup_dir = backup_dir_root + "/" + backup_name;
-        std::string backup_tar = backup_dir_root + "/" + backup_name + ".tar.gz";
-        std::string source_dir = data_dir_ + "/" + index_id;
-
-        if(std::filesystem::exists(backup_tar)) {
-            return {false, "Backup already exists: " + backup_name};
-        }
-
-        // 6. Copy files to temporary directory
-        std::filesystem::create_directories(backup_dir);
-        std::filesystem::copy(source_dir, backup_dir, std::filesystem::copy_options::recursive);
-
-        // 7. Calculate uncompressed size and write metadata.json
-        size_t uncompressed_size = 0;
-        for(const auto& file : std::filesystem::recursive_directory_iterator(backup_dir)) {
-            if(!std::filesystem::is_directory(file)) {
-                uncompressed_size += std::filesystem::file_size(file);
-            }
-        }
-
-        auto meta = metadata_manager_->getMetadata(index_id);
-        if(meta) {
-            nlohmann::json j;
-            j["original_index"] = index_name;
-            j["timestamp"] = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-            j["size_mb"] = uncompressed_size / MB;
-            j["params"] = {{"M", meta->M},
-                           {"ef_construction", meta->ef_con},
-                           {"dim", meta->dimension},
-                           {"sparse_dim", meta->sparse_dim},
-                           {"space_type", meta->space_type_str},
-                           {"quant_level", static_cast<int>(meta->quant_level)},
-                           {"total_elements", meta->total_elements},
-                           {"checksum", meta->checksum}};
-
-            std::ofstream meta_file(backup_dir + "/metadata.json");
-            meta_file << j.dump(4);
-        }
-
-        // 7. Create tar.gz archive from the backup directory using libarchive
-        std::string error_msg;
-        if(!ndd::ArchiveUtils::createTarGz(backup_dir, backup_tar, error_msg)) {
-            // Clean up on failure
-            std::filesystem::remove_all(backup_dir);
-            return {false, "Failed to create compressed backup archive: " + error_msg};
-        }
-
-        // 8. Remove the temporary uncompressed directory
-        std::filesystem::remove_all(backup_dir);
-
-        LOG_INFO("Created compressed backup: " << backup_tar);
-        return {true, ""};
-    }
-
-    std::vector<std::string> listBackups() {
-        std::vector<std::string> backups;
-        std::string backup_dir = data_dir_ + "/backups";
-
-        if(!std::filesystem::exists(backup_dir)) {
-            return backups;
-        }
-
-        for(const auto& entry : std::filesystem::directory_iterator(backup_dir)) {
-            if(entry.is_regular_file() && entry.path().extension() == ".gz") {
-                std::string filename = entry.path().filename().string();
-
-                // Check if it's a .tar.gz file
-                if(filename.size() > 7 && filename.substr(filename.size() - 7) == ".tar.gz") {
-                    // Remove .tar.gz extension to get backup name
-                    std::string backup_name = filename.substr(0, filename.size() - 7);
-                    backups.push_back(backup_name);
-                }
-            }
-        }
-        return backups;
-    }
-
-    std::pair<bool, std::string> restoreBackup(const std::string& backup_name,
-                                               const std::string& target_index_name) {
-        // 1. Validate backup name
-        std::pair<bool, std::string> result = validateBackupName(backup_name);
-        if(!result.first) {
-            return result;
-        }
-
-        // Use default username for single-user system
-        std::string user_id = settings::DEFAULT_USERNAME;
-        std::string backup_dir_root = data_dir_ + "/backups";
-        std::string backup_tar = backup_dir_root + "/" + backup_name + ".tar.gz";
-        std::string backup_extract_dir = backup_dir_root + "/" + backup_name;
-        std::string target_index_id = user_id + "/" + target_index_name;
-        std::string target_dir = data_dir_ + "/" + target_index_id;
-
-        // 2. Validation - check for tar.gz file
-        if(!std::filesystem::exists(backup_tar)) {
-            return {false, "Backup not found: " + backup_name};
-        }
-        if(metadata_manager_->getMetadata(target_index_id).has_value()) {
-            return {false, "Target index already exists"};
-        }
-
-        // 3. Extract tar.gz to temporary directory using libarchive
-        std::string error_msg;
-        if(!ndd::ArchiveUtils::extractTarGz(backup_tar, backup_extract_dir, error_msg)) {
-            return {false, "Failed to extract backup archive: " + error_msg};
-        }
-
-        // check if any folder is present in backup_extract_dir
-        std::vector<std::string> folders;
-        for(const auto& entry : std::filesystem::directory_iterator(backup_extract_dir)) {
-            if(entry.is_directory()) {
-                folders.push_back(entry.path().string());
-            }
-        }
-
-        if(folders.size() != 1) {
-            std::filesystem::remove_all(backup_extract_dir);
-            return {false, "Backup extraction failed - directory not found"};
-        }
-
-        std::string backup_dir = folders[0];
-
-        try {
-            // 3. Read metadata
-            std::ifstream f(backup_dir + "/metadata.json");
-            if(!f.good()) {
-                std::filesystem::remove_all(backup_extract_dir);
-                return {false, "Backup metadata missing"};
-            }
-            nlohmann::json meta_json = nlohmann::json::parse(f);
-
-            // 4. Copy files
-            std::filesystem::create_directories(target_dir);
-            std::filesystem::copy(backup_dir,
-                                  target_dir,
-                                  std::filesystem::copy_options::recursive
-                                          | std::filesystem::copy_options::overwrite_existing);
-
-            // Remove metadata.json from the restored index folder as it's not needed there
-            std::filesystem::remove(target_dir + "/metadata.json");
-
-            // 5. Register index
-            IndexMetadata new_meta;
-            new_meta.name = target_index_name;
-            new_meta.dimension = meta_json["params"]["dim"];
-            new_meta.sparse_dim = meta_json["params"].value("sparse_dim", 0ul);
-            new_meta.M = meta_json["params"]["M"];
-            new_meta.ef_con = meta_json["params"]["ef_construction"];
-            new_meta.space_type_str = meta_json["params"]["space_type"];
-            new_meta.quant_level = static_cast<ndd::quant::QuantizationLevel>(
-                    meta_json["params"]["quant_level"].get<int>());
-            new_meta.created_at = std::chrono::system_clock::now();
-            new_meta.total_elements = meta_json["params"].value("total_elements", 0ul);
-            new_meta.checksum = meta_json["params"].value("checksum", -1);
-
-            metadata_manager_->storeMetadata(target_index_id, new_meta);
-
-            // 6. Clean up extracted temporary directory
-            std::filesystem::remove_all(backup_extract_dir);
-
-            // 7. Load index
-            loadIndex(target_index_id);
-
-            LOG_INFO("Restored backup from compressed archive: " << backup_tar);
-            return {true, ""};
-        } catch(const std::exception& e) {
-            // Clean up on failure
-            std::filesystem::remove_all(backup_extract_dir);
-            return {false, "Failed to restore backup: " + std::string(e.what())};
-        }
-    }
-
-    std::pair<bool, std::string> deleteBackup(const std::string& backup_name) {
-        // Validate backup name
-        std::pair<bool, std::string> result = validateBackupName(backup_name);
-        if(!result.first) {
-            return result;
-        }
-
-        std::string backup_tar = data_dir_ + "/backups/" + backup_name + ".tar.gz";
-        if(std::filesystem::exists(backup_tar)) {
-            std::filesystem::remove(backup_tar);
-            LOG_INFO("Deleted compressed backup: " << backup_tar);
-            return {true, ""};
-        } else {
-            return {false, "Backup not found"};
-        }
-    }
 
     bool createIndex(const std::string& index_id,
                      const IndexConfig& config,
@@ -1255,6 +1015,10 @@ public:
 
             PRINT_LOG_TIME();
             return true;
+        } catch(const std::runtime_error& e) {
+            // Re-throw runtime_error (includes backup-in-progress check)
+            // so it can be caught by API layer and returned as proper JSON error
+            throw;
         } catch(const std::exception& e) {
             std::cerr << "Batch insertion failed: " << e.what() << std::endl;
             return false;
@@ -1452,6 +1216,9 @@ public:
             } else {
                 return 0;
             }
+        } catch(const std::runtime_error& e) {
+            // Re-throw runtime_error (includes backup-in-progress check)
+            throw;
         } catch(const std::exception& e) {
             std::cerr << "Failed to delete vectors by filter: " << e.what() << std::endl;
             return 0;
@@ -1463,6 +1230,7 @@ public:
                          const std::vector<std::pair<std::string, std::string>>& updates) {
         try {
             auto& entry = getIndexEntry(index_id);
+
             std::lock_guard<std::mutex> operation_lock(entry.operation_mutex);
 
             size_t updated_count = 0;
@@ -1482,6 +1250,9 @@ public:
             }
 
             return updated_count;
+        } catch(const std::runtime_error& e) {
+            // Re-throw runtime_error (includes backup-in-progress check)
+            throw;
         } catch(const std::exception& e) {
             std::cerr << "Failed to update filters: " << e.what() << std::endl;
             return 0;
@@ -1515,6 +1286,9 @@ public:
             }
 
             return result;
+        } catch(const std::runtime_error& e) {
+            // Re-throw runtime_error (includes backup-in-progress check)
+            throw;
         } catch(const std::exception& e) {
             std::cerr << "Failed to delete vector: " << e.what() << std::endl;
             return false;
@@ -1949,4 +1723,300 @@ public:
         // The calling function already holds operation_mutex
         // and will call save at appropriate time
     }
+
+    // ========== Backup operations ==========
+
+    // Orchestration methods (defined below after class)
+    std::pair<bool, std::string> createBackupAsync(const std::string& index_id,
+                                                    const std::string& backup_name);
+
+    std::pair<bool, std::string> restoreBackup(const std::string& backup_name,
+                                                const std::string& target_index_name,
+                                                const std::string& username);
+
+    // Forwarding methods (no IndexManager internals needed)
+    std::vector<std::string> listBackups(const std::string& username) {
+        return backup_store_.listBackups(username);
+    }
+
+    std::pair<bool, std::string> deleteBackup(const std::string& backup_name,
+                                               const std::string& username) {
+        return backup_store_.deleteBackup(backup_name, username);
+    }
+
+    std::optional<ActiveBackup> getActiveBackup(const std::string& username) {
+        return backup_store_.getActiveBackup(username);
+    }
+
+    nlohmann::json getBackupInfo(const std::string& backup_name,
+                                  const std::string& username) {
+        return backup_store_.getBackupInfo(backup_name, username);
+    }
+
+    std::pair<bool, std::string> validateBackupName(const std::string& backup_name) const {
+        return backup_store_.validateBackupName(backup_name);
+    }
 };
+
+// ========== IndexManager backup implementations ==========
+
+inline void IndexManager::executeBackupJob(const std::string& index_id, const std::string& backup_name) {
+    std::string username;
+    size_t upos = index_id.find('/');
+    if (upos != std::string::npos) {
+        username = index_id.substr(0, upos);
+    }
+
+    try {
+        std::string index_name;
+        if (upos != std::string::npos) {
+            index_name = index_id.substr(upos + 1);
+        } else {
+            throw std::runtime_error("Invalid index ID format");
+        }
+
+        std::string user_backup_dir = backup_store_.getUserBackupDir(username);
+        std::filesystem::create_directories(user_backup_dir);
+        std::string user_temp_dir = backup_store_.getUserTempDir(username);
+        std::filesystem::create_directories(user_temp_dir);
+        std::string source_dir = data_dir_ + "/" + index_id;
+        std::string backup_tar_final = user_backup_dir + "/" + backup_name + ".tar";
+        std::string backup_tar_temp = user_temp_dir + "/.tmp_" + backup_name + ".tar";
+
+        if(std::filesystem::exists(backup_tar_final)) {
+            throw std::runtime_error("Backup already exists: " + backup_name);
+        }
+
+        size_t index_size = 0;
+        for(const auto& file : std::filesystem::recursive_directory_iterator(source_dir)) {
+            if(!std::filesystem::is_directory(file)) {
+                index_size += std::filesystem::file_size(file);
+            }
+        }
+
+        auto space_info = std::filesystem::space(user_backup_dir);
+        if(space_info.available < index_size * 2) {
+            throw std::runtime_error("Insufficient disk space: need " +
+                std::to_string(index_size * 2 / MB) + " MB");
+        }
+
+        auto meta = metadata_manager_->getMetadata(index_id);
+        nlohmann::json metadata_json;
+        if(meta) {
+            metadata_json["original_index"] = index_name;
+            metadata_json["timestamp"] = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+            metadata_json["size_mb"] = index_size / MB;
+            metadata_json["params"] = {{"M", meta->M},
+                           {"ef_construction", meta->ef_con},
+                           {"dim", meta->dimension},
+                           {"sparse_dim", meta->sparse_dim},
+                           {"space_type", meta->space_type_str},
+                           {"quant_level", static_cast<int>(meta->quant_level)},
+                           {"total_elements", meta->total_elements},
+                           {"checksum", meta->checksum}};
+            LOG_DEBUG("Metadata prepared for backup: " << metadata_json.dump());
+        } else {
+            LOG_ERROR("Failed to get metadata for index: " << index_id);
+            throw std::runtime_error("Cannot create backup without index metadata");
+        }
+
+        auto& entry = getIndexEntry(index_id);
+        std::string metadata_file_in_index = source_dir + "/metadata.json";
+        {
+            std::lock_guard<std::mutex> operation_lock(entry.operation_mutex);
+
+            saveIndexInternal(entry);
+
+            if(!metadata_json.empty()) {
+                std::ofstream meta_file(metadata_file_in_index, std::ios::binary);
+                if(!meta_file) {
+                    throw std::runtime_error("Failed to create metadata file: " + metadata_file_in_index);
+                }
+                meta_file << metadata_json.dump(4);
+                meta_file.flush();
+                meta_file.close();
+
+                if(!std::filesystem::exists(metadata_file_in_index)) {
+                    throw std::runtime_error("Metadata file was not created: " + metadata_file_in_index);
+                }
+                LOG_DEBUG("Metadata file created: " << metadata_file_in_index << " (size: " << std::filesystem::file_size(metadata_file_in_index) << " bytes)");
+            }
+
+            std::string error_msg;
+            LOG_DEBUG("Creating tar archive from " << source_dir << " to " << backup_tar_temp);
+            if(!backup_store_.createBackupTar(source_dir, backup_tar_temp, error_msg)) {
+                if(std::filesystem::exists(metadata_file_in_index)) {
+                    std::filesystem::remove(metadata_file_in_index);
+                }
+                throw std::runtime_error("Failed to create tar archive: " + error_msg);
+            }
+
+            if(!std::filesystem::exists(backup_tar_temp)) {
+                throw std::runtime_error("Tar archive was not created: " + backup_tar_temp);
+            }
+            LOG_DEBUG("Tar archive created successfully: " << backup_tar_temp << " (size: " << std::filesystem::file_size(backup_tar_temp) << " bytes)");
+
+            if(std::filesystem::exists(metadata_file_in_index)) {
+                std::filesystem::remove(metadata_file_in_index);
+            }
+        }
+
+        backup_store_.clearActiveBackup(username);
+
+        LOG_INFO("Backup tar created, write operations now allowed for index: " << index_id);
+
+        std::filesystem::rename(backup_tar_temp, backup_tar_final);
+
+        nlohmann::json backup_db = backup_store_.readBackupJson(username);
+        backup_db[backup_name] = metadata_json;
+        backup_store_.writeBackupJson(username, backup_db);
+
+        LOG_INFO("Backup completed: " << backup_name << " -> " << backup_tar_final);
+
+    } catch (const std::exception& e) {
+        std::string user_backup_dir = backup_store_.getUserBackupDir(username);
+        std::string user_temp_dir = backup_store_.getUserTempDir(username);
+        std::string source_dir = data_dir_ + "/" + index_id;
+        std::string backup_tar_final = user_backup_dir + "/" + backup_name + ".tar";
+        std::string backup_tar_temp = user_temp_dir + "/.tmp_" + backup_name + ".tar";
+        std::string metadata_file_in_index = source_dir + "/metadata.json";
+
+        if(std::filesystem::exists(backup_tar_temp)) {
+            std::filesystem::remove(backup_tar_temp);
+        }
+        if(std::filesystem::exists(backup_tar_final)) {
+            std::filesystem::remove(backup_tar_final);
+        }
+        if(std::filesystem::exists(metadata_file_in_index)) {
+            std::filesystem::remove(metadata_file_in_index);
+        }
+
+        backup_store_.clearActiveBackup(username);
+
+        LOG_ERROR("Backup failed: " << backup_name << " - " << e.what());
+    }
+}
+
+inline std::pair<bool, std::string> IndexManager::restoreBackup(const std::string& backup_name,
+                                                                  const std::string& target_index_name,
+                                                                  const std::string& username) {
+    std::pair<bool, std::string> result = backup_store_.validateBackupName(backup_name);
+    if(!result.first) {
+        return result;
+    }
+
+    std::string backup_dir_root = backup_store_.getUserBackupDir(username);
+    std::string backup_tar = backup_dir_root + "/" + backup_name + ".tar";
+    std::string user_temp_dir = backup_store_.getUserTempDir(username);
+    std::filesystem::create_directories(user_temp_dir);
+    std::string backup_extract_dir = user_temp_dir + "/" + backup_name;
+    std::string target_index_id = username + "/" + target_index_name;
+    std::string target_dir = data_dir_ + "/" + target_index_id;
+
+    if(!std::filesystem::exists(backup_tar)) {
+        return {false, "Backup not found: " + backup_name};
+    }
+
+    if(metadata_manager_->getMetadata(target_index_id).has_value()) {
+        return {false, "Target index already exists"};
+    }
+
+    std::string error_msg;
+    if(!backup_store_.extractBackupTar(backup_tar, backup_extract_dir, error_msg)) {
+        return {false, "Failed to extract backup archive: " + error_msg};
+    }
+
+    std::vector<std::string> folders;
+    for(const auto& entry : std::filesystem::directory_iterator(backup_extract_dir)) {
+        if(entry.is_directory()) {
+            folders.push_back(entry.path().string());
+        }
+    }
+
+    if(folders.size() != 1) {
+        std::filesystem::remove_all(backup_extract_dir);
+        return {false, "Backup extraction failed - directory not found"};
+    }
+
+    std::string backup_dir = folders[0];
+
+    try {
+        std::ifstream f(backup_dir + "/metadata.json");
+        if(!f.good()) {
+            std::filesystem::remove_all(backup_extract_dir);
+            return {false, "Backup metadata missing"};
+        }
+        nlohmann::json meta_json = nlohmann::json::parse(f);
+
+        std::filesystem::create_directories(target_dir);
+        std::filesystem::copy(backup_dir,
+                              target_dir,
+                              std::filesystem::copy_options::recursive
+                                      | std::filesystem::copy_options::overwrite_existing);
+
+        std::filesystem::remove(target_dir + "/metadata.json");
+
+        IndexMetadata new_meta;
+        new_meta.name = target_index_name;
+        new_meta.dimension = meta_json["params"]["dim"];
+        new_meta.sparse_dim = meta_json["params"].value("sparse_dim", 0ul);
+        new_meta.M = meta_json["params"]["M"];
+        new_meta.ef_con = meta_json["params"]["ef_construction"];
+        new_meta.space_type_str = meta_json["params"]["space_type"];
+        new_meta.quant_level = static_cast<ndd::quant::QuantizationLevel>(
+                meta_json["params"]["quant_level"].get<int>());
+        new_meta.created_at = std::chrono::system_clock::now();
+        new_meta.total_elements = meta_json["params"].value("total_elements", 0ul);
+        new_meta.checksum = meta_json["params"].value("checksum", -1);
+
+        metadata_manager_->storeMetadata(target_index_id, new_meta);
+
+        std::filesystem::remove_all(backup_extract_dir);
+
+        loadIndex(target_index_id);
+
+        LOG_INFO("Restored backup from compressed archive: " << backup_tar);
+        return {true, ""};
+    } catch(const std::exception& e) {
+        std::filesystem::remove_all(backup_extract_dir);
+        return {false, "Failed to restore backup: " + std::string(e.what())};
+    }
+}
+
+inline std::pair<bool, std::string> IndexManager::createBackupAsync(const std::string& index_id,
+                                                                      const std::string& backup_name) {
+    std::pair<bool, std::string> result = backup_store_.validateBackupName(backup_name);
+    if(!result.first) {
+        return result;
+    }
+
+    std::string username;
+    size_t pos = index_id.find('/');
+    if (pos != std::string::npos) {
+        username = index_id.substr(0, pos);
+    } else {
+        return {false, "Invalid index ID format"};
+    }
+
+    if (backup_store_.hasActiveBackup(username)) {
+        return {false, "Backup already in progress for user: " + username};
+    }
+
+    std::string user_backup_dir = backup_store_.getUserBackupDir(username);
+    std::filesystem::create_directories(user_backup_dir);
+    std::string backup_tar = user_backup_dir + "/" + backup_name + ".tar";
+    if (std::filesystem::exists(backup_tar)) {
+        return {false, "Backup already exists: " + backup_name};
+    }
+
+    auto& entry = getIndexEntry(index_id);
+    backup_store_.setActiveBackup(username, index_id, backup_name);
+
+    std::thread([this, index_id, backup_name]() {
+        executeBackupJob(index_id, backup_name);
+    }).detach();
+
+    LOG_INFO("Backup started: " << backup_name << " for index: " << index_id);
+
+    return {true, backup_name};
+}

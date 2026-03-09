@@ -1680,7 +1680,7 @@ public:
         entries.reserve(numeric_ids.size());
 
         for(size_t i = 0; i < numeric_ids.size(); i++) {
-            if(numeric_ids[i].first) {
+            if(numeric_ids[i].second) {
                 entries.push_back({
                         WALOperationType::VECTOR_ADD,
                         numeric_ids[i].first,

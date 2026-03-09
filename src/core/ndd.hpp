@@ -1614,6 +1614,8 @@ public:
         // Remove from in-memory structures if loaded
         auto it = indices_.find(index_id);
         if(it != indices_.end()) {
+            std::lock_guard<std::mutex> operation_lock(it->second.operation_mutex);
+
             auto indx_it = std::find(indices_list_.begin(), indices_list_.end(), index_id);
             if(indx_it != indices_list_.end()) {
                 indices_list_.erase(indx_it);

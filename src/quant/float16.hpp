@@ -914,8 +914,8 @@ namespace ndd {
 #elif defined(USE_SVE2)
                         size_t lane = svcnth();
                         for(; d + lane <= block_len; d += lane) {
-                            svbool_t pg16 = svwhilelt_b16(0, lane);
-                            svbool_t pg32 = svwhilelt_b32(0, lane);
+                            svbool_t pg16 = svptrue_b16();
+                            svbool_t pg32 = svptrue_b32();;
                             svfloat16_t q_h = svld1_f16(pg16, reinterpret_cast<const __fp16*>(q_ptr + d));
                             svfloat16_t v_h = svld1_f16(pg16, reinterpret_cast<const __fp16*>(v_ptr + d));
                             svfloat32_t qv = svcvt_f32_f16_x(pg32, q_h);

@@ -1203,7 +1203,7 @@ namespace ndd {
 #elif defined(USE_SVE2)
                         const size_t vec_lanes = svcntw();
                         for(; d + vec_lanes <= block_len; d += vec_lanes) {
-                            svbool_t pg = svwhilelt_b32(0, vec_lanes);
+                            svbool_t pg = svptrue_b32();
                             svint32_t q_i32 = svld1sh_s32(pg, query_vec + block_start + d);
                             svint32_t v_i32 = svld1sh_s32(pg, vec + block_start + d);
                             svint32_t dot_prod = svmul_s32_x(pg, q_i32, v_i32);

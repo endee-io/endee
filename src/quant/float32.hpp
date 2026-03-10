@@ -582,7 +582,7 @@ namespace hnswlib {
 #elif defined(USE_SVE2)
                         size_t lane = svcntw();
                         for(; d + lane <= block_len; d += lane) {
-                            svbool_t pg = svwhilelt_b32(0, lane);
+                            svbool_t pg = svptrue_b32();;
                             svfloat32_t qv = svld1_f32(pg, q_ptr + d);
                             svfloat32_t vv = svld1_f32(pg, v_ptr + d);
                             dot += svaddv_f32(pg, svmul_f32_x(pg, qv, vv));

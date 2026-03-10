@@ -623,7 +623,7 @@ public:
         std::unique_ptr<ndd::SparseVectorStorage> sparse_storage = nullptr;
         if(config.sparse_dim > 0) {
             std::string sparse_storage_dir = index_dir + "/sparse";
-            sparse_storage = std::make_unique<ndd::SparseVectorStorage>(sparse_storage_dir);
+            sparse_storage = std::make_unique<ndd::SparseVectorStorage>(sparse_storage_dir, index_id);
             if(!sparse_storage->initialize()) {
                 throw std::runtime_error("Failed to initialize sparse storage");
             }
@@ -737,7 +737,7 @@ public:
         std::unique_ptr<ndd::SparseVectorStorage> sparse_storage;
         if(sparse_dim > 0) {
             std::string sparse_storage_dir = index_dir + "/sparse";
-            sparse_storage = std::make_unique<ndd::SparseVectorStorage>(sparse_storage_dir);
+            sparse_storage = std::make_unique<ndd::SparseVectorStorage>(sparse_storage_dir, index_id);
             if(!sparse_storage->initialize()) {
                 throw std::runtime_error("Failed to initialize sparse storage for index: "
                                          + index_id);
@@ -980,8 +980,8 @@ public:
                     // Calculate start and end indices for this thread
                     size_t start_idx = t * chunk_size;
                     size_t end_idx = (start_idx + chunk_size < quantized_vectors.size())
-                                             ? (start_idx + chunk_size)
-                                             : quantized_vectors.size();
+                                            ? (start_idx + chunk_size)
+                                            : quantized_vectors.size();
 
                     // Process assigned chunk of vectors
                     for(size_t i = start_idx; i < end_idx; i++) {
@@ -1185,7 +1185,9 @@ public:
                 // Remove the filter
                 entry.vector_storage->deleteFilter(numeric_id, meta.filter);
                 // Mark as deleted in HNSW index
+
                 entry.alg->markDelete(numeric_id);
+
                 // Delete from sparse storage if hybrid index
                 if(entry.sparse_storage) {
                     entry.sparse_storage->delete_vector(numeric_id);
@@ -1333,7 +1335,7 @@ public:
             // 0. Compute Filter Bitmap (Shared)
             std::optional<ndd::RoaringBitmap> active_filter_bitmap;
             if (!filter_array.empty()) {
-                 active_filter_bitmap = entry.vector_storage->filter_store_->computeFilterBitmap(filter_array);
+                active_filter_bitmap = entry.vector_storage->filter_store_->computeFilterBitmap(filter_array);
             }
 
             // 1. Sparse Search (Async)
@@ -1374,7 +1376,7 @@ public:
                         ndd::quant::get_quantizer_dispatch(quant_level).quantize(query);
 
                 if (!active_filter_bitmap) {
-                     dense_results = entry.alg->searchKnn(query_bytes.data(), k, ef);
+                    dense_results = entry.alg->searchKnn(query_bytes.data(), k, ef);
                 } else {
                     // Smart Filter Execution Strategy
                     auto& bitmap = *active_filter_bitmap;

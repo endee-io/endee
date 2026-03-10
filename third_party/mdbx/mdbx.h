@@ -635,6 +635,13 @@ extern LIBMDBX_VERINFO_API const struct MDBX_build_info {
                              during library build */
 } /** \brief libmdbx build information */ mdbx_build;
 
+/** \brief Print and reset debug MDBX command timing statistics.
+ *
+ * When `ND_MDBX_INSTRUMENT` is enabled this prints cumulative per-command MDBX
+ * timing
+ * since the previous call. In non-debug builds this is a no-op. */
+LIBMDBX_API void print_mdbx_stats(void);
+
 #if (defined(_WIN32) || defined(_WIN64)) && !MDBX_BUILD_SHARED_LIBRARY
 /* MDBX internally uses global and thread local storage destructors to
  * automatically (de)initialization, releasing reader lock table slots

@@ -1544,6 +1544,107 @@ MDBX_MAYBE_UNUSED static inline uint32_t osal_monotime_to_16dot16_noUnderflow(ui
   return seconds_16dot16 ? seconds_16dot16 : /* fix underflow */ (monotime > 0);
 }
 
+#if defined(ND_MDBX_INSTRUMENT)
+enum mdbx_debug_stat_cmd {
+  mdbx_debug_stat_env_create,
+  mdbx_debug_stat_env_open,
+  mdbx_debug_stat_env_close,
+  mdbx_debug_stat_txn_begin,
+  mdbx_debug_stat_txn_commit,
+  mdbx_debug_stat_txn_abort,
+  mdbx_debug_stat_dbi_open,
+  mdbx_debug_stat_get,
+  mdbx_debug_stat_put,
+  mdbx_debug_stat_del,
+  mdbx_debug_stat_cursor_open,
+  mdbx_debug_stat_cursor_close,
+  mdbx_debug_stat_cursor_get,
+  mdbx_debug_stat_cursor_put,
+  mdbx_debug_stat_cursor_del,
+  mdbx_debug_stat_count
+};
+
+typedef struct mdbx_debug_stat {
+  uint64_t calls;
+  uint64_t total_monotime;
+} mdbx_debug_stat_t;
+
+static struct {
+  osal_fastmutex_t lock;
+  bool ready;
+  mdbx_debug_stat_t entries[mdbx_debug_stat_count];
+} mdbx_debug_stats;
+
+static const char *const mdbx_debug_stat_names[mdbx_debug_stat_count] = {
+    "mdbx_env_create",  "mdbx_env_open",   "mdbx_env_close",  "mdbx_txn_begin", "mdbx_txn_commit",
+    "mdbx_txn_abort",   "mdbx_dbi_open",   "mdbx_get",        "mdbx_put",       "mdbx_del",
+    "mdbx_cursor_open", "mdbx_cursor_close", "mdbx_cursor_get", "mdbx_cursor_put", "mdbx_cursor_del",
+};
+
+static double mdbx_debug_monotime_to_ms(uint64_t monotime) {
+  return ((double)osal_monotime_to_16dot16(monotime) * 1000.0) / 65536.0;
+}
+
+static void mdbx_debug_stats_record(enum mdbx_debug_stat_cmd cmd, uint64_t elapsed_monotime) {
+  if (unlikely(!mdbx_debug_stats.ready))
+    return;
+
+  int err = osal_fastmutex_acquire(&mdbx_debug_stats.lock);
+  if (unlikely(err != MDBX_SUCCESS))
+    return;
+  mdbx_debug_stats.entries[cmd].calls += 1;
+  mdbx_debug_stats.entries[cmd].total_monotime += elapsed_monotime;
+  err = osal_fastmutex_release(&mdbx_debug_stats.lock);
+  (void)err;
+}
+
+void print_mdbx_stats(void) {
+  mdbx_debug_stat_t snapshot[mdbx_debug_stat_count];
+
+  if (unlikely(!mdbx_debug_stats.ready))
+    return;
+
+  int err = osal_fastmutex_acquire(&mdbx_debug_stats.lock);
+  if (unlikely(err != MDBX_SUCCESS))
+    return;
+  memcpy(snapshot, mdbx_debug_stats.entries, sizeof(snapshot));
+  memset(mdbx_debug_stats.entries, 0, sizeof(mdbx_debug_stats.entries));
+  err = osal_fastmutex_release(&mdbx_debug_stats.lock);
+  if (unlikely(err != MDBX_SUCCESS))
+    return;
+
+  bool printed = false;
+  for (size_t i = 0; i < mdbx_debug_stat_count; ++i) {
+    if (snapshot[i].calls == 0)
+      continue;
+
+    printed = true;
+    const double total_ms = mdbx_debug_monotime_to_ms(snapshot[i].total_monotime);
+    const double avg_us = (total_ms * 1000.0) / (double)snapshot[i].calls;
+    fprintf(stderr, "[MDBX_STATS] %s count=%" PRIu64 " total_ms=%.3f avg_us=%.3f\n", mdbx_debug_stat_names[i],
+            snapshot[i].calls, total_ms, avg_us);
+  }
+
+  if (!printed)
+    fprintf(stderr, "[MDBX_STATS] no recorded commands\n");
+
+  fflush(stderr);
+}
+
+#define MDBX_DEBUG_STATS_SCOPE(cmd) const uint64_t mdbx_debug_stats_started_##cmd = osal_monotime()
+#define MDBX_DEBUG_STATS_RETURN(cmd, value)                                                            \
+  do {                                                                                                 \
+    const int mdbx_debug_stats_rc_##cmd = (value);                                                     \
+    mdbx_debug_stats_record(mdbx_debug_stat_##cmd, osal_monotime() - mdbx_debug_stats_started_##cmd); \
+    return mdbx_debug_stats_rc_##cmd;                                                                  \
+  } while (0)
+#else
+void print_mdbx_stats(void) {}
+
+#define MDBX_DEBUG_STATS_SCOPE(cmd) ((void)0)
+#define MDBX_DEBUG_STATS_RETURN(cmd, value) return (value)
+#endif
+
 /*----------------------------------------------------------------------------*/
 
 MDBX_INTERNAL void osal_ctor(void);
@@ -8384,22 +8485,24 @@ int mdbx_cursor_unbind(MDBX_cursor *mc) {
 }
 
 int mdbx_cursor_open(MDBX_txn *txn, MDBX_dbi dbi, MDBX_cursor **ret) {
+  MDBX_DEBUG_STATS_SCOPE(cursor_open);
+
   if (unlikely(!ret))
-    return LOG_IFERR(MDBX_EINVAL);
+    MDBX_DEBUG_STATS_RETURN(cursor_open, LOG_IFERR(MDBX_EINVAL));
   *ret = nullptr;
 
   MDBX_cursor *const mc = mdbx_cursor_create(nullptr);
   if (unlikely(!mc))
-    return LOG_IFERR(MDBX_ENOMEM);
+    MDBX_DEBUG_STATS_RETURN(cursor_open, LOG_IFERR(MDBX_ENOMEM));
 
   int rc = mdbx_cursor_bind(txn, mc, dbi);
   if (unlikely(rc != MDBX_SUCCESS)) {
     mdbx_cursor_close(mc);
-    return LOG_IFERR(rc);
+    MDBX_DEBUG_STATS_RETURN(cursor_open, LOG_IFERR(rc));
   }
 
   *ret = mc;
-  return MDBX_SUCCESS;
+  MDBX_DEBUG_STATS_RETURN(cursor_open, MDBX_SUCCESS);
 }
 
 void mdbx_cursor_close(MDBX_cursor *cursor) {
@@ -8411,31 +8514,33 @@ void mdbx_cursor_close(MDBX_cursor *cursor) {
 }
 
 int mdbx_cursor_close2(MDBX_cursor *mc) {
+  MDBX_DEBUG_STATS_SCOPE(cursor_close);
+
   if (unlikely(!mc))
-    return LOG_IFERR(MDBX_EINVAL);
+    MDBX_DEBUG_STATS_RETURN(cursor_close, LOG_IFERR(MDBX_EINVAL));
 
   if (mc->signature == cur_signature_ready4dispose) {
     if (unlikely(mc->txn || mc->backup))
-      return LOG_IFERR(MDBX_PANIC);
+      MDBX_DEBUG_STATS_RETURN(cursor_close, LOG_IFERR(MDBX_PANIC));
     cursor_drown((cursor_couple_t *)mc);
     mc->signature = 0;
     osal_free(mc);
-    return MDBX_SUCCESS;
+    MDBX_DEBUG_STATS_RETURN(cursor_close, MDBX_SUCCESS);
   }
 
   if (unlikely(mc->signature != cur_signature_live))
-    return LOG_IFERR(MDBX_EBADSIGN);
+    MDBX_DEBUG_STATS_RETURN(cursor_close, LOG_IFERR(MDBX_EBADSIGN));
 
   MDBX_txn *const txn = mc->txn;
   int rc = check_txn(txn, MDBX_TXN_FINISHED);
   if (unlikely(rc != MDBX_SUCCESS))
-    return LOG_IFERR(rc);
+    MDBX_DEBUG_STATS_RETURN(cursor_close, LOG_IFERR(rc));
 
   if (mc->backup) {
     /* Cursor closed before nested txn ends */
     cursor_reset((cursor_couple_t *)mc);
     mc->signature = cur_signature_wait4eot;
-    return MDBX_SUCCESS;
+    MDBX_DEBUG_STATS_RETURN(cursor_close, MDBX_SUCCESS);
   }
 
   if (mc->next != mc) {
@@ -8456,7 +8561,7 @@ int mdbx_cursor_close2(MDBX_cursor *mc) {
   cursor_drown((cursor_couple_t *)mc);
   mc->signature = 0;
   osal_free(mc);
-  return MDBX_SUCCESS;
+  MDBX_DEBUG_STATS_RETURN(cursor_close, MDBX_SUCCESS);
 }
 
 int mdbx_cursor_copy(const MDBX_cursor *src, MDBX_cursor *dest) {
@@ -8729,11 +8834,13 @@ int mdbx_cursor_eof(const MDBX_cursor *mc) {
 }
 
 int mdbx_cursor_get(MDBX_cursor *mc, MDBX_val *key, MDBX_val *data, MDBX_cursor_op op) {
+  MDBX_DEBUG_STATS_SCOPE(cursor_get);
+
   int rc = cursor_check_ro(mc);
   if (unlikely(rc != MDBX_SUCCESS))
-    return LOG_IFERR(rc);
+    MDBX_DEBUG_STATS_RETURN(cursor_get, LOG_IFERR(rc));
 
-  return LOG_IFERR(cursor_ops(mc, key, data, op));
+  MDBX_DEBUG_STATS_RETURN(cursor_get, LOG_IFERR(cursor_ops(mc, key, data, op)));
 }
 
 __hot static int scan_confinue(MDBX_cursor *mc, MDBX_predicate_func *predicate, void *context, void *arg, MDBX_val *key,
@@ -8970,34 +9077,38 @@ MDBX_dbi mdbx_cursor_dbi(const MDBX_cursor *mc) {
 /*----------------------------------------------------------------------------*/
 
 int mdbx_cursor_put(MDBX_cursor *mc, const MDBX_val *key, MDBX_val *data, MDBX_put_flags_t flags) {
+  MDBX_DEBUG_STATS_SCOPE(cursor_put);
+
   if (unlikely(key == nullptr || data == nullptr))
-    return LOG_IFERR(MDBX_EINVAL);
+    MDBX_DEBUG_STATS_RETURN(cursor_put, LOG_IFERR(MDBX_EINVAL));
 
   int rc = cursor_check_rw(mc);
   if (unlikely(rc != MDBX_SUCCESS))
-    return LOG_IFERR(rc);
+    MDBX_DEBUG_STATS_RETURN(cursor_put, LOG_IFERR(rc));
 
   if (unlikely(flags & MDBX_MULTIPLE)) {
     rc = cursor_check_multiple(mc, key, data, flags);
     if (unlikely(rc != MDBX_SUCCESS))
-      return LOG_IFERR(rc);
+      MDBX_DEBUG_STATS_RETURN(cursor_put, LOG_IFERR(rc));
   }
 
   if (flags & MDBX_RESERVE) {
     if (unlikely(mc->tree->flags & (MDBX_DUPSORT | MDBX_REVERSEDUP | MDBX_INTEGERDUP | MDBX_DUPFIXED)))
-      return LOG_IFERR(MDBX_INCOMPATIBLE);
+      MDBX_DEBUG_STATS_RETURN(cursor_put, LOG_IFERR(MDBX_INCOMPATIBLE));
     data->iov_base = nullptr;
   }
 
-  return LOG_IFERR(cursor_put_checklen(mc, key, data, flags));
+  MDBX_DEBUG_STATS_RETURN(cursor_put, LOG_IFERR(cursor_put_checklen(mc, key, data, flags)));
 }
 
 int mdbx_cursor_del(MDBX_cursor *mc, MDBX_put_flags_t flags) {
+  MDBX_DEBUG_STATS_SCOPE(cursor_del);
+
   int rc = cursor_check_rw(mc);
   if (unlikely(rc != MDBX_SUCCESS))
-    return LOG_IFERR(rc);
+    MDBX_DEBUG_STATS_RETURN(cursor_del, LOG_IFERR(rc));
 
-  return LOG_IFERR(cursor_del(mc, flags));
+  MDBX_DEBUG_STATS_RETURN(cursor_del, LOG_IFERR(cursor_del(mc, flags)));
 }
 
 __cold int mdbx_cursor_ignord(MDBX_cursor *mc) {
@@ -9037,7 +9148,8 @@ static int dbi_open_cstr(MDBX_txn *txn, const char *name_cstr, MDBX_db_flags_t f
 }
 
 int mdbx_dbi_open(MDBX_txn *txn, const char *name, MDBX_db_flags_t flags, MDBX_dbi *dbi) {
-  return LOG_IFERR(dbi_open_cstr(txn, name, flags, dbi, nullptr, nullptr));
+  MDBX_DEBUG_STATS_SCOPE(dbi_open);
+  MDBX_DEBUG_STATS_RETURN(dbi_open, LOG_IFERR(dbi_open_cstr(txn, name, flags, dbi, nullptr, nullptr)));
 }
 
 int mdbx_dbi_open_ex(MDBX_txn *txn, const char *name, MDBX_db_flags_t flags, MDBX_dbi *dbi, MDBX_cmp_func *keycmp,
@@ -9509,26 +9621,28 @@ __cold static int env_handle_pathname(MDBX_env *env, const pathchar_t *pathname,
 /*----------------------------------------------------------------------------*/
 
 __cold int mdbx_env_create(MDBX_env **penv) {
+  MDBX_DEBUG_STATS_SCOPE(env_create);
+
   if (unlikely(!penv))
-    return LOG_IFERR(MDBX_EINVAL);
+    MDBX_DEBUG_STATS_RETURN(env_create, LOG_IFERR(MDBX_EINVAL));
   *penv = nullptr;
 
 #ifdef MDBX_HAVE_C11ATOMICS
   if (unlikely(!atomic_is_lock_free((const volatile uint32_t *)penv))) {
     ERROR("lock-free atomic ops for %u-bit types is required", 32);
-    return LOG_IFERR(MDBX_INCOMPATIBLE);
+    MDBX_DEBUG_STATS_RETURN(env_create, LOG_IFERR(MDBX_INCOMPATIBLE));
   }
 #if MDBX_64BIT_ATOMIC
   if (unlikely(!atomic_is_lock_free((const volatile uint64_t *)penv))) {
     ERROR("lock-free atomic ops for %u-bit types is required", 64);
-    return LOG_IFERR(MDBX_INCOMPATIBLE);
+    MDBX_DEBUG_STATS_RETURN(env_create, LOG_IFERR(MDBX_INCOMPATIBLE));
   }
 #endif /* MDBX_64BIT_ATOMIC */
 #endif /* MDBX_HAVE_C11ATOMICS */
 
   if (unlikely(!is_powerof2(globals.sys_pagesize) || globals.sys_pagesize < MDBX_MIN_PAGESIZE)) {
     ERROR("unsuitable system pagesize %u", globals.sys_pagesize);
-    return LOG_IFERR(MDBX_INCOMPATIBLE);
+    MDBX_DEBUG_STATS_RETURN(env_create, LOG_IFERR(MDBX_INCOMPATIBLE));
   }
 
 #if defined(__linux__) || defined(__gnu_linux__)
@@ -9547,13 +9661,13 @@ __cold int mdbx_env_create(MDBX_env **penv) {
     ERROR("too old linux kernel %u.%u.%u.%u, the >= 3.16 is required", globals.linux_kernel_version >> 24,
           (globals.linux_kernel_version >> 16) & 255, (globals.linux_kernel_version >> 8) & 255,
           globals.linux_kernel_version & 255);
-    return LOG_IFERR(MDBX_INCOMPATIBLE);
+    MDBX_DEBUG_STATS_RETURN(env_create, LOG_IFERR(MDBX_INCOMPATIBLE));
   }
 #endif /* Linux */
 
   MDBX_env *env = osal_calloc(1, sizeof(MDBX_env));
   if (unlikely(!env))
-    return LOG_IFERR(MDBX_ENOMEM);
+    MDBX_DEBUG_STATS_RETURN(env_create, LOG_IFERR(MDBX_ENOMEM));
 
   env->max_readers = DEFAULT_READERS;
   env->max_dbi = env->n_dbi = CORE_DBS;
@@ -9591,11 +9705,11 @@ __cold int mdbx_env_create(MDBX_env **penv) {
   VALGRIND_CREATE_MEMPOOL(env, 0, 0);
   env->signature.weak = env_signature;
   *penv = env;
-  return MDBX_SUCCESS;
+  MDBX_DEBUG_STATS_RETURN(env_create, MDBX_SUCCESS);
 
 bailout:
   osal_free(env);
-  return LOG_IFERR(rc);
+  MDBX_DEBUG_STATS_RETURN(env_create, LOG_IFERR(rc));
 }
 
 __cold int mdbx_env_turn_for_recovery(MDBX_env *env, unsigned target) {
@@ -9754,6 +9868,8 @@ __cold int mdbx_env_deleteW(const wchar_t *pathname, MDBX_env_delete_mode_t mode
 }
 
 __cold int mdbx_env_open(MDBX_env *env, const char *pathname, MDBX_env_flags_t flags, mdbx_mode_t mode) {
+  MDBX_DEBUG_STATS_SCOPE(env_open);
+
 #if defined(_WIN32) || defined(_WIN64)
   wchar_t *pathnameW = nullptr;
   int rc = osal_mb2w(pathname, &pathnameW);
@@ -9764,7 +9880,7 @@ __cold int mdbx_env_open(MDBX_env *env, const char *pathname, MDBX_env_flags_t f
       /* force to make cache of the multi-byte pathname representation */
       mdbx_env_get_path(env, &pathname);
   }
-  return LOG_IFERR(rc);
+  MDBX_DEBUG_STATS_RETURN(env_open, LOG_IFERR(rc));
 }
 
 __cold int mdbx_env_openW(MDBX_env *env, const wchar_t *pathname, MDBX_env_flags_t flags, mdbx_mode_t mode) {
@@ -9889,7 +10005,7 @@ __cold int mdbx_env_openW(MDBX_env *env, const wchar_t *pathname, MDBX_env_flags
       env->flags = saved_me_flags | ENV_FATAL_ERROR;
     }
   }
-  return LOG_IFERR(rc);
+  MDBX_DEBUG_STATS_RETURN(env_open, LOG_IFERR(rc));
 }
 
 /*----------------------------------------------------------------------------*/
@@ -9932,14 +10048,16 @@ __cold int mdbx_env_resurrect_after_fork(MDBX_env *env) {
 #endif /* Windows */
 
 __cold int mdbx_env_close_ex(MDBX_env *env, bool dont_sync) {
+  MDBX_DEBUG_STATS_SCOPE(env_close);
+
   page_t *dp;
   int rc = MDBX_SUCCESS;
 
   if (unlikely(!env))
-    return LOG_IFERR(MDBX_EINVAL);
+    MDBX_DEBUG_STATS_RETURN(env_close, LOG_IFERR(MDBX_EINVAL));
 
   if (unlikely(env->signature.weak != env_signature))
-    return LOG_IFERR(MDBX_EBADSIGN);
+    MDBX_DEBUG_STATS_RETURN(env_close, LOG_IFERR(MDBX_EBADSIGN));
 
 #if MDBX_ENV_CHECKPID || !(defined(_WIN32) || defined(_WIN64))
   /* Check the PID even if MDBX_ENV_CHECKPID=0 on non-Windows
@@ -9952,12 +10070,12 @@ __cold int mdbx_env_close_ex(MDBX_env *env, bool dont_sync) {
 
   if (env->dxb_mmap.base && (env->flags & (MDBX_RDONLY | ENV_FATAL_ERROR)) == 0 && env->basal_txn) {
     if (env->basal_txn->owner && env->basal_txn->owner != osal_thread_self())
-      return LOG_IFERR(MDBX_BUSY);
+      MDBX_DEBUG_STATS_RETURN(env_close, LOG_IFERR(MDBX_BUSY));
   } else
     dont_sync = true;
 
   if (!atomic_cas32(&env->signature, env_signature, 0))
-    return LOG_IFERR(MDBX_EBADSIGN);
+    MDBX_DEBUG_STATS_RETURN(env_close, LOG_IFERR(MDBX_EBADSIGN));
 
   if (!dont_sync) {
 #if defined(_WIN32) || defined(_WIN64)
@@ -10010,7 +10128,7 @@ __cold int mdbx_env_close_ex(MDBX_env *env, bool dont_sync) {
   VALGRIND_DESTROY_MEMPOOL(env);
   osal_free(env);
 
-  return LOG_IFERR(rc);
+  MDBX_DEBUG_STATS_RETURN(env_close, LOG_IFERR(rc));
 }
 
 /*----------------------------------------------------------------------------*/
@@ -12407,22 +12525,23 @@ int mdbx_canary_get(const MDBX_txn *txn, MDBX_canary *canary) {
 }
 
 int mdbx_get(const MDBX_txn *txn, MDBX_dbi dbi, const MDBX_val *key, MDBX_val *data) {
+  MDBX_DEBUG_STATS_SCOPE(get);
   DKBUF_DEBUG;
   DEBUG("===> get db %u key [%s]", dbi, DKEY_DEBUG(key));
 
   if (unlikely(!key || !data))
-    return LOG_IFERR(MDBX_EINVAL);
+    MDBX_DEBUG_STATS_RETURN(get, LOG_IFERR(MDBX_EINVAL));
 
   int rc = check_txn(txn, MDBX_TXN_BLOCKED);
   if (unlikely(rc != MDBX_SUCCESS))
-    return LOG_IFERR(rc);
+    MDBX_DEBUG_STATS_RETURN(get, LOG_IFERR(rc));
 
   cursor_couple_t cx;
   rc = cursor_init(&cx.outer, txn, dbi);
   if (unlikely(rc != MDBX_SUCCESS))
-    return LOG_IFERR(rc);
+    MDBX_DEBUG_STATS_RETURN(get, LOG_IFERR(rc));
 
-  return LOG_IFERR(cursor_seek(&cx.outer, (MDBX_val *)key, data, MDBX_SET).err);
+  MDBX_DEBUG_STATS_RETURN(get, LOG_IFERR(cursor_seek(&cx.outer, (MDBX_val *)key, data, MDBX_SET).err));
 }
 
 int mdbx_get_equal_or_great(const MDBX_txn *txn, MDBX_dbi dbi, MDBX_val *key, MDBX_val *data) {
@@ -12554,20 +12673,22 @@ int mdbx_is_dirty(const MDBX_txn *txn, const void *ptr) {
 }
 
 int mdbx_del(MDBX_txn *txn, MDBX_dbi dbi, const MDBX_val *key, const MDBX_val *data) {
+  MDBX_DEBUG_STATS_SCOPE(del);
+
   if (unlikely(!key))
-    return LOG_IFERR(MDBX_EINVAL);
+    MDBX_DEBUG_STATS_RETURN(del, LOG_IFERR(MDBX_EINVAL));
 
   if (unlikely(dbi <= FREE_DBI))
-    return LOG_IFERR(MDBX_BAD_DBI);
+    MDBX_DEBUG_STATS_RETURN(del, LOG_IFERR(MDBX_BAD_DBI));
 
   int rc = check_txn_rw(txn, MDBX_TXN_BLOCKED);
   if (unlikely(rc != MDBX_SUCCESS))
-    return LOG_IFERR(rc);
+    MDBX_DEBUG_STATS_RETURN(del, LOG_IFERR(rc));
 
   cursor_couple_t cx;
   rc = cursor_init(&cx.outer, txn, dbi);
   if (unlikely(rc != MDBX_SUCCESS))
-    return LOG_IFERR(rc);
+    MDBX_DEBUG_STATS_RETURN(del, LOG_IFERR(rc));
 
   MDBX_val proxy;
   MDBX_cursor_op op = MDBX_SET;
@@ -12580,44 +12701,46 @@ int mdbx_del(MDBX_txn *txn, MDBX_dbi dbi, const MDBX_val *key, const MDBX_val *d
   }
   rc = cursor_seek(&cx.outer, (MDBX_val *)key, (MDBX_val *)data, op).err;
   if (unlikely(rc != MDBX_SUCCESS))
-    return LOG_IFERR(rc);
+    MDBX_DEBUG_STATS_RETURN(del, LOG_IFERR(rc));
 
   cx.outer.next = txn->cursors[dbi];
   txn->cursors[dbi] = &cx.outer;
   rc = cursor_del(&cx.outer, flags);
   txn->cursors[dbi] = cx.outer.next;
-  return LOG_IFERR(rc);
+  MDBX_DEBUG_STATS_RETURN(del, LOG_IFERR(rc));
 }
 
 int mdbx_put(MDBX_txn *txn, MDBX_dbi dbi, const MDBX_val *key, MDBX_val *data, MDBX_put_flags_t flags) {
+  MDBX_DEBUG_STATS_SCOPE(put);
+
   if (unlikely(!key || !data))
-    return LOG_IFERR(MDBX_EINVAL);
+    MDBX_DEBUG_STATS_RETURN(put, LOG_IFERR(MDBX_EINVAL));
 
   if (unlikely(dbi <= FREE_DBI))
-    return LOG_IFERR(MDBX_BAD_DBI);
+    MDBX_DEBUG_STATS_RETURN(put, LOG_IFERR(MDBX_BAD_DBI));
 
   if (unlikely(flags & ~(MDBX_NOOVERWRITE | MDBX_NODUPDATA | MDBX_ALLDUPS | MDBX_ALLDUPS | MDBX_RESERVE | MDBX_APPEND |
                          MDBX_APPENDDUP | MDBX_CURRENT | MDBX_MULTIPLE)))
-    return LOG_IFERR(MDBX_EINVAL);
+    MDBX_DEBUG_STATS_RETURN(put, LOG_IFERR(MDBX_EINVAL));
 
   int rc = check_txn_rw(txn, MDBX_TXN_BLOCKED);
   if (unlikely(rc != MDBX_SUCCESS))
-    return LOG_IFERR(rc);
+    MDBX_DEBUG_STATS_RETURN(put, LOG_IFERR(rc));
 
   cursor_couple_t cx;
   rc = cursor_init(&cx.outer, txn, dbi);
   if (unlikely(rc != MDBX_SUCCESS))
-    return LOG_IFERR(rc);
+    MDBX_DEBUG_STATS_RETURN(put, LOG_IFERR(rc));
 
   if (unlikely(flags & MDBX_MULTIPLE)) {
     rc = cursor_check_multiple(&cx.outer, key, data, flags);
     if (unlikely(rc != MDBX_SUCCESS))
-      return LOG_IFERR(rc);
+      MDBX_DEBUG_STATS_RETURN(put, LOG_IFERR(rc));
   }
 
   if (flags & MDBX_RESERVE) {
     if (unlikely(cx.outer.tree->flags & (MDBX_DUPSORT | MDBX_REVERSEDUP | MDBX_INTEGERDUP | MDBX_DUPFIXED)))
-      return LOG_IFERR(MDBX_INCOMPATIBLE);
+      MDBX_DEBUG_STATS_RETURN(put, LOG_IFERR(MDBX_INCOMPATIBLE));
     data->iov_base = nullptr;
   }
 
@@ -12645,7 +12768,7 @@ int mdbx_put(MDBX_txn *txn, MDBX_dbi dbi, const MDBX_val *key, MDBX_val *data, M
     rc = cursor_put_checklen(&cx.outer, key, data, flags);
   txn->cursors[dbi] = cx.outer.next;
 
-  return LOG_IFERR(rc);
+  MDBX_DEBUG_STATS_RETURN(put, LOG_IFERR(rc));
 }
 
 //------------------------------------------------------------------------------
@@ -12886,23 +13009,25 @@ int mdbx_txn_break(MDBX_txn *txn) {
 }
 
 int mdbx_txn_abort(MDBX_txn *txn) {
+  MDBX_DEBUG_STATS_SCOPE(txn_abort);
+
   int rc = check_txn(txn, 0);
   if (unlikely(rc != MDBX_SUCCESS))
-    return LOG_IFERR(rc);
+    MDBX_DEBUG_STATS_RETURN(txn_abort, LOG_IFERR(rc));
 
   rc = check_env(txn->env, true);
   if (unlikely(rc != MDBX_SUCCESS))
-    return LOG_IFERR(rc);
+    MDBX_DEBUG_STATS_RETURN(txn_abort, LOG_IFERR(rc));
 
 #if MDBX_TXN_CHECKOWNER
   if ((txn->flags & (MDBX_TXN_RDONLY | MDBX_NOSTICKYTHREADS)) == MDBX_NOSTICKYTHREADS &&
       unlikely(txn->owner != osal_thread_self())) {
     mdbx_txn_break(txn);
-    return LOG_IFERR(MDBX_THREAD_MISMATCH);
+    MDBX_DEBUG_STATS_RETURN(txn_abort, LOG_IFERR(MDBX_THREAD_MISMATCH));
   }
 #endif /* MDBX_TXN_CHECKOWNER */
 
-  return LOG_IFERR(txn_abort(txn));
+  MDBX_DEBUG_STATS_RETURN(txn_abort, LOG_IFERR(txn_abort(txn)));
 }
 
 int mdbx_txn_park(MDBX_txn *txn, bool autounpark) {
@@ -12976,26 +13101,28 @@ int mdbx_txn_set_userctx(MDBX_txn *txn, void *ctx) {
 void *mdbx_txn_get_userctx(const MDBX_txn *txn) { return check_txn(txn, MDBX_TXN_FINISHED) ? nullptr : txn->userctx; }
 
 int mdbx_txn_begin_ex(MDBX_env *env, MDBX_txn *parent, MDBX_txn_flags_t flags, MDBX_txn **ret, void *context) {
+  MDBX_DEBUG_STATS_SCOPE(txn_begin);
+
   if (unlikely(!ret))
-    return LOG_IFERR(MDBX_EINVAL);
+    MDBX_DEBUG_STATS_RETURN(txn_begin, LOG_IFERR(MDBX_EINVAL));
   *ret = nullptr;
 
   if (unlikely((flags & ~txn_rw_begin_flags) && (parent || (flags & ~txn_ro_begin_flags))))
-    return LOG_IFERR(MDBX_EINVAL);
+    MDBX_DEBUG_STATS_RETURN(txn_begin, LOG_IFERR(MDBX_EINVAL));
 
   int rc = check_env(env, true);
   if (unlikely(rc != MDBX_SUCCESS))
-    return LOG_IFERR(rc);
+    MDBX_DEBUG_STATS_RETURN(txn_begin, LOG_IFERR(rc));
 
   if (unlikely(env->flags & MDBX_RDONLY & ~flags)) /* write txn in RDONLY env */
-    return LOG_IFERR(MDBX_EACCESS);
+    MDBX_DEBUG_STATS_RETURN(txn_begin, LOG_IFERR(MDBX_EACCESS));
 
   MDBX_txn *txn = nullptr;
   if (parent) {
     /* Nested transactions: Max 1 child, write txns only, no writemap */
     rc = check_txn(parent, MDBX_TXN_BLOCKED - MDBX_TXN_PARKED);
     if (unlikely(rc != MDBX_SUCCESS))
-      return LOG_IFERR(rc);
+      MDBX_DEBUG_STATS_RETURN(txn_begin, LOG_IFERR(rc));
 
     if (unlikely(parent->flags & (MDBX_TXN_RDONLY | MDBX_WRITEMAP))) {
       rc = MDBX_BAD_TXN;
@@ -13003,14 +13130,14 @@ int mdbx_txn_begin_ex(MDBX_env *env, MDBX_txn *parent, MDBX_txn_flags_t flags, M
         ERROR("%s mode is incompatible with nested transactions", "MDBX_WRITEMAP");
         rc = MDBX_INCOMPATIBLE;
       }
-      return LOG_IFERR(rc);
+      MDBX_DEBUG_STATS_RETURN(txn_begin, LOG_IFERR(rc));
     }
 
     if (env->options.spill_parent4child_denominator) {
       /* Spill dirty-pages of parent to provide dirtyroom for child txn */
       rc = txn_spill(parent, nullptr, parent->tw.dirtylist->length / env->options.spill_parent4child_denominator);
       if (unlikely(rc != MDBX_SUCCESS))
-        return LOG_IFERR(rc);
+        MDBX_DEBUG_STATS_RETURN(txn_begin, LOG_IFERR(rc));
     }
     tASSERT(parent, audit_ex(parent, 0, false) == 0);
 
@@ -13036,7 +13163,7 @@ int mdbx_txn_begin_ex(MDBX_env *env, MDBX_txn *parent, MDBX_txn_flags_t flags, M
                       env->max_dbi * (sizeof(txn->dbs[0]) + sizeof(txn->cursors[0]) + sizeof(txn->dbi_state[0]));
   txn = osal_malloc(size);
   if (unlikely(txn == nullptr))
-    return LOG_IFERR(MDBX_ENOMEM);
+    MDBX_DEBUG_STATS_RETURN(txn_begin, LOG_IFERR(MDBX_ENOMEM));
 #if MDBX_DEBUG
   memset(txn, 0xCD, size);
   VALGRIND_MAKE_MEM_UNDEFINED(txn, size);
@@ -13071,7 +13198,7 @@ int mdbx_txn_begin_ex(MDBX_env *env, MDBX_txn *parent, MDBX_txn_flags_t flags, M
       pnl_free(txn->tw.repnl);
       dpl_free(txn);
       osal_free(txn);
-      return LOG_IFERR(rc);
+      MDBX_DEBUG_STATS_RETURN(txn_begin, LOG_IFERR(rc));
     }
 
     /* Move loose pages to reclaimed list */
@@ -13181,10 +13308,12 @@ int mdbx_txn_begin_ex(MDBX_env *env, MDBX_txn *parent, MDBX_txn_flags_t flags, M
           txn->dbs[FREE_DBI].root);
   }
 
-  return LOG_IFERR(rc);
+  MDBX_DEBUG_STATS_RETURN(txn_begin, LOG_IFERR(rc));
 }
 
 int mdbx_txn_commit_ex(MDBX_txn *txn, MDBX_commit_latency *latency) {
+  MDBX_DEBUG_STATS_SCOPE(txn_commit);
+
   STATIC_ASSERT(MDBX_TXN_FINISHED == MDBX_TXN_BLOCKED - MDBX_TXN_HAS_CHILD - MDBX_TXN_ERROR - MDBX_TXN_PARKED);
   const uint64_t ts_0 = latency ? osal_monotime() : 0;
   uint64_t ts_1 = 0, ts_2 = 0, ts_3 = 0, ts_4 = 0, ts_5 = 0, gc_cputime = 0;
@@ -13201,7 +13330,7 @@ int mdbx_txn_commit_ex(MDBX_txn *txn, MDBX_commit_latency *latency) {
   bailout:
     if (latency)
       memset(latency, 0, sizeof(*latency));
-    return LOG_IFERR(rc);
+    MDBX_DEBUG_STATS_RETURN(txn_commit, LOG_IFERR(rc));
   }
 
   MDBX_env *const env = txn->env;
@@ -13223,7 +13352,7 @@ int mdbx_txn_commit_ex(MDBX_txn *txn, MDBX_commit_latency *latency) {
   if ((txn->flags & MDBX_NOSTICKYTHREADS) && txn == env->basal_txn && unlikely(txn->owner != osal_thread_self())) {
     txn->flags |= MDBX_TXN_ERROR;
     rc = MDBX_THREAD_MISMATCH;
-    return LOG_IFERR(rc);
+    MDBX_DEBUG_STATS_RETURN(txn_commit, LOG_IFERR(rc));
   }
 #endif /* MDBX_TXN_CHECKOWNER */
 
@@ -13596,7 +13725,7 @@ provide_latency:
     latency->ending = ts_5 ? osal_monotime_to_16dot16(ts_6 - ts_5) : 0;
     latency->whole = osal_monotime_to_16dot16_noUnderflow(ts_6 - ts_0);
   }
-  return LOG_IFERR(rc);
+  MDBX_DEBUG_STATS_RETURN(txn_commit, LOG_IFERR(rc));
 
 fail:
   txn->flags |= MDBX_TXN_ERROR;
@@ -24091,6 +24220,10 @@ __cold static void mdbx_init(void) {
   globals.runtime_flags = ((MDBX_DEBUG) > 0) * MDBX_DBG_ASSERT + ((MDBX_DEBUG) > 1) * MDBX_DBG_AUDIT;
   globals.loglevel = MDBX_LOG_FATAL;
   ENSURE(nullptr, osal_fastmutex_init(&globals.debug_lock) == 0);
+#if defined(ND_MDBX_INSTRUMENT)
+  ENSURE(nullptr, osal_fastmutex_init(&mdbx_debug_stats.lock) == 0);
+  mdbx_debug_stats.ready = true;
+#endif
   osal_ctor();
   assert(globals.sys_pagesize > 0 && (globals.sys_pagesize & (globals.sys_pagesize - 1)) == 0);
   rthc_ctor();
@@ -24107,6 +24240,10 @@ __cold static void mdbx_fini(void) {
   rthc_dtor(current_pid);
   osal_dtor();
   TRACE("<< pid %d\n", current_pid);
+#if defined(ND_MDBX_INSTRUMENT)
+  mdbx_debug_stats.ready = false;
+  ENSURE(nullptr, osal_fastmutex_destroy(&mdbx_debug_stats.lock) == 0);
+#endif
   ENSURE(nullptr, osal_fastmutex_destroy(&globals.debug_lock) == 0);
 }
 

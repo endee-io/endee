@@ -4,9 +4,12 @@
 #include <cstring>
 #include <stdexcept>
 #include "mdbx/mdbx.h"
+#include "../utils/log.hpp"
 
 namespace ndd {
 
+    // Sparse vector payload stored in the document table. The convention in this module is that
+    // indices are sorted term ids and values[i] belongs to indices[i].
     struct SparseVector {
         std::vector<uint32_t> indices;  // term IDs (sorted)
         std::vector<float> values;      // corresponding values
@@ -17,38 +20,41 @@ namespace ndd {
         // Constructor from packed data
         SparseVector(const uint8_t* data, size_t data_size) {
             if(data_size < sizeof(uint16_t)) {
-                throw std::runtime_error("Invalid packed data: insufficient size for nnz field");
+                throw std::runtime_error("Invalid packed data: insufficient size for nr_nonzero field");
             }
 
             const uint8_t* ptr = data;
 
-            // Read number of non-zero elements (uint16_t)
-            uint16_t nnz;
-            std::memcpy(&nnz, ptr, sizeof(uint16_t));
+            // Packed format:
+            //   [nr_nonzero:u16][term_ids:n * u32][values:n * f16]
+            uint16_t nr_nonzero;
+            std::memcpy(&nr_nonzero, ptr, sizeof(uint16_t));
             ptr += sizeof(uint16_t);
 
-            // Validate remaining data size: nnz * (4 + 2) bytes
-            size_t expected_size = sizeof(uint16_t) + (nnz * (sizeof(uint32_t) + sizeof(uint16_t)));
+            // Validate remaining data size: nr_nonzero * (4 + 2) bytes
+            size_t expected_size = sizeof(uint16_t) + (nr_nonzero * (sizeof(uint32_t) + sizeof(uint16_t)));
             if(data_size != expected_size) {
                 throw std::runtime_error("Invalid packed data: size mismatch");
             }
 
-            if(nnz > 0) {
-                indices.resize(nnz);
-                values.resize(nnz);
+            if(nr_nonzero > 0) {
+                indices.resize(nr_nonzero);
+                values.resize(nr_nonzero);
 
                 // Read term IDs (uint32_t each)
-                std::memcpy(indices.data(), ptr, nnz * sizeof(uint32_t));
-                ptr += nnz * sizeof(uint32_t);
+                std::memcpy(indices.data(), ptr, nr_nonzero * sizeof(uint32_t));
+                ptr += nr_nonzero * sizeof(uint32_t);
 
                 // Read quantized values (uint16_t each) and convert to float
-                std::vector<uint16_t> fp16_values(nnz);
-                std::memcpy(fp16_values.data(), ptr, nnz * sizeof(uint16_t));
+                std::vector<uint16_t> fp16_values(nr_nonzero);
+                std::memcpy(fp16_values.data(), ptr, nr_nonzero * sizeof(uint16_t));
 
                 // Convert FP16 to float
-                for(size_t i = 0; i < nnz; ++i) {
+                for(size_t i = 0; i < nr_nonzero; ++i) {
                     values[i] = fp16_to_float(fp16_values[i]);
                 }
+            } else {
+                LOG_WARN(2261, "Deserialized sparse vector with nr_nonzero=0");
             }
         }
 
@@ -59,42 +65,43 @@ namespace ndd {
         explicit SparseVector(const std::vector<uint8_t>& packed_data) :
             SparseVector(packed_data.data(), packed_data.size()) {}
 
-        // Pack sparse vector into binary format: nnz(u16) + [term_ids(u32)] + [values(f16)]
+        // Pack sparse vector into binary format: nr_nonzero(u16) + [term_ids(u32)] + [values(f16)]
         std::vector<uint8_t> pack() const {
             if(indices.size() != values.size()) {
                 throw std::runtime_error("SparseVector indices and values size mismatch");
             }
 
-            uint16_t nnz = static_cast<uint16_t>(indices.size());
+            uint16_t nr_nonzero = static_cast<uint16_t>(indices.size());
 
-            // Calculate total size: nnz(2) + term_ids(4*nnz) + values(2*nnz)
+            // Calculate total size: nr_nonzero(2) + term_ids(4*nr_nonzero) + values(2*nr_nonzero)
             size_t total_size =
-                    sizeof(uint16_t) + (nnz * sizeof(uint32_t)) + (nnz * sizeof(uint16_t));
+                    sizeof(uint16_t) + (nr_nonzero * sizeof(uint32_t)) + (nr_nonzero * sizeof(uint16_t));
 
-            // Single allocation
+            // Serialize contiguously so the vector can be written to MDBX as one value blob.
             std::vector<uint8_t> packed(total_size);
             uint8_t* ptr = packed.data();
 
-            // Write nnz
-            std::memcpy(ptr, &nnz, sizeof(uint16_t));
+            // Write nr_nonzero
+            std::memcpy(ptr, &nr_nonzero, sizeof(uint16_t));
             ptr += sizeof(uint16_t);
 
-            if(nnz > 0) {
+            if(nr_nonzero > 0) {
                 // Write term IDs
-                std::memcpy(ptr, indices.data(), nnz * sizeof(uint32_t));
-                ptr += nnz * sizeof(uint32_t);
+                std::memcpy(ptr, indices.data(), nr_nonzero * sizeof(uint32_t));
+                ptr += nr_nonzero * sizeof(uint32_t);
 
                 // Convert float values to FP16 and write
-                std::vector<uint16_t> fp16_values(nnz);
-                for(size_t i = 0; i < nnz; ++i) {
+                std::vector<uint16_t> fp16_values(nr_nonzero);
+                for(size_t i = 0; i < nr_nonzero; ++i) {
                     fp16_values[i] = float_to_fp16(values[i]);
                 }
-                std::memcpy(ptr, fp16_values.data(), nnz * sizeof(uint16_t));
+                std::memcpy(ptr, fp16_values.data(), nr_nonzero * sizeof(uint16_t));
             }
 
             return packed;
         }
 
+#if 0
         // Dot product overloads
         float dot(const SparseVector& other) const {
             float result = 0.0f;
@@ -121,25 +128,25 @@ namespace ndd {
 
             const uint8_t* ptr = packed_data;
 
-            // Read nnz
-            uint16_t other_nnz;
-            std::memcpy(&other_nnz, ptr, sizeof(uint16_t));
+            // Read nr_nonzero
+            uint16_t other_nr_nonzero;
+            std::memcpy(&other_nr_nonzero, ptr, sizeof(uint16_t));
             ptr += sizeof(uint16_t);
 
-            if(other_nnz == 0) {
+            if(other_nr_nonzero == 0) {
                 return 0.0f;
             }
 
             // Direct pointer access to packed data
             const uint32_t* other_indices = reinterpret_cast<const uint32_t*>(ptr);
             const uint16_t* other_fp16_values =
-                    reinterpret_cast<const uint16_t*>(ptr + other_nnz * sizeof(uint32_t));
+                    reinterpret_cast<const uint16_t*>(ptr + other_nr_nonzero * sizeof(uint32_t));
 
             // Two-pointer intersection
             float result = 0.0f;
             size_t this_idx = 0;
 
-            for(uint16_t other_idx = 0; other_idx < other_nnz && this_idx < indices.size();) {
+            for(uint16_t other_idx = 0; other_idx < other_nr_nonzero && this_idx < indices.size();) {
                 uint32_t this_index = indices[this_idx];
                 uint32_t other_index = other_indices[other_idx];
 
@@ -166,6 +173,7 @@ namespace ndd {
         float dot(const std::vector<uint8_t>& packed_data) const {
             return dot(packed_data.data(), packed_data.size());
         }
+#endif //if 0
 
         // Utility methods
         bool empty() const { return indices.empty(); }

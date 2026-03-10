@@ -31,6 +31,8 @@
 
 // local includes
 #include "settings.hpp"
+#include "mdbx/mdbx.h"
+#include "sparse/inverted_index.hpp"
 #include "core/ndd.hpp"
 #include "auth.hpp"
 #include "quant/common.hpp"
@@ -241,6 +243,10 @@ int main(int argc, char** argv) {
         crow::json::wvalue response(
                 {{"status", "ok"},
                  {"timestamp", std::chrono::system_clock::now().time_since_epoch().count()}});
+        PRINT_LOG_TIME();
+        ndd::printSparseSearchDebugStats();
+        ndd::printSparseUpdateDebugStats();
+        print_mdbx_stats();
         return crow::response(200, response.dump());
     });
 
@@ -829,14 +835,15 @@ int main(int argc, char** argv) {
                 LOG_DEBUG("Filter: " << filter_array.dump());
                 try {
                     auto search_response = index_manager.searchKNN(index_id,
-                                                                   query,
-                                                                   sparse_indices,
-                                                                   sparse_values,
-                                                                   k,
-                                                                   filter_array,
-                                                                   filter_params,
-                                                                   include_vectors,
-                                                                   ef);
+                                                                    query,
+                                                                    sparse_indices,
+                                                                    sparse_values,
+                                                                    k,
+                                                                    filter_array,
+                                                                    filter_params,
+                                                                    include_vectors,
+                                                                    ef);
+
                     if(!search_response) {
                         LOG_WARN(1038, ctx.username, index_name, "Search request returned no results because the index is missing or search failed");
                         return json_error(404, "Index not found or search failed");
@@ -1246,17 +1253,7 @@ int main(int argc, char** argv) {
         return response;
     });
 
-    unsigned int num_cores = std::thread::hardware_concurrency();
-    LOG_INFO(1008, "Number of processor cores: " << num_cores);
-    if(settings::NUM_SERVER_THREADS == 0) {
-        // Run on max possible threads
-        LOG_INFO(1009, "Using all available threads");
-        app.port(settings::SERVER_PORT).multithreaded().run();
-    } else {
-        // Limit on the number of threads
-        LOG_INFO(1010, "Using " << settings::NUM_SERVER_THREADS << " threads");
-        app.port(settings::SERVER_PORT).concurrency(settings::NUM_SERVER_THREADS).run();
-    }
-
+    LOG_INFO(1008, "Using: " << settings::NUM_SERVER_THREADS << " server threads.");
+    app.port(settings::SERVER_PORT).concurrency(settings::NUM_SERVER_THREADS).run();
     return 0;
 }

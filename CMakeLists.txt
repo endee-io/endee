@@ -80,13 +80,25 @@ if(ND_DEBUG)
     add_definitions(-DND_DEBUG)
 endif()
 
+# Sparse instrumentation can be enabled independently from ND_DEBUG.
+option(ND_SPARSE_INSTRUMENT "Enable sparse index timing instrumentation" OFF)
+if(ND_SPARSE_INSTRUMENT)
+    add_definitions(-DND_SPARSE_INSTRUMENT)
+endif()
+
+# MDBX instrumentation can be enabled independently from ND_DEBUG.
+option(ND_MDBX_INSTRUMENT "Enable MDBX timing instrumentation" OFF)
+if(ND_MDBX_INSTRUMENT)
+    add_definitions(-DND_MDBX_INSTRUMENT)
+endif()
+
 
 # SIMD Optimization Options
 option(USE_AVX512 "Enable AVX512 (F, BW, VNNI, FP16)" OFF)
 option(USE_AVX2   "Enable AVX2 (FMA, F16C)" OFF)
 option(USE_SVE2   "Enable SVE2 (INT8/16, FP16)" OFF)
 option(USE_NEON   "Enable NEON (FP16, DotProd)" OFF)
-option(NDD_BMW_STORE_FLOAT_VALUES "Store raw float 32 values in BMW index (no quantization)" OFF)
+option(NDD_INV_IDX_STORE_FLOATS "Store raw float 32 values in sparse index (no quantization)" OFF)
 
 # Check if any SIMD option is selected
 if(NOT USE_AVX512 AND NOT USE_AVX2 AND NOT USE_SVE2 AND NOT USE_NEON)
@@ -238,10 +250,22 @@ endif()
 
 message(STATUS "Binary name: ${NDD_BINARY_NAME}")
 
+# Add new src/*.cpp files here when they should be compiled into ndd.
+set(NDD_CORE_SOURCES
+    src/sparse/inverted_index.cpp
+)
 
+# Build non-main project sources separately so they can be compiled in parallel
+# and linked into the final executable at the end.
+add_library(ndd_core OBJECT ${NDD_CORE_SOURCES})
 
-# Create the target
-add_executable(${NDD_BINARY_NAME} src/main.cpp ${LMDB_SOURCES} third_party/roaring_bitmap/roaring.c)
+# Create the final binary target.
+add_executable(${NDD_BINARY_NAME}
+    src/main.cpp
+    $<TARGET_OBJECTS:ndd_core>
+    ${LMDB_SOURCES}
+    third_party/roaring_bitmap/roaring.c
+)
 
 # Set MDBX-specific compile flags
 set_source_files_properties(${LMDB_SOURCES} PROPERTIES
@@ -249,6 +273,21 @@ set_source_files_properties(${LMDB_SOURCES} PROPERTIES
 )
 
 # Include directories
+target_include_directories(ndd_core PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/server
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/storage
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/utils
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party
+    ${CROW_INCLUDE_DIR}
+    ${MSGPACK_INCLUDE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/roaring
+    ${LMDB_INCLUDE_DIR}
+    ${ASIO_INCLUDE_DIR}
+    ${OPENSSL_INCLUDE_DIR}
+    ${CURL_INCLUDE_DIRS}
+)
 target_include_directories(${NDD_BINARY_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/src/server
@@ -267,37 +306,54 @@ target_include_directories(${NDD_BINARY_NAME} PRIVATE
 
 # Set compiler flags
 if(NOT DEBUG)
+    target_compile_options(ndd_core PRIVATE -O3 -ffast-math -fno-finite-math-only)
     target_compile_options(${NDD_BINARY_NAME} PRIVATE -O3 -ffast-math -fno-finite-math-only)
 endif()
 
 # Apply Flags based on selection
 if(USE_AVX512)
     message(STATUS "SIMD: AVX512 enabled (F, BW, VNNI, FP16)")
+    target_compile_options(ndd_core PRIVATE -mavx512f -mavx512bw -mavx512vnni -mavx512fp16 -mavx512vpopcntdq)
+    target_compile_definitions(ndd_core PRIVATE USE_AVX512)
     target_compile_options(${NDD_BINARY_NAME} PRIVATE -mavx512f -mavx512bw -mavx512vnni -mavx512fp16 -mavx512vpopcntdq)
     target_compile_definitions(${NDD_BINARY_NAME} PRIVATE USE_AVX512)
 elseif(USE_AVX2)
     message(STATUS "SIMD: AVX2 enabled")
+    target_compile_options(ndd_core PRIVATE -mavx2 -mfma -mf16c)
+    target_compile_definitions(ndd_core PRIVATE USE_AVX2)
     target_compile_options(${NDD_BINARY_NAME} PRIVATE -mavx2 -mfma -mf16c)
     target_compile_definitions(${NDD_BINARY_NAME} PRIVATE USE_AVX2)
 elseif(USE_SVE2)
     message(STATUS "SIMD: SVE2 enabled (ARMv8.6-a + SVE2 + FP16 + DotProd)")
+    target_compile_options(ndd_core PRIVATE -march=armv8.6-a+sve2+fp16+dotprod)
+    target_compile_definitions(ndd_core PRIVATE USE_SVE2)
     target_compile_options(${NDD_BINARY_NAME} PRIVATE -march=armv8.6-a+sve2+fp16+dotprod)
     target_compile_definitions(${NDD_BINARY_NAME} PRIVATE USE_SVE2)
 elseif(USE_NEON)
     message(STATUS "SIMD: NEON enabled")
     if(APPLE AND (CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64"))
+        target_compile_options(ndd_core PRIVATE -mcpu=native)
         target_compile_options(${NDD_BINARY_NAME} PRIVATE -mcpu=native)
     else()
+        target_compile_options(ndd_core PRIVATE -march=armv8.2-a+fp16+fp16fml+dotprod)
         target_compile_options(${NDD_BINARY_NAME} PRIVATE -march=armv8.2-a+fp16+fp16fml+dotprod)
     endif()
+    target_compile_definitions(ndd_core PRIVATE USE_NEON)
     target_compile_definitions(${NDD_BINARY_NAME} PRIVATE USE_NEON)
 endif()
 
-if(NDD_BMW_STORE_FLOAT_VALUES)
-    target_compile_definitions(${NDD_BINARY_NAME} PRIVATE NDD_BMW_STORE_FLOAT_VALUES)
+if(NDD_INV_IDX_STORE_FLOATS)
+    target_compile_definitions(ndd_core PRIVATE NDD_INV_IDX_STORE_FLOATS)
+    target_compile_definitions(${NDD_BINARY_NAME} PRIVATE NDD_INV_IDX_STORE_FLOATS)
 endif()
 
 # Add ASIO definitions
+target_compile_definitions(ndd_core PRIVATE
+    ASIO_STANDALONE
+    ASIO_HAS_STD_CHRONO
+    ASIO_HAS_STD_STRING_VIEW
+    MDB_MAXKEYSIZE=512
+)
 target_compile_definitions(${NDD_BINARY_NAME} PRIVATE 
     ASIO_STANDALONE 
     ASIO_HAS_STD_CHRONO 

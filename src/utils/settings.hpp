@@ -28,7 +28,7 @@ namespace settings {
     constexpr size_t MAX_M = 512;
     constexpr size_t DEFAULT_EF_CONSTRUCT = 128;
     constexpr size_t MIN_EF_CONSTRUCT = 8;
-    constexpr size_t BACKFILL_BUFFER = 4; // Keep 3 slots free for high quality neighbors
+    constexpr size_t BACKFILL_BUFFER = 4; // Keep 4 slots free for high quality neighbors
     constexpr size_t MAX_EF_CONSTRUCT = 4096;
     constexpr size_t DEFAULT_EF_SEARCH = 128;
     constexpr size_t MIN_K = 1;

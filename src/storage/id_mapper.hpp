@@ -34,9 +34,9 @@ public:
         rc = mdbx_env_set_geometry(
                 env_,
                 -1,                                             // lower size bound (use default)
-                1ULL << settings::ID_MAPPER_MAP_SIZE_BITS,      // current/now size (512MB)
-                1ULL << settings::ID_MAPPER_MAP_SIZE_MAX_BITS,  // upper size bound (16GB)
-                1ULL << settings::ID_MAPPER_MAP_SIZE_BITS,      // growth step (256MB)
+                1ULL << settings::ID_MAPPER_MAP_SIZE_BITS,      // current/now size
+                1ULL << settings::ID_MAPPER_MAP_SIZE_MAX_BITS,  // upper size bound
+                1ULL << settings::ID_MAPPER_MAP_SIZE_BITS,      // growth step
                 -1,                                             // shrink threshold (use default)
                 -1);                                            // pagesize (use default)
         if(rc != MDBX_SUCCESS) {

@@ -120,14 +120,13 @@ private:
         // max DBs to allow multiple databases (main + schema + numeric_forward + numeric_inverted)
         mdbx_env_set_maxdbs(env_, 10);
 
-        // Set
-        // Set geometry for auto-grow: initial per settings, growth=256MB, max=32GB
+        // Set geometry for auto-grow using the filter map size settings
         rc = mdbx_env_set_geometry(
                 env_,
                 -1,                                          // lower size bound (use default)
                 1ULL << settings::FILTER_MAP_SIZE_BITS,      // current/now size
-                1ULL << settings::FILTER_MAP_SIZE_MAX_BITS,  // upper size bound (32GB)
-                1ULL << settings::FILTER_MAP_SIZE_BITS,      // growth step (256MB)
+                1ULL << settings::FILTER_MAP_SIZE_MAX_BITS,  // upper size bound
+                1ULL << settings::FILTER_MAP_SIZE_BITS,      // growth step
                 -1,                                          // shrink threshold (use default)
                 -1);                                         // pagesize (use default)
         if(rc != MDBX_SUCCESS) {

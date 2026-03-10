@@ -40,9 +40,6 @@
 using ndd::quant::quantLevelToString;
 using ndd::quant::stringToQuantLevel;
 
-// Global CPU feature flags (initialized once at startup)
-// Note: No longer needed since VNNI INT16 is part of standard AVX512-VNNI
-
 // Authentication middleware for open-source mode
 // If NDD_AUTH_TOKEN is set: token is required
 // If NDD_AUTH_TOKEN is not set: all requests are allowed
@@ -57,7 +54,7 @@ struct AuthMiddleware : crow::ILocalMiddleware {
     };
 
     void before_handle(crow::request& req, crow::response& res, context& ctx) {
-        ctx.username = settings::DEFAULT_USERNAME;  // Always "default"
+        ctx.username = settings::DEFAULT_USERNAME;  // Single configured username in OSS mode
 
         if(!settings::AUTH_ENABLED) {
             return;  // No auth required - open mode
@@ -239,7 +236,7 @@ int main(int argc, char** argv) {
     });
 
     // ========= USER ENDPOINTS ==========
-    // Get user info - returns default user info
+    // Get user info for the configured single user
     CROW_ROUTE(app, "/api/v1/users/<string>/info")
             .CROW_MIDDLEWARES(app, AuthMiddleware)
             .methods("GET"_method)([&auth_manager, &app](const crow::request& req,
@@ -389,7 +386,7 @@ int main(int argc, char** argv) {
                                    checksum};
 
                 try {
-                    // Pass the full index_id to index_manager with Admin user type (no limits)
+                    // Pass the full index_id to index_manager using the Admin user type
                     index_manager.createIndex(index_id, config, UserType::Admin, size_in_millions);
                     return crow::response(200, "Index created successfully");
                 } catch(const std::runtime_error& e) {

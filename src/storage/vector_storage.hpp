@@ -30,7 +30,7 @@ private:
             throw std::runtime_error("Failed to create LMDB env");
         }
 
-        // Set geometry for auto-grow: initial=8GB, growth=1GB, max=128GB
+        // Set geometry for auto-grow using the vector map size settings
         rc = mdbx_env_set_geometry(env_,
                                    -1,  // lower size bound (use default)
                                    1ULL << settings::VECTOR_MAP_SIZE_BITS,      // current/now size

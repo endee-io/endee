@@ -25,7 +25,7 @@ inline int getMaxAllowedIndices(UserType type) {
     return settings::MAX_ACTIVE_INDICES;
 }
 
-// Get max vectors per index - No limits in open-source mode
+// Get max vectors per index for the single Admin user
 inline size_t getMaxVectorsPerIndex(UserType type) {
     return settings::MAX_VECTORS_ADMIN;  // 1 billion vectors
 }
@@ -63,7 +63,7 @@ struct User {
  * 1. If NDD_AUTH_TOKEN is NOT set: All APIs work without authentication
  * 2. If NDD_AUTH_TOKEN is set: Token is required in Authorization header
  *
- * All operations use a single "default" user with Admin privileges (no limits).
+ * All operations use a single configured user with Admin privileges.
  */
 class AuthManager {
 private:
@@ -72,7 +72,7 @@ private:
 public:
     AuthManager(const std::string& base_dir) :
         base_dir_(base_dir) {
-        // Create default user directory
+        // Create the configured single-user directory
         std::filesystem::path default_user_dir =
                 std::filesystem::path(base_dir) / settings::DEFAULT_USERNAME;
         std::filesystem::create_directories(default_user_dir);
@@ -91,10 +91,10 @@ public:
      * Validate the provided token.
      *
      * @param provided_token The token from the Authorization header
-     * @return The username ("default") if valid, empty string if invalid
+     * @return The configured username if valid, empty string if invalid
      */
     std::string validateToken(const std::string& provided_token) {
-        // If auth is disabled, always return default user
+        // If auth is disabled, always return the configured single user
         if(!settings::AUTH_ENABLED) {
             return settings::DEFAULT_USERNAME;
         }
@@ -113,7 +113,7 @@ public:
     std::optional<UserType> getUserType(const std::string& username) { return UserType::Admin; }
 
     /**
-     * Get user info - returns the default user.
+     * Get user info for the configured single user.
      */
     std::optional<User> getUser(const std::string& username) {
         return User{settings::DEFAULT_USERNAME,

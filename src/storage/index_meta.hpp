@@ -18,7 +18,7 @@ struct IndexMetadata {
     size_t sparse_dim = 0;  // Added sparse dimension
     std::string space_type_str;
     ndd::quant::QuantizationLevel quant_level =
-            ndd::quant::QuantizationLevel::INT8;  // Quantization level (8, 15, 16, 32)
+            ndd::quant::QuantizationLevel::INT8;  // Selected quantization level
     int32_t checksum;
     size_t total_elements;
     size_t M;

@@ -46,7 +46,7 @@ struct IndexInfo {
     size_t sparse_dim;
     std::string space_type_str;
     ndd::quant::QuantizationLevel
-            quant_level;  // Quantization level (8, 15, 16, 32) - replaces use_fp16
+            quant_level;  // Selected quantization level
     int32_t checksum;
     size_t M;
     size_t ef_con;

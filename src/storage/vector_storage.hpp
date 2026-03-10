@@ -19,6 +19,7 @@ class VectorStore {
 private:
     MDBX_env* env_;
     MDBX_dbi dbi_;
+    std::string index_id_;
     std::string path_;
     size_t vector_dim_;
     ndd::quant::QuantizationLevel quant_level_;
@@ -72,7 +73,9 @@ private:
 public:
     VectorStore(const std::string& path,
                 size_t vector_dim,
-                ndd::quant::QuantizationLevel quant_level) :
+                ndd::quant::QuantizationLevel quant_level,
+                const std::string& index_id) :
+        index_id_(index_id),
         path_(path),
         vector_dim_(vector_dim),
         quant_level_(quant_level) {
@@ -89,11 +92,13 @@ public:
     // Nested Cursor struct
 
     struct Cursor {
+        std::string index_id_;
         MDBX_txn* txn = nullptr;
         MDBX_cursor* cursor = nullptr;
         bool done = false;
 
-        Cursor(MDBX_env* env, MDBX_dbi dbi) {
+        Cursor(MDBX_env* env, MDBX_dbi dbi, const std::string& index_id) :
+            index_id_(index_id) {
             if(mdbx_txn_begin(env, nullptr, MDBX_TXN_RDONLY, &txn) != MDBX_SUCCESS) {
                 throw std::runtime_error("LMDB txn begin failed");
             }
@@ -118,7 +123,10 @@ public:
             }
 
             if(key.iov_len != sizeof(ndd::idInt)) {
-                printf("Invalid key size: %zu, expected: %zu\n", key.iov_len, sizeof(ndd::idInt));
+                LOG_ERROR(1601,
+                                index_id_,
+                                "Invalid key size " << key.iov_len << ", expected "
+                                                    << sizeof(ndd::idInt));
                 throw std::runtime_error("Invalid key size in LMDB entry");
             }
 
@@ -139,7 +147,7 @@ public:
         }
     };
 
-    Cursor getCursor() { return Cursor(env_, dbi_); }
+    Cursor getCursor() { return Cursor(env_, dbi_, index_id_); }
 
     void store_vector_bytes(ndd::idInt id, const std::vector<uint8_t>& vec) {
         store_vectors_batch({{id, vec}});
@@ -523,6 +531,7 @@ public:
 // Main storage interface combining vector and meta stores
 class VectorStorage {
 private:
+    std::string index_id_;
     std::unique_ptr<VectorStore> vector_store_;
     std::unique_ptr<MetaStore> meta_store_;
 
@@ -530,12 +539,14 @@ public:
     std::unique_ptr<Filter> filter_store_;
 
     VectorStorage(const std::string& base_path,
+                  const std::string& index_id,
                   size_t vector_dim,
-                  ndd::quant::QuantizationLevel quant_level) {
-        vector_store_ =
-                std::make_unique<VectorStore>(base_path + "/vectors", vector_dim, quant_level);
+                  ndd::quant::QuantizationLevel quant_level) :
+        index_id_(index_id) {
+        vector_store_ = std::make_unique<VectorStore>(
+                base_path + "/vectors", vector_dim, quant_level, index_id_);
         meta_store_ = std::make_unique<MetaStore>(base_path + "/meta");
-        filter_store_ = std::make_unique<Filter>(base_path + "/filters");
+        filter_store_ = std::make_unique<Filter>(base_path + "/filters", index_id_);
     }
     VectorStore::Cursor getCursor() { return vector_store_->getCursor(); }
     // Get numeric ids of matching filters

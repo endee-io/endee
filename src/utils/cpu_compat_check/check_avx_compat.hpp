@@ -2,8 +2,8 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdbool.h>
+#include "../log.hpp"
 
-static const char* ERROR_CALLING_FUNC = "ERROR: should not be calling %s\n";
 static const uint32_t ECX_OSXSAVE_BIT = 27;
 static const uint32_t ECX_AVX_BIT = 28;
 
@@ -25,32 +25,32 @@ static const uint32_t EDX_AVX512FP16_BIT = 23;
  */
 
 int check_avx2_support(void) {
-    printf(ERROR_CALLING_FUNC, __func__);
+    LOG_ERROR(1710, "Unexpected AVX compatibility probe call to " << __func__);
     return false;
 }
 
 int check_avx512_support(void) {
-    printf(ERROR_CALLING_FUNC, __func__);
+    LOG_ERROR(1711, "Unexpected AVX compatibility probe call to " << __func__);
     return false;
 }
 
 int check_avx512_fp16_support(void) {
-    printf(ERROR_CALLING_FUNC, __func__);
+    LOG_ERROR(1712, "Unexpected AVX compatibility probe call to " << __func__);
     return false;
 }
 
 int check_avx512_vnni_support(void) {
-    printf(ERROR_CALLING_FUNC, __func__);
+    LOG_ERROR(1713, "Unexpected AVX compatibility probe call to " << __func__);
     return false;
 }
 
 int check_avx512_bw_support(void) {
-    printf(ERROR_CALLING_FUNC, __func__);
+    LOG_ERROR(1714, "Unexpected AVX compatibility probe call to " << __func__);
     return false;
 }
 
 int check_avx512_vpopcntdq_support(void) {
-    printf(ERROR_CALLING_FUNC, __func__);
+    LOG_ERROR(1715, "Unexpected AVX compatibility probe call to " << __func__);
     return false;
 }
 
@@ -294,12 +294,12 @@ int check_avx2_support(void) {
     int ret = false;
 
     if(!cpu_has_avx2()) {
-        printf("ERROR: AVX2: not supported by CPU.\n");
+        LOG_ERROR(1716, "AVX2 is not supported by the CPU");
         goto exit;
     }
 
     if(!os_supports_avx()) {
-        printf("ERROR: AVX2: CPU supports it, but OS/XSAVE state not enabled (XCR0 XMM/YMM).\n");
+        LOG_ERROR(1717, "AVX2 is supported by the CPU but not enabled by the OS");
         goto exit;
     }
 
@@ -307,7 +307,7 @@ int check_avx2_support(void) {
     // run_one_avx2_instruction();
 
     ret = true;
-    printf("LOG: AVX2: supported and usable.\n");
+    LOG_INFO(1718, "AVX2 is supported and usable");
 exit:
     return ret;
 }
@@ -320,12 +320,12 @@ int check_avx512_support(void) {
     int ret = false;
 
     if(!cpu_has_avx512f()) {
-        printf("ERROR: AVX-512: not supported by CPU (missing AVX-512F).\n");
+        LOG_ERROR(1719, "AVX-512 is not supported by the CPU; missing AVX-512F");
         goto exit;
     }
 
     if(!os_supports_avx512_state()) {
-        printf("ERROR: AVX-512: CPU supports it, but OS/XSAVE state not enabled (XCR0).\n");
+        LOG_ERROR(1720, "AVX-512 is supported by the CPU but not enabled by the OS");
         goto exit;
     }
 
@@ -333,7 +333,7 @@ int check_avx512_support(void) {
     // run_one_avx512_instruction();
 
     ret = true;
-    printf("LOG: AVX-512: supported and usable.\n");
+    LOG_INFO(1721, "AVX-512 is supported and usable");
 exit:
     return ret;
 }
@@ -342,17 +342,17 @@ int check_avx512_fp16_support(void) {
     int ret = false;
 
     if(!is_intel_cpu()) {
-        printf("ERROR: AVX-512 FP16: not supported on non-Intel CPUs.\n");
+        LOG_ERROR(1722, "AVX-512 FP16 is not supported on non-Intel CPUs");
         goto exit;
     }
 
     if(!cpu_has_avx512f_and_fp16()) {
-        printf("ERROR: AVX-512 FP16: not supported by CPU.\n");
+        LOG_ERROR(1723, "AVX-512 FP16 is not supported by the CPU");
         goto exit;
     }
 
     if(!os_supports_avx512_state()) {
-        printf("ERROR: AVX-512 FP16: CPU supports it, but OS/XSAVE state not enabled (XCR0).\n");
+        LOG_ERROR(1724, "AVX-512 FP16 is supported by the CPU but not enabled by the OS");
         goto exit;
     }
 
@@ -360,7 +360,7 @@ int check_avx512_fp16_support(void) {
     // run_one_fp16_instruction();
 
     ret = true;
-    printf("LOG: AVX-512 FP16: supported and usable.\n");
+    LOG_INFO(1725, "AVX-512 FP16 is supported and usable");
 exit:
     return ret;
 }
@@ -369,24 +369,24 @@ int check_avx512_vnni_support(void) {
     int ret = false;
 
     if(!cpu_has_avx512f()) {
-        printf("ERROR: AVX-512 VNNI: not supported (missing AVX-512F).\n");
+        LOG_ERROR(1726, "AVX-512 VNNI is not supported; missing AVX-512F");
         goto exit;
     }
 
     if(!cpu_has_avx512vnni()) {
-        printf("ERROR: AVX-512 VNNI: not supported by CPU.\n");
+        LOG_ERROR(1727, "AVX-512 VNNI is not supported by the CPU");
         goto exit;
     }
 
     if(!os_supports_avx512_state()) {
-        printf("ERROR: AVX-512 VNNI: CPU supports it, but OS AVX-512 state not enabled (XCR0).\n");
+        LOG_ERROR(1728, "AVX-512 VNNI is supported by the CPU but not enabled by the OS");
         goto exit;
     }
 
     // run_one_avx512vnni_instruction();
 
     ret = true;
-    printf("LOG: AVX-512 VNNI: supported and usable.\n");
+    LOG_INFO(1729, "AVX-512 VNNI is supported and usable");
 
 exit:
     return ret;
@@ -396,24 +396,24 @@ int check_avx512_bw_support(void) {
     int ret = false;
 
     if(!cpu_has_avx512f()) {
-        printf("ERROR: AVX-512 BW: not supported (missing AVX-512F).\n");
+        LOG_ERROR(1730, "AVX-512 BW is not supported; missing AVX-512F");
         goto exit;
     }
 
     if(!cpu_has_avx512bw()) {
-        printf("ERROR: AVX-512 BW: not supported by CPU.\n");
+        LOG_ERROR(1731, "AVX-512 BW is not supported by the CPU");
         goto exit;
     }
 
     if(!os_supports_avx512_state()) {
-        printf("ERROR: AVX-512 BW: CPU supports it, but OS AVX-512 state not enabled (XCR0).\n");
+        LOG_ERROR(1732, "AVX-512 BW is supported by the CPU but not enabled by the OS");
         goto exit;
     }
 
     // run_one_avx512bw_instruction();
 
     ret = true;
-    printf("LOG: AVX-512 BW: supported and usable.\n");
+    LOG_INFO(1733, "AVX-512 BW is supported and usable");
 
 exit:
     return ret;
@@ -423,25 +423,24 @@ int check_avx512_vpopcntdq_support(void) {
     int ret = false;
 
     if(!cpu_has_avx512f()) {
-        printf("ERROR: AVX-512 vpopcntdq: not supported (missing AVX-512F).\n");
+        LOG_ERROR(1734, "AVX-512 vpopcntdq is not supported; missing AVX-512F");
         goto exit;
     }
 
     if(!cpu_has_avx512vpopcntdq()) {
-        printf("ERROR: AVX-512 vpopcntdq: not supported by CPU.\n");
+        LOG_ERROR(1735, "AVX-512 vpopcntdq is not supported by the CPU");
         goto exit;
     }
 
     if(!os_supports_avx512_state()) {
-        printf("ERROR: AVX-512 vpopcntdq: CPU supports it, but OS AVX-512 state not enabled "
-               "(XCR0).\n");
+        LOG_ERROR(1736, "AVX-512 vpopcntdq is supported by the CPU but not enabled by the OS");
         goto exit;
     }
 
     // run_one_avx512vpopcntdq_instruction();
 
     ret = true;
-    printf("LOG: AVX-512 vpopcntdq: supported and usable.\n");
+    LOG_INFO(1737, "AVX-512 vpopcntdq is supported and usable");
 
 exit:
     return ret;

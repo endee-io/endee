@@ -7,6 +7,7 @@
 #include <iostream>
 
 #include "json/nlohmann_json.hpp"
+#include "log.hpp"
 #include "settings.hpp"
 
 // Simplified for open-source mode - only Admin type exists
@@ -78,10 +79,9 @@ public:
         std::filesystem::create_directories(default_user_dir);
 
         if(settings::AUTH_ENABLED) {
-            std::cerr << "Authentication ENABLED - NDD_AUTH_TOKEN is set" << std::endl;
+            LOG_INFO(1101, "Authentication enabled");
         } else {
-            std::cerr << "Authentication DISABLED - Running in open mode (no token required)"
-                      << std::endl;
+            LOG_INFO(1102, "Authentication disabled; running in open mode");
         }
     }
 

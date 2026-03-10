@@ -148,7 +148,10 @@ public:
         try {
             std::ifstream f(path);
             return nlohmann::json::parse(f);
-        } catch (...) {
+        } catch (const std::exception& e) {
+            LOG_WARN(1304,
+                          username,
+                          "Failed to parse backup metadata file " << path << ": " << e.what());
             return nlohmann::json::object();
         }
     }
@@ -166,9 +169,9 @@ public:
         if (std::filesystem::exists(temp_dir)) {
             try {
                 std::filesystem::remove_all(temp_dir);
-                LOG_INFO("Cleaned up backup temp directory");
+                LOG_INFO(1301, "Cleaned up backup temp directory");
             } catch (const std::exception& e) {
-                LOG_ERROR("Failed to cleanup backup temp directory: " << e.what());
+                LOG_ERROR(1302, "Failed to clean up backup temp directory: " << e.what());
             }
         }
     }
@@ -256,7 +259,7 @@ public:
             backup_db.erase(backup_name);
             writeBackupJson(username, backup_db);
 
-            LOG_INFO("Deleted backup: " << backup_tar);
+            LOG_INFO(1303, username, "Deleted backup " << backup_tar);
             return {true, ""};
         } else {
             return {false, "Backup not found"};

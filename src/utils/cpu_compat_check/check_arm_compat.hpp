@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include "../log.hpp"
 
 #if !defined(__aarch64__)
 
@@ -12,12 +13,12 @@
  */
 
 int is_neon_compatible(void) {
-    printf("ERROR: should not be calling %s\n", __func__);
+    LOG_ERROR(1701, "Unexpected ARM compatibility probe call to " << __func__);
     return false;
 }
 
 int is_sve2_compatible(void) {
-    printf("ERROR: should not be calling %s\n", __func__);
+    LOG_ERROR(1702, "Unexpected ARM compatibility probe call to " << __func__);
     return false;
 }
 
@@ -102,9 +103,9 @@ int is_neon_compatible(void) {
     int neon_ok = probe_neon();
 
     if(neon_ok) {
-        printf("LOG: NEON: supported and usable.\n");
+        LOG_INFO(1703, "NEON is supported and usable");
     } else {
-        printf("ERROR: NEON: NOT supported.\n");
+        LOG_ERROR(1704, "NEON is not supported");
     }
     return neon_ok;
 }
@@ -113,9 +114,9 @@ int is_sve2_compatible(void) {
     int sve2_ok = probe_sve2();
 
     if(sve2_ok) {
-        printf("LOG: SVE2: supported and usable.\n");
+        LOG_INFO(1705, "SVE2 is supported and usable");
     } else {
-        printf("ERROR: SVE2: NOT supported.\n");
+        LOG_ERROR(1706, "SVE2 is not supported");
     }
 
     return sve2_ok;

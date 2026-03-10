@@ -42,6 +42,7 @@ class Filter {
 private:
     MDBX_env* env_;
     MDBX_dbi dbi_;  // Used for schema storage
+    std::string index_id_;
     std::string path_;
     std::unique_ptr<ndd::filter::NumericIndex> numeric_index_;
     std::unique_ptr<ndd::filter::CategoryIndex> category_index_;
@@ -54,6 +55,8 @@ private:
         MDBX_txn* txn;
         int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_RDONLY, &txn);
         if(rc != MDBX_SUCCESS) {
+            LOG_ERROR(
+                    1210, index_id_, "Failed to begin schema read transaction: " << mdbx_strerror(rc));
             return;
         }
 
@@ -70,7 +73,7 @@ private:
                     schema_cache_[k] = static_cast<FieldType>(v.get<int>());
                 }
             } catch(...) {
-                LOG_ERROR("Failed to load schema");
+                LOG_ERROR(1201, index_id_, "Failed to load filter schema");
             }
         }
         mdbx_txn_abort(txn);
@@ -86,6 +89,8 @@ private:
         MDBX_txn* txn;
         int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
         if(rc != MDBX_SUCCESS) {
+            LOG_ERROR(
+                    1208, index_id_, "Failed to begin schema write transaction: " << mdbx_strerror(rc));
             return;
         }
 
@@ -94,9 +99,14 @@ private:
 
         rc = mdbx_put(txn, dbi_, &key, &data, MDBX_UPSERT);
         if(rc == MDBX_SUCCESS) {
-            mdbx_txn_commit(txn);
+            rc = mdbx_txn_commit(txn);
+            if(rc != MDBX_SUCCESS) {
+                LOG_ERROR(
+                        1209, index_id_, "Failed to commit filter schema update: " << mdbx_strerror(rc));
+            }
         } else {
             mdbx_txn_abort(txn);
+            LOG_ERROR(1211, index_id_, "Failed to persist filter schema: " << mdbx_strerror(rc));
         }
     }
 
@@ -167,7 +177,8 @@ private:
     }
 
 public:
-    Filter(const std::string& path) :
+    Filter(const std::string& path, const std::string& index_id) :
+        index_id_(index_id),
         path_(path) {
         std::filesystem::create_directories(path);
         init_environment();
@@ -411,7 +422,7 @@ public:
                     }
 
                     if(!register_field_type(field, type)) {
-                        LOG_ERROR("Type mismatch for field '" << field << "'");
+                        LOG_ERROR(1202, index_id_, "Type mismatch for field '" << field << "'");
                         continue;
                     }
 
@@ -432,13 +443,15 @@ public:
                                 format_filter_key(field, value.get<bool>() ? "1" : "0");
                         filter_to_ids[filter_key].push_back(numeric_id);
                     } else {
-                        // Optional: catch bad types (bool, float, object, array, etc.)
-                        std::cerr << "Unsupported filter type for field '" << field
-                                  << "' in filter: " << value.dump() << std::endl;
+                        LOG_WARN(1203,
+                                       index_id_,
+                                       "Unsupported filter type for field '" << field
+                                                                             << "' in filter: "
+                                                                             << value.dump());
                     }
                 }
             } catch(const std::exception& e) {
-                std::cerr << "Error parsing filter JSON: " << e.what() << std::endl;
+                LOG_ERROR(1204, index_id_, "Error parsing filter JSON: " << e.what());
             }
         }
 
@@ -476,7 +489,7 @@ public:
                 }
 
                 if(!register_field_type(field, type)) {
-                    LOG_ERROR("Type mismatch for field '" << field << "'");
+                    LOG_ERROR(1205, index_id_, "Type mismatch for field '" << field << "'");
                     continue;
                 }
 
@@ -495,7 +508,7 @@ public:
                 }
             }
         } catch(const std::exception& e) {
-            std::cerr << "Error adding filters: " << e.what() << std::endl;
+            LOG_ERROR(1206, index_id_, "Error adding filters: " << e.what());
         }
     }
 
@@ -513,7 +526,7 @@ public:
                 }
             }
         } catch(const std::exception& e) {
-            std::cerr << "Error removing filters: " << e.what() << std::endl;
+            LOG_ERROR(1207, index_id_, "Error removing filters: " << e.what());
         }
     }
 

@@ -10,11 +10,13 @@
 #include <cstring>
 #include <cerrno>
 #include "../core/types.hpp"
+#include "../utils/log.hpp"
 
 enum class WALOperationType : uint8_t { VECTOR_ADD = 1, VECTOR_DELETE = 2, VECTOR_UPDATE = 3 };
 
 class WriteAheadLog {
 private:
+    std::string index_id_;
     std::string log_path_;
     std::ofstream log_file_;
     std::mutex file_mutex_;
@@ -28,7 +30,8 @@ public:
         ndd::idInt numeric_id;
     };
 
-    WriteAheadLog(const std::string& index_dir) {
+    WriteAheadLog(const std::string& index_dir, const std::string& index_id) :
+        index_id_(index_id) {
         log_path_ = index_dir + "/wal.bin";
         // Open in append mode
         log_file_.open(log_path_, std::ios::binary | std::ios::app);
@@ -37,7 +40,7 @@ public:
             err_string = "Failed to open WAL file: " + log_path_
                          + " errno: " + std::to_string(errno) + " errcode: " + std::strerror(errno);
 
-            LOG_ERROR(err_string);
+            LOG_ERROR(1401, index_id_, err_string);
             throw std::runtime_error(err_string);
         }
         // Check if WAL has existing entries (no need to count them)

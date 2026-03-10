@@ -80,23 +80,23 @@ struct CacheEntry {
                std::shared_ptr<VectorStorage> storage_,
                std::unique_ptr<ndd::SparseVectorStorage> sparse_storage_,
                std::chrono::system_clock::time_point access_time_) {
-        LOG_INFO("Creating CacheEntry for index: " << index_id_);
+        LOG_INFO(2001, index_id_, "Creating cache entry");
 
         // Validate all components
         if(!alg_) {
-            LOG_ERROR("Algorithm is null");
+            LOG_ERROR(2002, index_id_, "Algorithm is null");
             throw std::runtime_error("Algorithm is null");
         }
         if(!mapper_) {
-            LOG_ERROR("ID Mapper is null");
+            LOG_ERROR(2003, index_id_, "ID mapper is null");
             throw std::runtime_error("ID Mapper is null");
         }
         if(!storage_) {
-            LOG_ERROR("Vector Storage is null");
+            LOG_ERROR(2004, index_id_, "Vector storage is null");
             throw std::runtime_error("Vector Storage is null");
         }
 
-        LOG_INFO("Assigning index_id: " << index_id_);
+        LOG_INFO(2005, index_id_, "Assigning index id");
         index_id = std::move(index_id_);
         sparse_dim = sparse_dim_;
 
@@ -108,12 +108,12 @@ struct CacheEntry {
 
         last_access = access_time_;
 
-        LOG_INFO("Moving algorithm instance");
+        LOG_INFO(2006, index_id, "Moving algorithm instance");
         alg = std::move(alg_);
 
         last_saved_at = std::chrono::system_clock::now();
 
-        LOG_INFO("CacheEntry construction completed");
+        LOG_INFO(2007, index_id, "Cache entry construction completed");
     }
 
     void markUpdated() {
@@ -166,7 +166,7 @@ private:
         }
 
         std::string wal_dir = data_dir_ + "/" + index_id;
-        auto wal = std::make_unique<WriteAheadLog>(wal_dir);
+        auto wal = std::make_unique<WriteAheadLog>(wal_dir, index_id);
         auto wal_ptr = wal.get();
         wal_logs_[index_id] = std::move(wal);
         return wal_ptr;
@@ -186,10 +186,10 @@ private:
 
         // Check if WAL has entries needing recovery
         if(wal->hasEntries()) {
-            LOG_INFO("WAL recovery needed for index " << index_id);
+            LOG_INFO(2008, index_id, "WAL recovery needed");
 
             auto wal_entries = wal->readEntries();
-            LOG_INFO("Read " << wal_entries.size() << " entries from WAL");
+            LOG_INFO(2009, index_id, "Read " << wal_entries.size() << " entries from WAL");
 
             // Process all entries in the exact order they were recorded
             std::vector<idInt> failed_vector_add_ids;
@@ -233,8 +233,10 @@ private:
             // Add failed VECTOR_ADD IDs back to deleted_ids for reuse
             if(!failed_vector_add_ids.empty()) {
                 entry.id_mapper->reclaim_failed_ids(failed_vector_add_ids);
-                LOG_INFO("Reclaimed " << failed_vector_add_ids.size()
-                                      << " failed VECTOR_ADD IDs for reuse");
+                LOG_INFO(2010,
+                               index_id,
+                               "Reclaimed " << failed_vector_add_ids.size()
+                                            << " failed VECTOR_ADD ids for reuse");
             }
 
             // Mark as updated to trigger a save
@@ -249,7 +251,7 @@ private:
 
     // The thread will call this method
     void autosaveLoop() {
-        LOG_INFO("Autosave thread started");
+        LOG_INFO(2011, "Autosave thread started");
         while(running_) {
             // Sleep for 5 minutes
             std::this_thread::sleep_for(std::chrono::minutes(5));
@@ -258,10 +260,10 @@ private:
             if(!running_) {
                 break;
             }
-            LOG_INFO("Autosave check running");
+            LOG_INFO(2012, "Autosave check running");
             checkAndSaveIndices();
         }
-        LOG_INFO("Autosave thread stopped");
+        LOG_INFO(2013, "Autosave thread stopped");
     }
 
     // Check and save indices based on update time
@@ -375,8 +377,8 @@ private:
 
         // Update element count in metadata
         if(!metadata_manager_->updateElementCount(entry.index_id, entry.alg->getElementsCount())) {
-            std::cerr << "Warning: Failed to update element count in metadata for "
-                      << entry.index_id << std::endl;
+            LOG_WARN(
+                    2014, entry.index_id, "Failed to update element count in metadata");
         }
         entry.updated = false;
     }
@@ -404,14 +406,13 @@ public:
 
                     // Only evict if the index is not dirty (hasn't been updated)
                     if(it->second.updated) {
-                        LOG_WARN("Cannot evict dirty index " << to_evict
-                                                             << " - needs saving first");
+                        LOG_WARN(2015, to_evict, "Cannot evict dirty index; it must be saved first");
                         // Put it back at the front to try other indices
                         indices_list_.push_front(to_evict);
                         continue;
                     }
 
-                    LOG_INFO("Evicting clean index " << to_evict);
+                    LOG_INFO(2016, to_evict, "Evicting clean index from cache");
                     indices_.erase(it);
                 }
             }
@@ -499,8 +500,9 @@ public:
                         saveIndex(pair.first);
                     }
                 } catch(const std::exception& e) {
-                    std::cerr << "Failed to save index " << pair.first
-                              << " during shutdown: " << e.what() << std::endl;
+                    LOG_ERROR(2017,
+                                    pair.first,
+                                    "Failed to save index during shutdown: " << e.what());
                 }
             }
             LOG_DEBUG("Shutdown complete");
@@ -521,13 +523,13 @@ public:
 
         // 1. Fail if directory doesn't exist
         if(!std::filesystem::exists(base_path)) {
-            LOG_ERROR("Index directory does not exist: " << base_path);
+            LOG_ERROR(2018, index_id, "Index directory does not exist: " << base_path);
             return false;
         }
 
         // 2. Fail if index file already exists
         if(std::filesystem::exists(index_path)) {
-            LOG_ERROR("Index file already exists: " << index_path);
+            LOG_ERROR(2019, index_id, "Index file already exists: " << index_path);
             return false;
         }
 
@@ -550,7 +552,7 @@ public:
         fout << "0:0\n";
         fout.close();
 
-        LOG_INFO("Index reset complete and saved: " << index_id);
+        LOG_INFO(2020, index_id, "Index reset complete and saved");
         return true;
     }
 
@@ -604,8 +606,9 @@ public:
         std::string lmdb_dir = index_dir + "/ids";
 
         //create the directory and initialize sequence for IDMapper
-        LOG_INFO("Creating IDMapper for index "
-                 << index_id << " with user type: " << userTypeToString(user_type));
+        LOG_INFO(2021,
+                       index_id,
+                       "Creating ID mapper with user type " << userTypeToString(user_type));
 
         // IDMapper now uses tier-based fixed bloom filter sizing based on user_type
         auto id_mapper = std::make_shared<IDMapper>(lmdb_dir, true, user_type);
@@ -614,7 +617,7 @@ public:
         // Create HNSW directly with all necessary parameters
         ndd::quant::QuantizationLevel quant_level = config.quant_level;
         auto vector_storage =
-                std::make_shared<VectorStorage>(index_dir, config.dim, config.quant_level);
+                std::make_shared<VectorStorage>(index_dir, index_id, config.dim, config.quant_level);
 
         // Initialize Sparse Storage if needed
         std::unique_ptr<ndd::SparseVectorStorage> sparse_storage = nullptr;
@@ -681,7 +684,7 @@ public:
             throw std::runtime_error("Failed to store index metadata");
         }
 
-        LOG_INFO("Saving newly created index " << index_id);
+        LOG_INFO(2022, index_id, "Saving newly created index");
         // Index is marked as updated so it needs to be saved immediately for crash recovery
         saveIndex(index_id);
         return true;
@@ -728,7 +731,7 @@ public:
         // Step 2: Create IDMapper and VectorStorage - IDMapper handles bloom filter initialization
         auto id_mapper = std::make_shared<IDMapper>(lmdb_dir, false);
         auto vector_storage = std::make_shared<VectorStorage>(
-                index_dir, alg->getDimension(), alg->getQuantLevel());
+                index_dir, index_id, alg->getDimension(), alg->getQuantLevel());
 
         // Initialize Sparse Storage if sparse_dim > 0
         std::unique_ptr<ndd::SparseVectorStorage> sparse_storage;
@@ -774,7 +777,7 @@ public:
     // Reload index: save (if updated), evict from memory, and reload
     // Cache size is automatically checked and adjusted if < 5% of element count during reload
     bool reload(const std::string& index_id) {
-        LOG_INFO("Starting reload for " << index_id);
+        LOG_INFO(2023, index_id, "Starting reload");
 
         try {
             // Phase 1: Save index if it was updated
@@ -798,7 +801,7 @@ public:
                         indices_list_.erase(list_it);
                     }
                     indices_.erase(it);
-                    LOG_INFO("Evicted " << index_id << " from cache");
+                    LOG_INFO(2024, index_id, "Evicted index from cache");
                 }
             }
 
@@ -811,15 +814,16 @@ public:
                 auto it = indices_.find(index_id);
                 if(it != indices_.end()) {
                     // Cache removed
-                    LOG_INFO("Reloaded "
-                             << index_id << ", bloom: fixed size"
-                             << ", index elements: " << it->second.alg->getElementsCount());
+                    LOG_INFO(2025,
+                                   index_id,
+                                   "Reloaded index with "
+                                           << it->second.alg->getElementsCount() << " elements");
                 }
             }
 
             return true;
         } catch(const std::exception& e) {
-            LOG_ERROR("Failed to reload " << index_id << ": " << e.what());
+            LOG_ERROR(2026, index_id, "Failed to reload index: " << e.what());
             return false;
         }
     }
@@ -1020,7 +1024,7 @@ public:
             // so it can be caught by API layer and returned as proper JSON error
             throw;
         } catch(const std::exception& e) {
-            std::cerr << "Batch insertion failed: " << e.what() << std::endl;
+            LOG_ERROR(2027, index_id, "Batch insertion failed: " << e.what());
             return false;
         }
     }
@@ -1032,7 +1036,7 @@ public:
         std::string recover_file = base_path + "/recover.txt";
 
         if(!std::filesystem::exists(recover_file)) {
-            LOG_ERROR("Recover file not found: " << recover_file);
+            LOG_ERROR(2028, index_id, "Recover file not found: " << recover_file);
             return false;
         }
 
@@ -1044,14 +1048,14 @@ public:
 
         auto colon = line.find(':');
         if(colon == std::string::npos) {
-            LOG_ERROR("Invalid recover.txt format");
+            LOG_ERROR(2029, index_id, "Invalid recover.txt format");
             return false;
         }
 
         size_t offset = std::stoull(line.substr(0, colon));
         int flag = std::stoi(line.substr(colon + 1));
         if(flag == 1) {
-            LOG_INFO("Recovery already in progress for: " << index_id);
+            LOG_INFO(2030, index_id, "Recovery already in progress");
             return false;
         }
 
@@ -1080,7 +1084,7 @@ public:
         }
 
         if(batch.empty()) {
-            LOG_INFO("No more vectors to recover");
+            LOG_INFO(2031, index_id, "No more vectors to recover");
             std::ofstream fout(recover_file);
             fout << offset << ":0\n";  // just mark as not busy
             return true;
@@ -1089,6 +1093,7 @@ public:
         // Step 5: Insert in parallel like addVectors()
         size_t num_threads = std::min(settings::NUM_RECOVERY_THREADS, batch.size());
         std::atomic<size_t> next{0};
+        std::atomic<size_t> empty_vector_count{0};
         std::vector<std::thread> threads;
 
         for(size_t t = 0; t < num_threads; ++t) {
@@ -1099,7 +1104,7 @@ public:
                     if(!vec_bytes.empty()) {
                         entry.alg->addPoint<true>(vec_bytes.data(), label);
                     } else {
-                        LOG_ERROR("Skipping label " << label << " due to empty vector");
+                        empty_vector_count.fetch_add(1);
                     }
                 }
             });
@@ -1109,7 +1114,13 @@ public:
             th.join();
         }
 
-        LOG_INFO("Recovered " << batch.size() << " vectors to index: " << index_id);
+        if(empty_vector_count.load() > 0) {
+            LOG_WARN(2032,
+                           index_id,
+                           "Skipped " << empty_vector_count.load() << " vectors during recovery because they were empty");
+        }
+
+        LOG_INFO(2033, index_id, "Recovered " << batch.size() << " vectors");
 
         // Step 6: Save index
         // Mark the index as updated so that it will be saved
@@ -1153,7 +1164,7 @@ public:
 
             return obj;
         } catch(const std::exception& e) {
-            std::cerr << "Error retrieving vector: " << e.what() << std::endl;
+            LOG_ERROR(2034, index_id, "Error retrieving vector: " << e.what());
             return std::nullopt;
         }
     }
@@ -1188,7 +1199,7 @@ public:
 
             return true;
         } catch(const std::exception& e) {
-            std::cerr << "Failed to delete vectors: " << e.what() << std::endl;
+            LOG_ERROR(2035, entry.index_id, "Failed to delete vectors: " << e.what());
             return false;
         }
     }
@@ -1220,7 +1231,7 @@ public:
             // Re-throw runtime_error (includes backup-in-progress check)
             throw;
         } catch(const std::exception& e) {
-            std::cerr << "Failed to delete vectors by filter: " << e.what() << std::endl;
+            LOG_ERROR(2036, index_id, "Failed to delete vectors by filter: " << e.what());
             return 0;
         }
     }
@@ -1254,7 +1265,7 @@ public:
             // Re-throw runtime_error (includes backup-in-progress check)
             throw;
         } catch(const std::exception& e) {
-            std::cerr << "Failed to update filters: " << e.what() << std::endl;
+            LOG_ERROR(2037, index_id, "Failed to update filters: " << e.what());
             return 0;
         }
     }
@@ -1290,7 +1301,7 @@ public:
             // Re-throw runtime_error (includes backup-in-progress check)
             throw;
         } catch(const std::exception& e) {
-            std::cerr << "Failed to delete vector: " << e.what() << std::endl;
+            LOG_ERROR(2038, index_id, "Failed to delete vector: " << e.what());
             return false;
         }
     }
@@ -1604,7 +1615,7 @@ public:
             }
             return results;
         } catch(const std::exception& e) {
-            std::cerr << "Search error: " << e.what() << std::endl;
+            LOG_ERROR(2039, index_id, "Search failed: " << e.what());
             return std::nullopt;
         }
     }
@@ -1651,7 +1662,8 @@ public:
                 return true;
             }
         } catch(const std::filesystem::filesystem_error& e) {
-            std::cerr << "Failed to move index to deleted directory: " << e.what() << std::endl;
+            LOG_ERROR(
+                    2040, index_id, "Failed to move index to deleted directory: " << e.what());
             return false;
         }
 
@@ -1818,7 +1830,7 @@ inline void IndexManager::executeBackupJob(const std::string& index_id, const st
                            {"checksum", meta->checksum}};
             LOG_DEBUG("Metadata prepared for backup: " << metadata_json.dump());
         } else {
-            LOG_ERROR("Failed to get metadata for index: " << index_id);
+            LOG_ERROR(2041, index_id, "Failed to get metadata for backup");
             throw std::runtime_error("Cannot create backup without index metadata");
         }
 
@@ -1865,7 +1877,7 @@ inline void IndexManager::executeBackupJob(const std::string& index_id, const st
 
         backup_store_.clearActiveBackup(username);
 
-        LOG_INFO("Backup tar created, write operations now allowed for index: " << index_id);
+        LOG_INFO(2042, index_id, "Backup tar created; write operations resumed");
 
         std::filesystem::rename(backup_tar_temp, backup_tar_final);
 
@@ -1873,7 +1885,7 @@ inline void IndexManager::executeBackupJob(const std::string& index_id, const st
         backup_db[backup_name] = metadata_json;
         backup_store_.writeBackupJson(username, backup_db);
 
-        LOG_INFO("Backup completed: " << backup_name << " -> " << backup_tar_final);
+        LOG_INFO(2043, index_id, "Backup completed: " << backup_name << " -> " << backup_tar_final);
 
     } catch (const std::exception& e) {
         std::string user_backup_dir = backup_store_.getUserBackupDir(username);
@@ -1895,7 +1907,7 @@ inline void IndexManager::executeBackupJob(const std::string& index_id, const st
 
         backup_store_.clearActiveBackup(username);
 
-        LOG_ERROR("Backup failed: " << backup_name << " - " << e.what());
+        LOG_ERROR(2044, index_id, "Backup failed for " << backup_name << ": " << e.what());
     }
 }
 
@@ -1977,7 +1989,7 @@ inline std::pair<bool, std::string> IndexManager::restoreBackup(const std::strin
 
         loadIndex(target_index_id);
 
-        LOG_INFO("Restored backup from compressed archive: " << backup_tar);
+        LOG_INFO(2045, username, target_index_name, "Restored backup from " << backup_tar);
         return {true, ""};
     } catch(const std::exception& e) {
         std::filesystem::remove_all(backup_extract_dir);
@@ -2018,7 +2030,7 @@ inline std::pair<bool, std::string> IndexManager::createBackupAsync(const std::s
         executeBackupJob(index_id, backup_name);
     }).detach();
 
-    LOG_INFO("Backup started: " << backup_name << " for index: " << index_id);
+    LOG_INFO(2046, index_id, "Backup started: " << backup_name);
 
     return {true, backup_name};
 }

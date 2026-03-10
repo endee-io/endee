@@ -432,7 +432,7 @@ namespace hnswlib {
 
             // Initialize cache for loaded index
             size_t cache_bits = VectorCache::calculateCacheBits(maxElements_);
-            LOG_INFO("Calculated cache bits for loaded index: " << cache_bits);
+            LOG_INFO(2101, "Calculated cache bits for loaded index: " << cache_bits);
             if (cache_bits > 0) {
                  vector_cache_ = std::make_unique<VectorCache>(data_size_, cache_bits);
                  LOG_DEBUG("Vector cache initialized for " << maxElements_ << " elements with " << (1ULL << cache_bits) << " slots");

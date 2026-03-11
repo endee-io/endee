@@ -97,13 +97,13 @@ Current developer entry points:
 
 - [Getting Started](./docs/getting-started.md) for local build and run flows
 - [Hosted Docs](https://docs.endee.io/quick-start) for product documentation
-- [Release Notes 1.0.0](./docs/release-notes-1.0.0.md) for recent platform changes
+- [Release Notes 1.0.0](https://github.com/endee-io/endee/releases/tag/1.0.0) for recent platform changes
 
 ## Docs and Links
 
 - [Getting Started](./docs/getting-started.md)
 - [Hosted Documentation](https://docs.endee.io/quick-start)
-- [Release Notes](./docs/release-notes-1.0.0.md)
+- [Release Notes](https://github.com/endee-io/endee/releases/tag/1.0.0)
 - [Sparse Search](./docs/sparse.md)
 - [Filtering](./docs/filter.md)
 - [Backups](./docs/backup-system.md)

@@ -1,385 +1,139 @@
-# Endee: High-Performance Open Source Vector Database
+<p align="center">
+  <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-dark.svg">
+      <source media="(prefers-color-scheme: light)" srcset="docs/assets/logo-light.svg">
+      <img height="100" alt="Endee" src="docs/assets/logo-dark.svg">
+  </picture>
+</p>
 
-**Endee (nD)** is a specialized, high-performance vector database built for speed and efficiency. This guide covers supported platforms, dependency requirements, and detailed build instructions using both our automated installer and manual CMake configuration.
+<p align="center">
+    <b>High-performance open-source vector database for AI search, RAG, semantic search, and hybrid retrieval.</b>
+</p>
 
-there are 3 ways to build and run endee:
-1. quick installation and run using install.sh and run.sh scripts
-2. manual build using cmake
-3. using docker
+<p align="center">
+    <a href="./docs/getting-started.md"><img src="https://img.shields.io/badge/Quick_Start-Local_Setup-success?style=flat-square" alt="Quick Start"></a>
+    <a href="https://docs.endee.io/quick-start"><img src="https://img.shields.io/badge/Docs-Quick_Start-success?style=flat-square" alt="Docs"></a>
+    <a href="https://github.com/endee-io/endee/blob/master/LICENSE"><img src="https://img.shields.io/github/license/endee-io/endee?style=flat-square" alt="License"></a>
+    <a href="https://discord.gg/5HFGqDZQE3"><img src="https://img.shields.io/badge/Discord-Join_Chat-5865F2?logo=discord&style=flat-square" alt="Discord"></a>
+    <a href="https://endee.io/"><img src="https://img.shields.io/badge/Website-Endee-111111?style=flat-square" alt="Website"></a>
+    <!-- <a href="https://endee.io/benchmarks"><img src="https://img.shields.io/badge/Benchmarks-Coming_Soon-1F8B4C?style=flat-square" alt="Benchmarks"></a> -->
+    <!-- <a href="https://endee.io/cloud"><img src="https://img.shields.io/badge/Cloud-Coming_Soon-2496ED?style=flat-square" alt="Cloud"></a> -->
+</p>
 
-also you can run endee using docker from docker hub without building it locally. refer to section 4 for more details.
+<p align="center">
+<strong><a href="./docs/getting-started.md">Quick Start</a> • <a href="#why-endee">Why Endee</a> • <a href="#use-cases">Use Cases</a> • <a href="#features">Features</a> • <a href="#api-and-clients">API and Clients</a> • <a href="#docs-and-links">Docs</a> • <a href="#community-and-contact">Contact</a></strong>
+</p>
 
----
+# Endee: Open-Source Vector Database for AI Search
 
-## System Requirements
+**Endee** is a high-performance open-source vector database built for AI search and retrieval workloads. It is designed for teams building **RAG pipelines**, **semantic search**, **hybrid search**, recommendation systems, and filtered vector retrieval APIs that need production-oriented performance and control.
 
-Before installing, ensure your system meets the following hardware and operating system requirements.
+Endee combines vector search with filtering, sparse retrieval support, backup workflows, and deployment flexibility across local builds and Docker-based environments. The project is implemented in C++ and optimized for modern CPU targets, including AVX2, AVX512, NEON, and SVE2.
 
-### Supported Operating Systems
+If you want the fastest path to evaluate Endee locally, start with the [Getting Started guide](./docs/getting-started.md) or the hosted docs at [docs.endee.io](https://docs.endee.io/quick-start).
 
-* **Linux**: Ubuntu(22.04, 24.04, 25.04) Debian(12, 13), Rocky(8, 9, 10), Centos(8, 9, 10), Fedora(40, 42, 43)
-* **macOS**: Apple Silicon (M Series) only.
+## Why Endee
 
-### Required Dependencies
+- Built as a dedicated vector database for AI applications, search systems, and retrieval-heavy workloads.
+- Supports dense vector retrieval plus sparse search capabilities for hybrid search use cases.
+- Includes payload filtering for metadata-aware retrieval and application-specific query logic.
+- Ships with operational features already documented in this repo, including backup flows and runtime observability.
+- Offers flexible deployment paths: local scripts, manual builds, Docker images, and prebuilt registry images.
 
-The following packages are required for compilation.
+## Getting Started
 
- `clang-19`, `cmake`, `build-essential`, `libssl-dev`, `libcurl4-openssl-dev`
+The full installation, build, Docker, runtime, and authentication instructions are in [docs/getting-started.md](./docs/getting-started.md).
 
-> **Note:** The build system requires **Clang 19** (or a compatible recent Clang version) supporting C++20.
-
----
-
-## 1. Quick Installation (Recommended)
-
-The easiest way to build **ndd** is using the included `install.sh` script. This script handles OS detection, dependency checks, and configuration automatically.
-
-### Usage
-
-First, ensure the script is executable:
-```bash
-chmod +x ./install.sh
-```
-
-Run the script from the root of the repository. You **must** provide arguments for the build mode and/or CPU optimization.
-
-```bash
-./install.sh [BUILD_MODE] [CPU_OPTIMIZATION]
-```
-
-### Build Arguments
-
-You can combine one **Build Mode** and one **CPU Optimization** flag.
-
-#### Build Modes
-
-| Flag | Description | CMake Equivalent |
-| --- | --- | --- |
-| `--release` | **Default.** Optimized release build. |  |
-| `--debug_all` | Enables full debugging symbols. | `-DND_DEBUG=ON -DDEBUG=ON` |
-| `--debug_nd` | Enables NDD-specific logging/timing. | `-DND_DEBUG=ON` |
-
-#### CPU Optimization Options
-
-Select the flag matching your hardware to enable SIMD optimizations.
-
-| Flag | Description | Target Hardware |
-| --- | --- | --- |
-| `--avx2` | Enables AVX2 (FMA, F16C) | Modern x86_64 Intel/AMD |
-| `--avx512` | Enables AVX512 (F, BW, VNNI, FP16) | Server-grade x86_64 (Xeon/Epyc) |
-| `--neon` | Enables NEON (FP16, DotProd) | Apple Silicon / ARMv8.2+ |
-| `--sve2` | Enables SVE2 (INT8/16, FP16) | ARMv9 / SVE2 compatible |
-
-> **Note:** The `--avx512` build configuration enforces mandatory runtime checks for specific instruction sets. To successfully run this build, your CPU must support **`avx512` (Foundation), `avx512_fp16`, `avx512_vnni`, `avx512bw`, and `avx512_vpopcntdq`**; if any of these extensions are missing, the database will fail to initialize and exit immediately to avoid runtime crashes.
-
-
-### Example Commands
-
-**Build for Production (Intel/AMD with AVX2):**
+Fastest local path:
 
 ```bash
+chmod +x ./install.sh ./run.sh
 ./install.sh --release --avx2
-```
-
-**Example Build for Debugging (Apple Silicon):**
-
-```bash
-./install.sh --debug_all --neon
-```
-
-### Running the Server
-
-We provide a `run.sh` script to simplify running the server. It automatically detects the built binary and uses `ndd_data_dir=./data` by default.
-
-First, ensure the script is executable:
-
-```bash
-chmod +x ./run.sh
-```
-
-Then run the script:
-
-```bash
 ./run.sh
 ```
 
-This will automatically identify the latest binary and start the server.
+The server listens on port `8080`. For detailed setup paths, supported operating systems, CPU optimization flags, Docker usage, and authentication examples, use:
 
-#### Options
+- [Getting Started](./docs/getting-started.md)
+- [Hosted Quick Start Docs](https://docs.endee.io/quick-start)
 
-You can override the defaults using arguments:
+## Use Cases
 
-*   `ndd_data_dir=DIR`: Set the data directory.
-*   `binary_file=FILE`: Set the binary file to run.
-*   `ndd_auth_token=TOKEN`: Set the authentication token (leave empty/ignore to run without authentication).
+### RAG and AI Retrieval
 
-#### Examples
+Use Endee as the retrieval layer for question answering, chat assistants, copilots, and other RAG applications that need fast vector search with metadata-aware filtering.
 
-**Run with custom data directory:**
+### Agentic AI and AI Agent Memory
 
-```bash
-./run.sh ndd_data_dir=./my_data
-```
+Use Endee as the long-term memory and context retrieval layer for AI agents built with frameworks like LangChain, CrewAI, AutoGen, and LlamaIndex. Store and retrieve past observations, tool outputs, conversation history, and domain knowledge mid-execution with low-latency filtered vector search, so your autonomous agents get the right context without stalling their reasoning loop.
 
-**Run specific binary:**
+### Semantic Search
 
-```bash
-./run.sh binary_file=./build/ndd-avx2
-```
+Build semantic search experiences for documents, products, support content, and knowledge bases using vector similarity search instead of exact keyword-only matching.
 
-**Run with authentication token:**
+### Hybrid Search
 
-```bash
-./run.sh ndd_auth_token=your_token
-```
+Combine dense retrieval, sparse vectors, and filtering to improve relevance for search workflows where both semantic understanding and term-level precision matter.
 
+### Recommendations and Matching
 
-**Run with all options**
+Support recommendation, similarity matching, and nearest-neighbor retrieval workflows across text, embeddings, and other high-dimensional representations.
 
-```bash
-./run.sh ndd_data_dir=./my_data binary_file=./build/ndd-avx2 ndd_auth_token=your_token
-```
+## Features
 
-**For Help**
+- **Vector search** for AI retrieval and semantic similarity workloads.
+- **Hybrid retrieval support** with sparse vector capabilities documented in [docs/sparse.md](./docs/sparse.md).
+- **Payload filtering** for structured retrieval logic documented in [docs/filter.md](./docs/filter.md).
+- **Backup APIs and flows** documented in [docs/backup-system.md](./docs/backup-system.md).
+- **Operational logging and instrumentation** documented in [docs/logs.md](./docs/logs.md) and [docs/mdbx-instrumentation.md](./docs/mdbx-instrumentation.md).
+- **CPU-targeted builds** for AVX2, AVX512, NEON, and SVE2 deployments.
+- **Docker deployment options** for local and server environments.
 
-```bash
-./run.sh --help
-```
+## API and Clients
 
+Endee exposes an HTTP API for managing indexes and serving retrieval workloads. The current repo documentation and examples focus on running the server directly and calling its API endpoints.
 
-## 2. Manual Build (Advanced)
+Current developer entry points:
 
-If you prefer to configure the build manually or integrate it into an existing install pipeline, you can use `cmake` directly.
+- [Getting Started](./docs/getting-started.md) for local build and run flows
+- [Hosted Docs](https://docs.endee.io/quick-start) for product documentation
+- [Release Notes 1.0.0](./docs/release-notes-1.0.0.md) for recent platform changes
 
-### Step 1: Prepare Build Directory
+## Docs and Links
 
-```bash
-mkdir build && cd build
-```
+- [Getting Started](./docs/getting-started.md)
+- [Hosted Documentation](https://docs.endee.io/quick-start)
+- [Release Notes](./docs/release-notes-1.0.0.md)
+- [Sparse Search](./docs/sparse.md)
+- [Filtering](./docs/filter.md)
+- [Backups](./docs/backup-system.md)
 
-### Step 2: Configure
+## Community and Contact
 
-Run `cmake` with the appropriate flags. You must manually define the compiler if it is not your system default.
+- Join the community on [Discord](https://discord.gg/5HFGqDZQE3)
+- Visit the website at [endee.io](https://endee.io/)
+- For trademark or branding permissions, contact [enterprise@endee.io](mailto:enterprise@endee.io)
 
-**Configuration Flags:**
+## Contributing
 
-* **Debug Options:**
-* `-DDEBUG=ON` (Enable debug symbols/O0)
-* `-DND_DEBUG=ON` (Enable internal logging)
+We welcome contributions from the community to help make vector search faster and more accessible for everyone.
 
-
-* **SIMD Selectors (Choose One):**
-* `-DUSE_AVX2=ON`
-* `-DUSE_AVX512=ON`
-* `-DUSE_NEON=ON`
-* `-DUSE_SVE2=ON`
-
-
-**Example (x86_64 AVX512 Release):**
-
-```bash
-cmake -DCMAKE_BUILD_TYPE=Release \
-      -DUSE_AVX512=ON \
-      ..
-```
-
-### Step 3: Compile
-
-```bash
-make -j$(nproc)
-```
-
-### Running the Built Binary
-
-After a successful build, the binary will be generated in the `build/` directory.
-
-### Binary Naming
-
-The output binary name depends on the SIMD flag used during compilation:
-
-* `ndd-avx2`
-* `ndd-avx512`
-* `ndd-neon` (or `ndd-neon-darwin` for mac)
-* `ndd-sve2`
-
-A symlink called `ndd` links to the binary compiled for the current build.
-
-### Runtime Environment Variables
-
-Some environment variables **ndd** reads at runtime:
-
-* `NDD_DATA_DIR`: Defines the data directory
-* `NDD_AUTH_TOKEN`: Optional authentication token (see below)
-
-### Authentication
-
-**ndd** supports two authentication modes:
-
-**Open Mode (No Authentication)** - Default when `NDD_AUTH_TOKEN` is not set:
-```bash
-# All APIs work without authentication
-./build/ndd
-curl http://{{BASE_URL}}/api/v1/index/list
-```
-
-**Token Mode** - When `NDD_AUTH_TOKEN` is set:
-```bash
-# Generate a secure token
-export NDD_AUTH_TOKEN=$(openssl rand -hex 32)
-./build/ndd
-
-# All protected APIs require the token in Authorization header
-curl -H "Authorization: $NDD_AUTH_TOKEN" http://{{BASE_URL}}/api/v1/index/list
-```
-
-### Execution Example
-
-To run the database using the AVX2 binary and a local `data` folder:
-
-```bash
-# 1. Create the data directory
-mkdir -p ./data
-
-# 2. Export the environment variable and run
-export NDD_DATA_DIR=$(pwd)/data
-./build/ndd
-```
-
-Alternatively, as a single line:
-
-```bash
-NDD_DATA_DIR=./data ./build/ndd
-```
-
----
-
-
-
-## 3. Docker Deployment
-
-We provide a Dockerfile for easy containerization. This ensures a consistent runtime environment and simplifies the deployment process across various platforms.
-
-### Build the Image
-
-You **must** specify the target architecture (`avx2`, `avx512`, `neon`, `sve2`) using the `BUILD_ARCH` build argument. You can optionally enable a debug build using the `DEBUG` argument.
-
-```bash
-# Production Build (AVX2) (for x86_64 systems)
-docker build --ulimit nofile=100000:100000 --build-arg BUILD_ARCH=avx2 -t endee-oss:latest -f ./infra/Dockerfile .
-
-# Debug Build (Neon) (for arm64, mac apple silicon)
-docker build --ulimit nofile=100000:100000 --build-arg BUILD_ARCH=neon --build-arg DEBUG=true -t endee-oss:latest -f ./infra/Dockerfile .
-```
-
-### Run the Container
-
-The container exposes port `8080` and stores data in `/data` inside container. You should persist this data using a docker volume.
-
-```bash
-docker run \
-  -p 8080:8080 \
-  -v endee-data:/data \
-  -e NDD_AUTH_TOKEN="your_secure_token" \
-  --name endee-server \
-  endee-oss:latest
-```
-
-leave `NDD_AUTH_TOKEN` empty or remove it to run endee without authentication.
-
-### Alternatively: Docker Compose
-
-You can also use `docker-compose` to run the service.
-
-1. Start the container:
-   ```bash
-   docker-compose up
-   ```
-
----
-
-## 4. Running Docker container from registry
-
-You can run Endee directly using the pre-built image from Docker Hub without building locally.
-
-### Using Docker Compose
-
-Create a new directory for Endee:
-
-```bash
-mkdir endee && cd endee
-```
-
-Inside this directory, create a file named `docker-compose.yml` and copy the following content into it:
-
-```yaml
-services:
-  endee:
-    image: endeeio/endee-server:latest
-    container_name: endee-server
-    ports:
-      - "8080:8080"
-    environment:
-      NDD_NUM_THREADS: 0
-      NDD_AUTH_TOKEN: ""  # Optional: set for authentication
-    volumes:
-      - endee-data:/data
-    restart: unless-stopped
-
-volumes:
-  endee-data:
-```
-
-Then run:
-```bash
-docker compose up -d
-```
-
-for more details visit [docs.endee.io](https://docs.endee.io/quick-start)
-
----
-
-## Contribution
-
-We welcome contributions from the community to help make vector search faster and more accessible for everyone. To contribute:
-
-* **Submit Pull Requests**: Have a fix or a new feature? Fork the repo, create a branch, and send a PR.
-* **Report Issues**: Found a bug or a performance bottleneck? Open an issue on GitHub with steps to reproduce it.
-* **Suggest Improvements**: We are always looking to optimize performance; feel free to suggest new CPU target optimizations or architectural enhancements.
-* **Feature Requests**: If there is a specific functionality you need, start a discussion in the issues section.
-
----
+- Submit pull requests for fixes, features, and improvements
+- Report bugs or performance issues through GitHub issues
+- Propose enhancements for search quality, performance, and deployment workflows
 
 ## License
 
-Endee is open source software licensed under the
-**Apache License 2.0**.
-
-You are free to use, modify, and distribute this software for
-personal, commercial, and production use.
-
-See the LICENSE file for full license terms.
-
----
+Endee is open source software licensed under the **Apache License 2.0**. See the [LICENSE](./LICENSE) file for full terms.
 
 ## Trademark and Branding
 
 “Endee” and the Endee logo are trademarks of Endee Labs.
 
-The Apache License 2.0 does **not** grant permission to use the Endee name,
-logos, or branding in a way that suggests endorsement or affiliation.
+The Apache License 2.0 does not grant permission to use the Endee name, logos, or branding in a way that suggests endorsement or affiliation.
 
-If you offer a hosted or managed service based on this software, you must:
-- Use your own branding
-- Avoid implying it is an official Endee service
-
-For trademark or branding permissions, contact: enterprise@endee.io
-
----
+If you offer a hosted or managed service based on this software, you must use your own branding and avoid implying it is an official Endee service.
 
 ## Third-Party Software
 
-This project includes or depends on third-party software components that are
-licensed under their respective open source licenses.
-
-Use of those components is governed by the terms and conditions of their
-individual licenses, not by the Apache License 2.0 for this project.
+This project includes or depends on third-party software components licensed under their respective open-source licenses. Use of those components is governed by their own license terms.

@@ -1,0 +1,6 @@
+endee
+sentence-transformers
+fastapi
+uvicorn
+pypdf
+streamlit

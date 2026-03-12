@@ -121,6 +121,110 @@ Skill: React
 
 ---
 
+# ⚡ How Endee is Used in This Project
+
+Endee acts as the **semantic search engine** powering this application.  
+Instead of relying on keyword-based search, the system converts interview questions and resume skills into **vector embeddings** and performs **similarity search** to retrieve the most relevant interview questions.
+
+---
+
+## 1️⃣ Vector Embedding Creation
+
+Interview questions are converted into embeddings using a transformer model.
+
+```python
+from sentence_transformers import SentenceTransformer
+
+model = SentenceTransformer("all-MiniLM-L6-v2")
+embedding = model.encode(question_text).tolist()
+```
+
+Each embedding captures the **semantic meaning** of the question.
+
+---
+
+## 2️⃣ Storing Vectors in Endee
+
+Embeddings are stored in Endee along with metadata such as the skill and question text.
+
+```python
+from endee import Client
+
+client = Client()
+index = client.get_or_create_index("interview_vectors")
+
+index.upsert(
+    id=str(i),
+    vector=embedding,
+    metadata={
+        "skill": item["skill"],
+        "question": item["question"]
+    }
+)
+```
+
+Endee indexes these vectors to enable **fast semantic retrieval**.
+
+---
+
+## 3️⃣ Semantic Similarity Search
+
+When a resume is uploaded, detected skills are converted into embeddings and used as query vectors.
+
+```python
+query_vector = model.encode(skill).tolist()
+
+results = index.search(
+    vector=query_vector,
+    top_k=3
+)
+```
+
+Endee compares the query vector with stored vectors using **cosine similarity** and returns the **most relevant interview questions**.
+
+---
+
+## 4️⃣ Metadata Retrieval
+
+Each stored vector contains metadata that allows the system to display structured results.
+
+Example response:
+
+```
+{
+  "skill": "React",
+  "question": "Explain React Hooks"
+}
+```
+
+This eliminates the need for additional database lookups.
+
+---
+
+## 5️⃣ Why Endee Was Chosen
+
+Endee provides several advantages for this application:
+
+- Semantic search instead of keyword matching
+- High-performance vector indexing
+- Fast similarity retrieval
+- Scalable architecture for large datasets
+
+These features make Endee ideal for building **AI-powered retrieval systems such as interview preparation assistants**.
+
+---
+
+# ✅ Internship Challenge Requirements Checklist
+
+The following steps were completed as part of the Endee internship evaluation process:
+
+- [x] Starred the Endee GitHub repository
+- [x] Forked the Endee repository
+- [x] Built an AI project using Endee as the vector database
+- [x] Implemented semantic search using vector embeddings
+- [x] Hosted the complete project on GitHub
+- [x] Provided setup and execution instructions in the README
+
 # 📂 Project Structure
 
 ```
@@ -267,4 +371,6 @@ It demonstrates practical experience with:
 - Semantic Search  
 - Retrieval-Augmented Generation (RAG)  
 - FastAPI Backend Development  
-- Streamlit AI Interfaces  
+- Streamlit AI Interfaces
+
+  

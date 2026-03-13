@@ -1,0 +1,8 @@
+endee 
+sentence-transformers 
+pymupdf 
+python-dotenv 
+langchain 
+langchain-groq 
+langchain-core
+python-dotenv

@@ -688,14 +688,13 @@ namespace ndd {
                 float dot2 = static_cast<float>(svaddv_s32(svptrue_b32(), sum_sq2));
                 float dot_prod = static_cast<float>(svaddv_s32(svptrue_b32(), sum_prod));
 
-                res = (dot1 * scale1) * scale1 + (dot2 * scale2) * scale2 -
-                      2.0f * ((dot_prod * scale1) * scale2);
+                res = (dot1 * scale1) * scale1 + (dot2 * scale2) * scale2
+                      - 2.0f * ((dot_prod * scale1) * scale2);
 
 #elif defined(USE_NEON)
                 // NEON implementation for L2Sqr
                 // Uses the expansion: (a*s1 - b*s2)^2 = a^2*s1^2 + b^2*s2^2 - 2ab*s1*s2
                 // This allows using integer dot products for the terms.
-
 
                 int32x4_t sum_sq1 = vdupq_n_s32(0);
                 int32x4_t sum_sq2 = vdupq_n_s32(0);
@@ -745,8 +744,8 @@ namespace ndd {
                 float dot2 = static_cast<float>(vaddvq_s32(sum_sq2));
                 float dot_prod = static_cast<float>(vaddvq_s32(sum_prod));
 
-                res = (dot1 * scale1) * scale1 + (dot2 * scale2) * scale2 -
-                      2.0f * ((dot_prod * scale1) * scale2);
+                res = (dot1 * scale1) * scale1 + (dot2 * scale2) * scale2
+                      - 2.0f * ((dot_prod * scale1) * scale2);
 #endif
 
                 for(; i < qty; i++) {

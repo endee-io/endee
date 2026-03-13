@@ -57,7 +57,8 @@ private:
             throw std::runtime_error("Failed to begin transaction");
         }
 
-        rc = mdbx_dbi_open(txn, settings::DEFAULT_SUBINDEX.c_str(), MDBX_CREATE | MDBX_INTEGERKEY, &dbi_);
+        rc = mdbx_dbi_open(
+                txn, settings::DEFAULT_SUBINDEX.c_str(), MDBX_CREATE | MDBX_INTEGERKEY, &dbi_);
         if(rc != MDBX_SUCCESS) {
             mdbx_txn_abort(txn);
             throw std::runtime_error("Failed to open database");
@@ -66,7 +67,7 @@ private:
         rc = mdbx_txn_commit(txn);
         if(rc != MDBX_SUCCESS) {
             throw std::runtime_error("Failed to commit transaction: "
-                                        + std::string(mdbx_strerror(rc)));
+                                     + std::string(mdbx_strerror(rc)));
         }
     }
 
@@ -124,9 +125,9 @@ public:
 
             if(key.iov_len != sizeof(ndd::idInt)) {
                 LOG_ERROR(1601,
-                                index_id_,
-                                "Invalid key size " << key.iov_len << ", expected "
-                                                    << sizeof(ndd::idInt));
+                          index_id_,
+                          "Invalid key size " << key.iov_len << ", expected "
+                                              << sizeof(ndd::idInt));
                 throw std::runtime_error("Invalid key size in LMDB entry");
             }
 
@@ -222,14 +223,20 @@ public:
     // buffers: pre-allocated flat buffer of size (count * bytes_per_vector_)
     // success: output array of bool indicating which fetches succeeded
     // Returns number of successful fetches
-    size_t get_vectors_batch_into(const ndd::idInt* labels, uint8_t* buffers,
-                                  bool* success, size_t count) const {
-        if(count == 0) return 0;
+    size_t get_vectors_batch_into(const ndd::idInt* labels,
+                                  uint8_t* buffers,
+                                  bool* success,
+                                  size_t count) const {
+        if(count == 0) {
+            return 0;
+        }
 
         MDBX_txn* txn;
         int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_RDONLY, &txn);
         if(rc != MDBX_SUCCESS) {
-            for(size_t i = 0; i < count; i++) success[i] = false;
+            for(size_t i = 0; i < count; i++) {
+                success[i] = false;
+            }
             return 0;
         }
 
@@ -727,8 +734,10 @@ public:
     }
 
     // Batch fetch: multiple vectors in one MDBX txn
-    size_t get_vectors_batch_into(const ndd::idInt* labels, uint8_t* buffers,
-                                  bool* success, size_t count) const {
+    size_t get_vectors_batch_into(const ndd::idInt* labels,
+                                  uint8_t* buffers,
+                                  bool* success,
+                                  size_t count) const {
         return vector_store_->get_vectors_batch_into(labels, buffers, success, count);
     }
 

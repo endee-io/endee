@@ -31,8 +31,8 @@ private:
     mutable std::mutex backup_state_mutex_;
 
 public:
-    BackupStore(const std::string& data_dir)
-        : data_dir_(data_dir) {
+    BackupStore(const std::string& data_dir) :
+        data_dir_(data_dir) {
         std::filesystem::create_directories(data_dir + "/backups");
         cleanupTempDir();
     }
@@ -144,14 +144,16 @@ public:
 
     nlohmann::json readBackupJson(const std::string& username) {
         std::string path = getBackupJsonPath(username);
-        if (!std::filesystem::exists(path)) return nlohmann::json::object();
+        if(!std::filesystem::exists(path)) {
+            return nlohmann::json::object();
+        }
         try {
             std::ifstream f(path);
             return nlohmann::json::parse(f);
-        } catch (const std::exception& e) {
+        } catch(const std::exception& e) {
             LOG_WARN(1304,
-                          username,
-                          "Failed to parse backup metadata file " << path << ": " << e.what());
+                     username,
+                     "Failed to parse backup metadata file " << path << ": " << e.what());
             return nlohmann::json::object();
         }
     }
@@ -166,11 +168,11 @@ public:
 
     void cleanupTempDir() {
         std::string temp_dir = data_dir_ + "/backups/.tmp";
-        if (std::filesystem::exists(temp_dir)) {
+        if(std::filesystem::exists(temp_dir)) {
             try {
                 std::filesystem::remove_all(temp_dir);
                 LOG_INFO(1301, "Cleaned up backup temp directory");
-            } catch (const std::exception& e) {
+            } catch(const std::exception& e) {
                 LOG_ERROR(1302, "Failed to clean up backup temp directory: " << e.what());
             }
         }
@@ -178,7 +180,9 @@ public:
 
     // Active backup tracking
 
-    void setActiveBackup(const std::string& username, const std::string& index_id, const std::string& backup_name) {
+    void setActiveBackup(const std::string& username,
+                         const std::string& index_id,
+                         const std::string& backup_name) {
         std::lock_guard<std::mutex> lock(backup_state_mutex_);
         active_user_backups_[username] = {index_id, backup_name};
     }
@@ -231,8 +235,8 @@ public:
             if(entry.is_regular_file()) {
                 std::string filename = entry.path().filename().string();
 
-                if(filename.size() > 4 && filename.substr(filename.size() - 4) == ".tar" &&
-                   !filename.starts_with(".tmp_")) {
+                if(filename.size() > 4 && filename.substr(filename.size() - 4) == ".tar"
+                   && !filename.starts_with(".tmp_")) {
                     std::string backup_name = filename.substr(0, filename.size() - 4);
                     backups.push_back(backup_name);
                 }
@@ -244,7 +248,7 @@ public:
     // Backup deletion
 
     std::pair<bool, std::string> deleteBackup(const std::string& backup_name,
-                                               const std::string& username) {
+                                              const std::string& username) {
         std::pair<bool, std::string> result = validateBackupName(backup_name);
         if(!result.first) {
             return result;
@@ -271,7 +275,9 @@ public:
     std::optional<ActiveBackup> getActiveBackup(const std::string& username) {
         std::lock_guard<std::mutex> lock(backup_state_mutex_);
         auto it = active_user_backups_.find(username);
-        if (it != active_user_backups_.end()) return it->second;
+        if(it != active_user_backups_.end()) {
+            return it->second;
+        }
         return std::nullopt;
     }
 
@@ -279,7 +285,7 @@ public:
 
     nlohmann::json getBackupInfo(const std::string& backup_name, const std::string& username) {
         nlohmann::json backup_db = readBackupJson(username);
-        if (backup_db.contains(backup_name)) {
+        if(backup_db.contains(backup_name)) {
             return backup_db[backup_name];
         }
         return nlohmann::json();

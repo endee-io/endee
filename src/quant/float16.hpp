@@ -836,7 +836,8 @@ namespace ndd {
                     }
 
                     for(size_t i = 0; i < count; ++i) {
-                        const uint16_t* v_ptr = static_cast<const uint16_t*>(vectors[i]) + block_start;
+                        const uint16_t* v_ptr =
+                                static_cast<const uint16_t*>(vectors[i]) + block_start;
                         float dot = dot_acc[i];
                         float vec_sq = l2_metric ? vec_sq_acc[i] : 0.0f;
 
@@ -845,8 +846,10 @@ namespace ndd {
                         __m512 dot_vec = _mm512_setzero_ps();
                         __m512 sq_vec = _mm512_setzero_ps();
                         for(; d + 16 <= block_len; d += 16) {
-                            __m256i q_h = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(q_ptr + d));
-                            __m256i v_h = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(v_ptr + d));
+                            __m256i q_h =
+                                    _mm256_loadu_si256(reinterpret_cast<const __m256i*>(q_ptr + d));
+                            __m256i v_h =
+                                    _mm256_loadu_si256(reinterpret_cast<const __m256i*>(v_ptr + d));
                             __m512 qv = _mm512_cvtph_ps(q_h);
                             __m512 vv = _mm512_cvtph_ps(v_h);
                             dot_vec = _mm512_fmadd_ps(qv, vv, dot_vec);
@@ -862,21 +865,23 @@ namespace ndd {
                         __m256 dot_vec = _mm256_setzero_ps();
                         __m256 sq_vec = _mm256_setzero_ps();
                         for(; d + 8 <= block_len; d += 8) {
-                            __m128i q_h = _mm_loadu_si128(reinterpret_cast<const __m128i*>(q_ptr + d));
-                            __m128i v_h = _mm_loadu_si128(reinterpret_cast<const __m128i*>(v_ptr + d));
+                            __m128i q_h =
+                                    _mm_loadu_si128(reinterpret_cast<const __m128i*>(q_ptr + d));
+                            __m128i v_h =
+                                    _mm_loadu_si128(reinterpret_cast<const __m128i*>(v_ptr + d));
                             __m256 qv = _mm256_cvtph_ps(q_h);
                             __m256 vv = _mm256_cvtph_ps(v_h);
-#if defined(__FMA__)
+#    if defined(__FMA__)
                             dot_vec = _mm256_fmadd_ps(qv, vv, dot_vec);
                             if(l2_metric) {
                                 sq_vec = _mm256_fmadd_ps(vv, vv, sq_vec);
                             }
-#else
+#    else
                             dot_vec = _mm256_add_ps(dot_vec, _mm256_mul_ps(qv, vv));
                             if(l2_metric) {
                                 sq_vec = _mm256_add_ps(sq_vec, _mm256_mul_ps(vv, vv));
                             }
-#endif
+#    endif
                         }
                         {
                             __m128 lo = _mm256_castps256_ps128(dot_vec);
@@ -915,9 +920,12 @@ namespace ndd {
                         size_t lane = svcnth();
                         for(; d + lane <= block_len; d += lane) {
                             svbool_t pg16 = svptrue_b16();
-                            svbool_t pg32 = svptrue_b32();;
-                            svfloat16_t q_h = svld1_f16(pg16, reinterpret_cast<const __fp16*>(q_ptr + d));
-                            svfloat16_t v_h = svld1_f16(pg16, reinterpret_cast<const __fp16*>(v_ptr + d));
+                            svbool_t pg32 = svptrue_b32();
+                            ;
+                            svfloat16_t q_h =
+                                    svld1_f16(pg16, reinterpret_cast<const __fp16*>(q_ptr + d));
+                            svfloat16_t v_h =
+                                    svld1_f16(pg16, reinterpret_cast<const __fp16*>(v_ptr + d));
                             svfloat32_t qv = svcvt_f32_f16_x(pg32, q_h);
                             svfloat32_t vv = svcvt_f32_f16_x(pg32, v_h);
                             dot += svaddv_f32(pg32, svmul_f32_x(pg32, qv, vv));
@@ -1045,9 +1053,9 @@ namespace ndd {
                     __m128i p3 = _mm512_cvtepi32_epi8(i3);
 
                     _mm_storeu_si128((__m128i*)&data_ptr[i], p0);
-                    _mm_storeu_si128((__m128i*)&data_ptr[i+16], p1);
-                    _mm_storeu_si128((__m128i*)&data_ptr[i+32], p2);
-                    _mm_storeu_si128((__m128i*)&data_ptr[i+48], p3);
+                    _mm_storeu_si128((__m128i*)&data_ptr[i + 16], p1);
+                    _mm_storeu_si128((__m128i*)&data_ptr[i + 32], p2);
+                    _mm_storeu_si128((__m128i*)&data_ptr[i + 48], p3);
                 }
 #elif defined(USE_AVX2)
                 size_t i = 0;

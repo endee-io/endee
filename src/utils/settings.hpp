@@ -29,7 +29,7 @@ namespace settings {
     constexpr size_t MAX_M = 512;
     constexpr size_t DEFAULT_EF_CONSTRUCT = 128;
     constexpr size_t MIN_EF_CONSTRUCT = 8;
-    constexpr size_t BACKFILL_BUFFER = 4; // Keep 4 slots free for high quality neighbors
+    constexpr size_t BACKFILL_BUFFER = 4;  // Keep 4 slots free for high quality neighbors
     constexpr size_t MAX_EF_CONSTRUCT = 4096;
     constexpr size_t DEFAULT_EF_SEARCH = 128;
     constexpr size_t MIN_K = 1;
@@ -90,13 +90,13 @@ namespace settings {
     const std::string DEFAULT_SERVER_TYPE = "OSS";
     const std::string DEFAULT_DATA_DIR = "/mnt/data";
     const std::string DEFAULT_SUBINDEX = "default";
-    constexpr size_t MAX_NR_SUBINDEX = 100; //Maximum number of subindexes
+    constexpr size_t MAX_NR_SUBINDEX = 100;  //Maximum number of subindexes
     constexpr size_t DEFAULT_MAX_ACTIVE_INDICES = 64;
     constexpr size_t DEFAULT_MAX_ELEMENTS = 100'000;
     constexpr size_t DEFAULT_MAX_ELEMENTS_INCREMENT = 100'000;
     constexpr size_t DEFAULT_MAX_ELEMENTS_INCREMENT_TRIGGER = 50'000;
     constexpr size_t DEFAULT_VECTOR_CACHE_PERCENTAGE = 15;
-    constexpr size_t DEFAULT_VECTOR_CACHE_MIN_BITS = 17; // Minimum 128K entries in cache
+    constexpr size_t DEFAULT_VECTOR_CACHE_MIN_BITS = 17;  // Minimum 128K entries in cache
     const std::string DEFAULT_SERVER_ID = "unknown";
 
     //For Backups
@@ -113,14 +113,14 @@ namespace settings {
 
     inline static size_t NUM_SERVER_THREADS = [] {
         const char* env = std::getenv("NDD_NUM_SERVER_THREADS");
-        if (env) {
+        if(env) {
             return (size_t)std::stoull(env);
         }
 
         // If no env var, check if default is 0 (auto-detect)
-        if (DEFAULT_NUM_SERVER_THREADS == 0) {
+        if(DEFAULT_NUM_SERVER_THREADS == 0) {
             unsigned int hw = std::thread::hardware_concurrency() * 2;
-            return hw > 0 ? (size_t)hw : 1; // Fallback to 1 if hardware_concurrency returns 0
+            return hw > 0 ? (size_t)hw : 1;  // Fallback to 1 if hardware_concurrency returns 0
         }
 
         return (size_t)DEFAULT_NUM_SERVER_THREADS;

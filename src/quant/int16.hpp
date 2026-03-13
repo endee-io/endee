@@ -820,11 +820,9 @@ namespace ndd {
                     __m512i prod1 = _mm512_dpwssd_epi32(_mm512_setzero_si512(), v1_1, v2_1);
 
                     __m512i prod0_lo = _mm512_cvtepi32_epi64(_mm512_castsi512_si256(prod0));
-                    __m512i prod0_hi =
-                            _mm512_cvtepi32_epi64(_mm512_extracti32x8_epi32(prod0, 1));
+                    __m512i prod0_hi = _mm512_cvtepi32_epi64(_mm512_extracti32x8_epi32(prod0, 1));
                     __m512i prod1_lo = _mm512_cvtepi32_epi64(_mm512_castsi512_si256(prod1));
-                    __m512i prod1_hi =
-                            _mm512_cvtepi32_epi64(_mm512_extracti32x8_epi32(prod1, 1));
+                    __m512i prod1_hi = _mm512_cvtepi32_epi64(_mm512_extracti32x8_epi32(prod1, 1));
 
                     sum_vec0 = _mm512_add_epi64(sum_vec0, prod0_lo);
                     sum_vec1 = _mm512_add_epi64(sum_vec1, prod0_hi);
@@ -1113,8 +1111,8 @@ namespace ndd {
                                         _mm512_dpwssd_epi32(_mm512_setzero_si512(), v_i16, v_i16);
                                 __m512i sq_i64_lo =
                                         _mm512_cvtepi32_epi64(_mm512_castsi512_si256(sq_i32));
-                                __m512i sq_i64_hi = _mm512_cvtepi32_epi64(
-                                        _mm512_extracti32x8_epi32(sq_i32, 1));
+                                __m512i sq_i64_hi =
+                                        _mm512_cvtepi32_epi64(_mm512_extracti32x8_epi32(sq_i32, 1));
                                 sq_vec_lo = _mm512_add_epi64(sq_vec_lo, sq_i64_lo);
                                 sq_vec_hi = _mm512_add_epi64(sq_vec_hi, sq_i64_hi);
                             }
@@ -1140,7 +1138,8 @@ namespace ndd {
                             __m256i q_i32 = _mm256_cvtepi16_epi32(q_i16);
                             __m256i v_i32 = _mm256_cvtepi16_epi32(v_i16);
                             __m256i dot_i32 = _mm256_mullo_epi32(q_i32, v_i32);
-                            __m256i dot_i64_lo = _mm256_cvtepi32_epi64(_mm256_castsi256_si128(dot_i32));
+                            __m256i dot_i64_lo =
+                                    _mm256_cvtepi32_epi64(_mm256_castsi256_si128(dot_i32));
                             __m256i dot_i64_hi =
                                     _mm256_cvtepi32_epi64(_mm256_extracti128_si256(dot_i32, 1));
                             dot_vec_lo = _mm256_add_epi64(dot_vec_lo, dot_i64_lo);
@@ -1183,13 +1182,16 @@ namespace ndd {
                             int16x8_t v_i16 = vld1q_s16(vec + block_start + d);
 
                             int32x4_t dot_lo = vmull_s16(vget_low_s16(q_i16), vget_low_s16(v_i16));
-                            int32x4_t dot_hi = vmull_s16(vget_high_s16(q_i16), vget_high_s16(v_i16));
+                            int32x4_t dot_hi =
+                                    vmull_s16(vget_high_s16(q_i16), vget_high_s16(v_i16));
                             dot_vec = vpadalq_s32(dot_vec, dot_lo);
                             dot_vec = vpadalq_s32(dot_vec, dot_hi);
 
                             if(l2_metric) {
-                                int32x4_t sq_lo = vmull_s16(vget_low_s16(v_i16), vget_low_s16(v_i16));
-                                int32x4_t sq_hi = vmull_s16(vget_high_s16(v_i16), vget_high_s16(v_i16));
+                                int32x4_t sq_lo =
+                                        vmull_s16(vget_low_s16(v_i16), vget_low_s16(v_i16));
+                                int32x4_t sq_hi =
+                                        vmull_s16(vget_high_s16(v_i16), vget_high_s16(v_i16));
                                 sq_vec = vpadalq_s32(sq_vec, sq_lo);
                                 sq_vec = vpadalq_s32(sq_vec, sq_hi);
                             }

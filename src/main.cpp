@@ -209,7 +209,7 @@ int main(int argc, char** argv) {
     LOG_INFO("DEFAULT_MAX_ELEMENTS: " << settings::DEFAULT_MAX_ELEMENTS);
     LOG_INFO("DEFAULT_MAX_ELEMENTS_INCREMENT: " << settings::DEFAULT_MAX_ELEMENTS_INCREMENT);
     LOG_INFO("DEFAULT_MAX_ELEMENTS_INCREMENT_TRIGGER: "
-              << settings::DEFAULT_MAX_ELEMENTS_INCREMENT_TRIGGER);
+             << settings::DEFAULT_MAX_ELEMENTS_INCREMENT_TRIGGER);
 
     // Path to React build directory
     // Get the executable's directory and resolve frontend/dist relative to it
@@ -314,7 +314,9 @@ int main(int argc, char** argv) {
                 }
 
                 if(!body.has("index_name") || !body.has("dim") || !body.has("space_type")) {
-                    LOG_WARN(1012, ctx.username, "Create-index request is missing required parameters");
+                    LOG_WARN(1012,
+                             ctx.username,
+                             "Create-index request is missing required parameters");
                     return json_error(400, "Missing required parameters");
                 }
 
@@ -356,7 +358,8 @@ int main(int argc, char** argv) {
                 }
 
                 // Get quantization level (default to INT16)
-                std::string precision = body.has("precision") ? std::string(body["precision"].s()) : "int16";
+                std::string precision =
+                        body.has("precision") ? std::string(body["precision"].s()) : "int16";
 
                 if(precision == "int8d") {
                     precision = "int8";
@@ -386,11 +389,14 @@ int main(int argc, char** argv) {
                     size_in_millions = static_cast<size_t>(body["size_in_millions"].i());
                     if(size_in_millions == 0 || size_in_millions > 10000) {  // Cap at 10B vectors
                         LOG_WARN(1017,
-                                       index_id,
-                                       "Invalid custom size_in_millions: " << size_in_millions);
+                                 index_id,
+                                 "Invalid custom size_in_millions: " << size_in_millions);
                         return json_error(400, "size_in_millions must be between 1 and 10000");
                     }
-                    LOG_INFO(1018, index_id, "Creating index with custom size: " << size_in_millions << "M vectors");
+                    LOG_INFO(1018,
+                             index_id,
+                             "Creating index with custom size: " << size_in_millions
+                                                                 << "M vectors");
                 }
 
                 size_t sparse_dim = body.has("sparse_dim") ? (size_t)body["sparse_dim"].i() : 0;
@@ -412,8 +418,10 @@ int main(int argc, char** argv) {
                     LOG_WARN(1019, index_id, "Create-index request failed: " << e.what());
                     return json_error(409, e.what());
                 } catch(const std::exception& e) {
-                    return json_error_500(
-                            ctx.username, body["index_name"].s(), req.url, std::string("Error: ") + e.what());
+                    return json_error_500(ctx.username,
+                                          body["index_name"].s(),
+                                          req.url,
+                                          std::string("Error: ") + e.what());
                 }
             });
 
@@ -426,7 +434,10 @@ int main(int argc, char** argv) {
                 auto body = crow::json::load(req.body);
 
                 if(!body || !body.has("name")) {
-                    LOG_WARN(1020, ctx.username, index_name, "Create-backup request missing backup name");
+                    LOG_WARN(1020,
+                             ctx.username,
+                             index_name,
+                             "Create-backup request missing backup name");
                     return json_error(400, "Missing backup name");
                 }
 
@@ -437,7 +448,10 @@ int main(int argc, char** argv) {
                     std::pair<bool, std::string> result =
                             index_manager.createBackupAsync(index_id, backup_name);
                     if(!result.first) {
-                        LOG_WARN(1021, ctx.username, index_name, "Create-backup request rejected: " << result.second);
+                        LOG_WARN(1021,
+                                 ctx.username,
+                                 index_name,
+                                 "Create-backup request rejected: " << result.second);
                         return json_error(400, result.second);
                     }
 
@@ -478,17 +492,21 @@ int main(int argc, char** argv) {
                 auto body = crow::json::load(req.body);
 
                 if(!body || !body.has("target_index_name")) {
-                    LOG_WARN(1022, ctx.username, "Restore-backup request missing target index name");
+                    LOG_WARN(
+                            1022, ctx.username, "Restore-backup request missing target index name");
                     return json_error(400, "Missing target_index_name");
                 }
 
                 std::string target_index_name = body["target_index_name"].s();
 
                 try {
-                    std::pair<bool, std::string> result =
-                            index_manager.restoreBackup(backup_name, target_index_name, ctx.username);
+                    std::pair<bool, std::string> result = index_manager.restoreBackup(
+                            backup_name, target_index_name, ctx.username);
                     if(!result.first) {
-                        LOG_WARN(1023, ctx.username, target_index_name, "Restore-backup request rejected: " << result.second);
+                        LOG_WARN(1023,
+                                 ctx.username,
+                                 target_index_name,
+                                 "Restore-backup request rejected: " << result.second);
                         return json_error(400, result.second);
                     }
                     return crow::response(201, "Backup restored successfully");
@@ -504,9 +522,12 @@ int main(int argc, char** argv) {
                                                              const std::string& backup_name) {
                 auto& ctx = app.get_context<AuthMiddleware>(req);
                 try {
-                    std::pair<bool, std::string> result = index_manager.deleteBackup(backup_name, ctx.username);
+                    std::pair<bool, std::string> result =
+                            index_manager.deleteBackup(backup_name, ctx.username);
                     if(!result.first) {
-                        LOG_WARN(1024, ctx.username, "Delete-backup request rejected: " << result.second);
+                        LOG_WARN(1024,
+                                 ctx.username,
+                                 "Delete-backup request rejected: " << result.second);
                         return json_error(400, result.second);
                     }
                     return crow::response(204, "Backup deleted successfully");
@@ -528,14 +549,16 @@ int main(int argc, char** argv) {
                         }
                     }
 
-                    std::string backup_file =
-                            settings::DATA_DIR + "/backups/" + settings::DEFAULT_USERNAME + "/" + backup_name + ".tar";
+                    std::string backup_file = settings::DATA_DIR + "/backups/"
+                                              + settings::DEFAULT_USERNAME + "/" + backup_name
+                                              + ".tar";
 
                     if(!std::filesystem::exists(backup_file)) {
-                        LOG_WARN(1058, settings::DEFAULT_USERNAME, "Backup download requested for missing backup " << backup_name);
+                        LOG_WARN(1058,
+                                 settings::DEFAULT_USERNAME,
+                                 "Backup download requested for missing backup " << backup_name);
                         return json_error(404, "Backup not found");
                     }
-
 
                     crow::response response;
                     response.set_static_file_info_unsafe(backup_file);
@@ -576,8 +599,12 @@ int main(int argc, char** argv) {
                                 if(backup_name.ends_with(".tar")) {
                                     backup_name = backup_name.substr(0, backup_name.size() - 4);
                                 } else {
-                                    LOG_WARN(1059, ctx.username, "Backup upload used invalid file extension");
-                                    return json_error(400, "Invalid backup file extension. Expected .tar file");
+                                    LOG_WARN(1059,
+                                             ctx.username,
+                                             "Backup upload used invalid file extension");
+                                    return json_error(
+                                            400,
+                                            "Invalid backup file extension. Expected .tar file");
                                 }
                             }
                             file_content = part.body;
@@ -591,7 +618,9 @@ int main(int argc, char** argv) {
                     }
 
                     if(file_content.empty()) {
-                        LOG_WARN(1061, ctx.username, "Backup upload request missing backup file content");
+                        LOG_WARN(1061,
+                                 ctx.username,
+                                 "Backup upload request missing backup file content");
                         return json_error(400, "Missing backup file content");
                     }
 
@@ -599,7 +628,9 @@ int main(int argc, char** argv) {
                     std::pair<bool, std::string> result =
                             index_manager.validateBackupName(backup_name);
                     if(!result.first) {
-                        LOG_WARN(1062, ctx.username, "Backup upload request rejected: " << result.second);
+                        LOG_WARN(1062,
+                                 ctx.username,
+                                 "Backup upload request rejected: " << result.second);
                         return json_error(400, result.second);
                     }
 
@@ -608,7 +639,9 @@ int main(int argc, char** argv) {
                     std::filesystem::create_directories(user_backup_dir);
                     std::string backup_path = user_backup_dir + "/" + backup_name + ".tar";
                     if(std::filesystem::exists(backup_path)) {
-                        LOG_WARN(1063, ctx.username, "Backup upload conflicts with existing backup " << backup_name);
+                        LOG_WARN(1063,
+                                 ctx.username,
+                                 "Backup upload conflicts with existing backup " << backup_name);
                         return json_error(409,
                                           "Backup with name '" + backup_name + "' already exists");
                     }
@@ -625,8 +658,7 @@ int main(int argc, char** argv) {
                     if(!out.good()) {
                         // Clean up partial file on error
                         std::filesystem::remove(backup_path);
-                        return json_error_500(
-                                ctx.username, req.url, "Failed to write backup file");
+                        return json_error_500(ctx.username, req.url, "Failed to write backup file");
                     }
 
                     return crow::response(201, "Backup uploaded successfully");
@@ -643,7 +675,7 @@ int main(int argc, char** argv) {
                 try {
                     auto active = index_manager.getActiveBackup(ctx.username);
                     crow::json::wvalue response;
-                    if (active) {
+                    if(active) {
                         response["active"] = true;
                         response["backup_name"] = active->backup_name;
                         response["index_id"] = active->index_id;
@@ -664,8 +696,10 @@ int main(int argc, char** argv) {
                 auto& ctx = app.get_context<AuthMiddleware>(req);
                 try {
                     auto info = index_manager.getBackupInfo(backup_name, ctx.username);
-                    if (info.empty()) {
-                        LOG_WARN(1064, ctx.username, "Backup-info request for missing backup " << backup_name);
+                    if(info.empty()) {
+                        LOG_WARN(1064,
+                                 ctx.username,
+                                 "Backup-info request for missing backup " << backup_name);
                         return json_error(404, "Backup not found or metadata missing");
                     }
                     crow::response res;
@@ -724,11 +758,17 @@ int main(int argc, char** argv) {
                     if(index_manager.deleteIndex(index_id)) {
                         return crow::response(200, "Index deleted successfully");
                     } else {
-                        LOG_WARN(1030, ctx.username, index_name, "Delete-index request for missing index");
+                        LOG_WARN(1030,
+                                 ctx.username,
+                                 index_name,
+                                 "Delete-index request for missing index");
                         return json_error(404, "Index not found");
                     }
                 } catch(const std::runtime_error& e) {
-                    LOG_WARN(1031, ctx.username, index_name, "Delete-index request rejected: " << e.what());
+                    LOG_WARN(1031,
+                             ctx.username,
+                             index_name,
+                             "Delete-index request rejected: " << e.what());
                     return json_error(400, e.what());
                 } catch(const std::exception& e) {
                     return json_error_500(ctx.username,
@@ -749,12 +789,18 @@ int main(int argc, char** argv) {
 
                 auto body = crow::json::load(req.body);
                 if(!body || !body.has("k")) {
-                    LOG_WARN(1032, ctx.username, index_name, "Search request missing parameter k or has invalid JSON");
+                    LOG_WARN(1032,
+                             ctx.username,
+                             index_name,
+                             "Search request missing parameter k or has invalid JSON");
                     return json_error(400, "Missing required parameters: k");
                 }
 
                 if(!body.has("vector") && !body.has("sparse_indices")) {
-                    LOG_WARN(1033, ctx.username, index_name, "Search request missing dense and sparse query vectors");
+                    LOG_WARN(1033,
+                             ctx.username,
+                             index_name,
+                             "Search request missing dense and sparse query vectors");
                     return json_error(400, "Missing query vector (dense or sparse)");
                 }
 
@@ -782,9 +828,9 @@ int main(int argc, char** argv) {
 
                 if(sparse_indices.size() != sparse_values.size()) {
                     LOG_WARN(1034,
-                                 ctx.username,
-                                 index_name,
-                                 "Search request has mismatched sparse_indices and sparse_values");
+                             ctx.username,
+                             index_name,
+                             "Search request has mismatched sparse_indices and sparse_values");
                     return json_error(400,
                                       "Mismatch between sparse_indices and sparse_values size");
                 }
@@ -806,44 +852,56 @@ int main(int argc, char** argv) {
                         auto raw_filter = nlohmann::json::parse(body["filter"].s());
                         // Expect new array-based filter format
                         if(!raw_filter.is_array()) {
-                            LOG_WARN(1036, ctx.username, index_name, "Search request used invalid filter format");
+                            LOG_WARN(1036,
+                                     ctx.username,
+                                     index_name,
+                                     "Search request used invalid filter format");
                             return json_error(400,
                                               "Filter must be an array. Please use format: "
                                               "[{\"field\":{\"$op\":value}}]");
                         }
                         filter_array = raw_filter;
                     } catch(const std::exception& e) {
-                        LOG_WARN(1037, ctx.username, index_name, "Search request filter JSON parsing failed: " << e.what());
+                        LOG_WARN(1037,
+                                 ctx.username,
+                                 index_name,
+                                 "Search request filter JSON parsing failed: " << e.what());
                         return json_error(400, std::string("Invalid filter JSON: ") + e.what());
                     }
                 }
 
                 // Extract filter parameters (Option B from chat plan)
                 ndd::FilterParams filter_params;
-                if (body.has("filter_params")) {
-                     auto fp = body["filter_params"];
-                     if (fp.has("prefilter_threshold")) {
-                         filter_params.prefilter_threshold = static_cast<size_t>(fp["prefilter_threshold"].i());
-                     }
-                     if (fp.has("boost_percentage")) {
-                         filter_params.boost_percentage = static_cast<size_t>(fp["boost_percentage"].i());
-                     }
+                if(body.has("filter_params")) {
+                    auto fp = body["filter_params"];
+                    if(fp.has("prefilter_threshold")) {
+                        filter_params.prefilter_threshold =
+                                static_cast<size_t>(fp["prefilter_threshold"].i());
+                    }
+                    if(fp.has("boost_percentage")) {
+                        filter_params.boost_percentage =
+                                static_cast<size_t>(fp["boost_percentage"].i());
+                    }
                 }
 
                 LOG_DEBUG("Filter: " << filter_array.dump());
                 try {
                     auto search_response = index_manager.searchKNN(index_id,
-                                                                    query,
-                                                                    sparse_indices,
-                                                                    sparse_values,
-                                                                    k,
-                                                                    filter_array,
-                                                                    filter_params,
-                                                                    include_vectors,
-                                                                    ef);
+                                                                   query,
+                                                                   sparse_indices,
+                                                                   sparse_values,
+                                                                   k,
+                                                                   filter_array,
+                                                                   filter_params,
+                                                                   include_vectors,
+                                                                   ef);
 
                     if(!search_response) {
-                        LOG_WARN(1038, ctx.username, index_name, "Search request returned no results because the index is missing or search failed");
+                        LOG_WARN(1038,
+                                 ctx.username,
+                                 index_name,
+                                 "Search request returned no results because the index is missing "
+                                 "or search failed");
                         return json_error(404, "Index not found or search failed");
                     }
 
@@ -854,15 +912,17 @@ int main(int argc, char** argv) {
                     resp.add_header("Content-Type", "application/msgpack");
                     return resp;
                 } catch(const std::runtime_error& e) {
-                    LOG_WARN(1039, ctx.username, index_name, "Search request rejected: " << e.what());
+                    LOG_WARN(1039,
+                             ctx.username,
+                             index_name,
+                             "Search request rejected: " << e.what());
                     return json_error(400, e.what());
                 } catch(const std::exception& e) {
                     LOG_DEBUG("Search failed: " << e.what());
-                    return json_error_500(
-                            ctx.username,
-                            index_name,
-                            req.url,
-                            std::string("Search failed: ") + e.what());
+                    return json_error_500(ctx.username,
+                                          index_name,
+                                          req.url,
+                                          std::string("Search failed: ") + e.what());
                 }
             });
 
@@ -880,7 +940,10 @@ int main(int argc, char** argv) {
                 if(content_type == "application/json") {
                     auto body = crow::json::load(req.body);
                     if(!body) {
-                        LOG_WARN(1040, ctx.username, index_name, "Insert request contained invalid JSON");
+                        LOG_WARN(1040,
+                                 ctx.username,
+                                 index_name,
+                                 "Insert request contained invalid JSON");
                         return json_error(400, "Invalid JSON");
                     }
 
@@ -942,7 +1005,10 @@ int main(int argc, char** argv) {
                         bool success = index_manager.addVectors(index_id, vectors);
                         return crow::response(success ? 200 : 400);
                     } catch(const std::runtime_error& e) {
-                        LOG_WARN(1041, ctx.username, index_name, "Insert request rejected: " << e.what());
+                        LOG_WARN(1041,
+                                 ctx.username,
+                                 index_name,
+                                 "Insert request rejected: " << e.what());
                         return json_error(400, e.what());
                     } catch(const std::exception& e) {
                         return json_error_500(ctx.username, index_name, req.url, e.what());
@@ -967,14 +1033,20 @@ int main(int argc, char** argv) {
                             return crow::response(success ? 200 : 400);
                         }
                     } catch(const std::runtime_error& e) {
-                        LOG_WARN(1042, ctx.username, index_name, "Insert request rejected: " << e.what());
+                        LOG_WARN(1042,
+                                 ctx.username,
+                                 index_name,
+                                 "Insert request rejected: " << e.what());
                         return json_error(400, e.what());
                     } catch(const std::exception& e) {
                         LOG_DEBUG("Batch insertion failed: " << e.what());
                         return json_error_500(ctx.username, index_name, req.url, e.what());
                     }
                 } else {
-                    LOG_WARN(1043, ctx.username, index_name, "Insert request used unsupported Content-Type: " << content_type);
+                    LOG_WARN(1043,
+                             ctx.username,
+                             index_name,
+                             "Insert request used unsupported Content-Type: " << content_type);
                     return crow::response(
                             400, "Content-Type must be application/msgpack or application/json");
                 }
@@ -983,39 +1055,43 @@ int main(int argc, char** argv) {
     // Get a single vector
     CROW_ROUTE(app, "/api/v1/index/<string>/vector/get")
             .CROW_MIDDLEWARES(app, AuthMiddleware)
-            .methods("POST"_method)(
-                    [&index_manager, &app](const crow::request& req, std::string index_name) {
-                        auto& ctx = app.get_context<AuthMiddleware>(req);
-                        std::string index_id = ctx.username + "/" + index_name;
+            .methods("POST"_method)([&index_manager, &app](const crow::request& req,
+                                                           std::string index_name) {
+                auto& ctx = app.get_context<AuthMiddleware>(req);
+                std::string index_id = ctx.username + "/" + index_name;
 
-                        // Read vector ID from JSON input (still using JSON for ID here)
-                        auto body = crow::json::load(req.body);
-                        if(!body || !body.has("id")) {
-                            LOG_WARN(1044, ctx.username, index_name, "Get-vector request missing vector id");
-                            return json_error(400, "Missing required parameter 'id'");
-                        }
-                        std::string vector_id = body["id"].s();
-                        try {
-                            auto vector = index_manager.getVector(index_id, vector_id);
-                            if(!vector) {
-                                LOG_WARN(1045, ctx.username, index_name, "Get-vector request for missing vector id " << vector_id);
-                                return json_error(404, "Vector with the given ID does not exist");
-                            }
-                            // Serialize vector as MsgPack
-                            msgpack::sbuffer sbuf;
-                            msgpack::pack(sbuf, vector.value());
-                            // Return as MessagePack
-                            crow::response resp(200, std::string(sbuf.data(), sbuf.size()));
-                            resp.add_header("Content-Type", "application/msgpack");
-                            return resp;
-                        } catch(const std::exception& e) {
-                            LOG_DEBUG("Failed to get vector: " << e.what());
-                            return json_error_500(ctx.username,
-                                                  index_name,
-                                                  req.url,
-                                                  std::string("Failed to get vector: ") + e.what());
-                        }
-                    });
+                // Read vector ID from JSON input (still using JSON for ID here)
+                auto body = crow::json::load(req.body);
+                if(!body || !body.has("id")) {
+                    LOG_WARN(
+                            1044, ctx.username, index_name, "Get-vector request missing vector id");
+                    return json_error(400, "Missing required parameter 'id'");
+                }
+                std::string vector_id = body["id"].s();
+                try {
+                    auto vector = index_manager.getVector(index_id, vector_id);
+                    if(!vector) {
+                        LOG_WARN(1045,
+                                 ctx.username,
+                                 index_name,
+                                 "Get-vector request for missing vector id " << vector_id);
+                        return json_error(404, "Vector with the given ID does not exist");
+                    }
+                    // Serialize vector as MsgPack
+                    msgpack::sbuffer sbuf;
+                    msgpack::pack(sbuf, vector.value());
+                    // Return as MessagePack
+                    crow::response resp(200, std::string(sbuf.data(), sbuf.size()));
+                    resp.add_header("Content-Type", "application/msgpack");
+                    return resp;
+                } catch(const std::exception& e) {
+                    LOG_DEBUG("Failed to get vector: " << e.what());
+                    return json_error_500(ctx.username,
+                                          index_name,
+                                          req.url,
+                                          std::string("Failed to get vector: ") + e.what());
+                }
+            });
 
     // Delete a vector
     CROW_ROUTE(app, "/api/v1/index/<string>/vector/<string>/delete")
@@ -1032,11 +1108,17 @@ int main(int argc, char** argv) {
                     if(index_manager.deleteVector(index_id, vector_id)) {
                         return crow::response(200, "Vector deleted successfully");
                     } else {
-                        LOG_WARN(1046, ctx.username, index_name, "Delete-vector request for missing vector id " << vector_id);
+                        LOG_WARN(1046,
+                                 ctx.username,
+                                 index_name,
+                                 "Delete-vector request for missing vector id " << vector_id);
                         return json_error(404, "Vector with the given ID does not exist");
                     }
                 } catch(const std::runtime_error& e) {
-                    LOG_WARN(1047, ctx.username, index_name, "Delete-vector request rejected: " << e.what());
+                    LOG_WARN(1047,
+                             ctx.username,
+                             index_name,
+                             "Delete-vector request rejected: " << e.what());
                     return json_error(400, e.what());
                 } catch(const std::exception& e) {
                     LOG_DEBUG("Failed to delete vector: " << e.what());
@@ -1059,18 +1141,27 @@ int main(int argc, char** argv) {
                 try {
                     body = nlohmann::json::parse(req.body);
                 } catch(const std::exception& e) {
-                    LOG_WARN(1048, ctx.username, index_name, "Delete-by-filter request contained invalid JSON");
+                    LOG_WARN(1048,
+                             ctx.username,
+                             index_name,
+                             "Delete-by-filter request contained invalid JSON");
                     return json_error(400, "Invalid JSON body");
                 }
                 if(!body.contains("filter")) {
-                    LOG_WARN(1049, ctx.username, index_name, "Delete-by-filter request is missing filter");
+                    LOG_WARN(1049,
+                             ctx.username,
+                             index_name,
+                             "Delete-by-filter request is missing filter");
                     return json_error(400, "Invalid request body - missing filter");
                 }
                 try {
                     nlohmann::json filter_array = body["filter"];
                     // Expect new array-based filter format
                     if(!filter_array.is_array()) {
-                        LOG_WARN(1050, ctx.username, index_name, "Delete-by-filter request used invalid filter format");
+                        LOG_WARN(1050,
+                                 ctx.username,
+                                 index_name,
+                                 "Delete-by-filter request used invalid filter format");
                         return json_error(400,
                                           "Filter must be an array. Please use format: "
                                           "[{\"field\":{\"$op\":value}}]");
@@ -1080,7 +1171,10 @@ int main(int argc, char** argv) {
 
                     return crow::response(200, std::to_string(deleted_count) + " vectors deleted");
                 } catch(const std::runtime_error& e) {
-                    LOG_WARN(1051, ctx.username, index_name, "Delete-by-filter request rejected: " << e.what());
+                    LOG_WARN(1051,
+                             ctx.username,
+                             index_name,
+                             "Delete-by-filter request rejected: " << e.what());
                     return json_error(400, e.what());
                 } catch(const std::exception& e) {
                     return json_error_500(ctx.username,
@@ -1102,12 +1196,18 @@ int main(int argc, char** argv) {
                 try {
                     body = nlohmann::json::parse(req.body);
                 } catch(const std::exception& e) {
-                    LOG_WARN(1052, ctx.username, index_name, "Update-filters request contained invalid JSON");
+                    LOG_WARN(1052,
+                             ctx.username,
+                             index_name,
+                             "Update-filters request contained invalid JSON");
                     return json_error(400, "Invalid JSON body");
                 }
 
                 if(!body.contains("updates") || !body["updates"].is_array()) {
-                    LOG_WARN(1053, ctx.username, index_name, "Update-filters request missing valid updates array");
+                    LOG_WARN(1053,
+                             ctx.username,
+                             index_name,
+                             "Update-filters request missing valid updates array");
                     return json_error(400,
                                       "Missing or invalid 'updates' field. Must be a list of {id, "
                                       "filter} objects.");
@@ -1129,7 +1229,10 @@ int main(int argc, char** argv) {
                     return crow::response(200, std::to_string(count) + " filters updated");
 
                 } catch(const std::runtime_error& e) {
-                    LOG_WARN(1054, ctx.username, index_name, "Update-filters request rejected: " << e.what());
+                    LOG_WARN(1054,
+                             ctx.username,
+                             index_name,
+                             "Update-filters request rejected: " << e.what());
                     return json_error(400, e.what());
                 } catch(const std::exception& e) {
                     return json_error_500(ctx.username,
@@ -1148,7 +1251,10 @@ int main(int argc, char** argv) {
                 try {
                     auto info = index_manager.getIndexInfo(index_id);
                     if(!info) {
-                        LOG_WARN(1055, ctx.username, index_name, "Index-info request for missing index");
+                        LOG_WARN(1055,
+                                 ctx.username,
+                                 index_name,
+                                 "Index-info request for missing index");
                         return json_error(404, "Index does not exist");
                     }
                     crow::json::wvalue response(
@@ -1163,13 +1269,14 @@ int main(int argc, char** argv) {
                              {"lib_token", settings::DEFAULT_LIB_TOKEN}});
                     return crow::response(200, response.dump());
                 } catch(const std::runtime_error& e) {
-                    LOG_WARN(1056, ctx.username, index_name, "Index-info request failed: " << e.what());
+                    LOG_WARN(1056,
+                             ctx.username,
+                             index_name,
+                             "Index-info request failed: " << e.what());
                     return json_error(404, std::string("Error: ") + e.what());
                 } catch(const std::exception& e) {
-                    return json_error_500(ctx.username,
-                                          index_name,
-                                          req.url,
-                                          std::string("Error: ") + e.what());
+                    return json_error_500(
+                            ctx.username, index_name, req.url, std::string("Error: ") + e.what());
                 }
             });
 

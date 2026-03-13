@@ -510,7 +510,8 @@ namespace hnswlib {
                     }
 
                     for(size_t i = 0; i < count; ++i) {
-                        const float* v_ptr = reinterpret_cast<const float*>(vectors[i]) + block_start;
+                        const float* v_ptr =
+                                reinterpret_cast<const float*>(vectors[i]) + block_start;
                         float dot = dot_acc[i];
                         float vec_sq = l2_metric ? vec_sq_acc[i] : 0.0f;
 
@@ -536,17 +537,17 @@ namespace hnswlib {
                         for(; d + 8 <= block_len; d += 8) {
                             __m256 qv = _mm256_loadu_ps(q_ptr + d);
                             __m256 vv = _mm256_loadu_ps(v_ptr + d);
-#if defined(__FMA__)
+#    if defined(__FMA__)
                             dot_vec = _mm256_fmadd_ps(qv, vv, dot_vec);
                             if(l2_metric) {
                                 sq_vec = _mm256_fmadd_ps(vv, vv, sq_vec);
                             }
-#else
+#    else
                             dot_vec = _mm256_add_ps(dot_vec, _mm256_mul_ps(qv, vv));
                             if(l2_metric) {
                                 sq_vec = _mm256_add_ps(sq_vec, _mm256_mul_ps(vv, vv));
                             }
-#endif
+#    endif
                         }
                         {
                             __m128 lo = _mm256_castps256_ps128(dot_vec);
@@ -582,7 +583,8 @@ namespace hnswlib {
 #elif defined(USE_SVE2)
                         size_t lane = svcntw();
                         for(; d + lane <= block_len; d += lane) {
-                            svbool_t pg = svptrue_b32();;
+                            svbool_t pg = svptrue_b32();
+                            ;
                             svfloat32_t qv = svld1_f32(pg, q_ptr + d);
                             svfloat32_t vv = svld1_f32(pg, v_ptr + d);
                             dot += svaddv_f32(pg, svmul_f32_x(pg, qv, vv));

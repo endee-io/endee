@@ -40,7 +40,8 @@ namespace ndd {
             updateVectorCount();
             LOG_INFO(2241,
                      index_id_,
-                     "SparseVectorStorage initialized at " << db_path_ << " with " << vector_count_ << " vectors");
+                     "SparseVectorStorage initialized at " << db_path_ << " with " << vector_count_
+                                                           << " vectors");
             return true;
         }
 
@@ -56,7 +57,7 @@ namespace ndd {
                         storage_->env_, nullptr, static_cast<MDBX_txn_flags_t>(flags), &txn_);
                 if(rc != 0) {
                     throw std::runtime_error("Failed to begin transaction: "
-                                                + std::string(mdbx_strerror(rc)));
+                                             + std::string(mdbx_strerror(rc)));
                 }
             }
 
@@ -113,7 +114,6 @@ namespace ndd {
                 return storage_->getVectorInternal(txn_, doc_id);
             }
 
-
             bool delete_vector(ndd::idInt doc_id) {
                 if(read_only_) {
                     return false;
@@ -123,7 +123,9 @@ namespace ndd {
                 // terms from the inverted index, then delete the raw payload row.
                 auto vec = get_vector(doc_id);
                 if(!vec) {
-                    LOG_WARN(2242, storage_->index_id_, "delete_vector could not find doc_id=" << doc_id);
+                    LOG_WARN(2242,
+                             storage_->index_id_,
+                             "delete_vector could not find doc_id=" << doc_id);
                     return false;
                 }
 
@@ -171,7 +173,9 @@ namespace ndd {
 
             for(const auto& [doc_id, sparse_vec] : batch) {
                 if(!storeVectorInternal(txn->getTxn(), doc_id, sparse_vec)) {
-                    LOG_ERROR(2243, index_id_, "store_vectors_batch failed to store doc_id=" << doc_id);
+                    LOG_ERROR(2243,
+                              index_id_,
+                              "store_vectors_batch failed to store doc_id=" << doc_id);
                     txn->abort();
                     return false;
                 }
@@ -212,12 +216,10 @@ namespace ndd {
             }
             return txn->commit();
         }
-#endif //if 0
+#endif  //if 0
 
-        std::vector<std::pair<ndd::idInt, float>> search(const SparseVector& query,
-                                                        size_t k,
-                                                        const ndd::RoaringBitmap* filter = nullptr)
-        {
+        std::vector<std::pair<ndd::idInt, float>>
+        search(const SparseVector& query, size_t k, const ndd::RoaringBitmap* filter = nullptr) {
             return sparse_index_->search(query, k, filter);
         }
 
@@ -262,7 +264,9 @@ namespace ndd {
             std::error_code ec;
             std::filesystem::create_directories(db_path_, ec);
             if(ec) {
-                LOG_ERROR(2248, index_id_, "create_directories failed for " << db_path_ << ": " << ec.message());
+                LOG_ERROR(2248,
+                          index_id_,
+                          "create_directories failed for " << db_path_ << ": " << ec.message());
                 return false;
             }
 
@@ -286,7 +290,9 @@ namespace ndd {
 
             rc = mdbx_dbi_open(txn, "sparse_docs", MDBX_CREATE | MDBX_INTEGERKEY, &docs_dbi_);
             if(rc != 0) {
-                LOG_ERROR(2251, index_id_, "mdbx_dbi_open failed for sparse_docs: " << mdbx_strerror(rc));
+                LOG_ERROR(2251,
+                          index_id_,
+                          "mdbx_dbi_open failed for sparse_docs: " << mdbx_strerror(rc));
                 mdbx_txn_abort(txn);
                 return false;
             }
@@ -315,11 +321,11 @@ namespace ndd {
             data.iov_len = packed.size();
 
             int rc = mdbx_put(txn, docs_dbi_, &key, &data, MDBX_UPSERT);
-            if (rc != 0) {
+            if(rc != 0) {
                 LOG_ERROR(2253,
                           index_id_,
-                          "storeVectorInternal MDBX put failed for doc_id="
-                                  << doc_id << ": " << mdbx_strerror(rc));
+                          "storeVectorInternal MDBX put failed for doc_id=" << doc_id << ": "
+                                                                            << mdbx_strerror(rc));
             }
             return rc == 0;
         }
@@ -341,7 +347,7 @@ namespace ndd {
             key.iov_base = &doc_id;
             key.iov_len = sizeof(ndd::idInt);
             int rc = mdbx_del(txn, docs_dbi_, &key, nullptr);
-            if (rc != 0 && rc != MDBX_NOTFOUND) {
+            if(rc != 0 && rc != MDBX_NOTFOUND) {
                 LOG_ERROR(2254,
                           index_id_,
                           "deleteVectorInternal MDBX delete failed for doc_id="

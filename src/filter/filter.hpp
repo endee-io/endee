@@ -16,7 +16,7 @@
 #include "mdbx/mdbx.h"
 #include "../utils/log.hpp"
 #include "../core/types.hpp"
-#include "../hnsw/hnswlib.h" // For BaseFilterFunctor
+#include "../hnsw/hnswlib.h"  // For BaseFilterFunctor
 
 #include "numeric_index.hpp"
 #include "category_index.hpp"
@@ -31,11 +31,11 @@ enum class FieldType : uint8_t {
 // Filter Functor for HNSW
 class BitMapFilterFunctor : public hnswlib::BaseFilterFunctor {
     const ndd::RoaringBitmap& bitmap_;
+
 public:
-    BitMapFilterFunctor(const ndd::RoaringBitmap& bitmap) : bitmap_(bitmap) {}
-    bool operator()(ndd::idInt id) override {
-        return bitmap_.contains(id);
-    }
+    BitMapFilterFunctor(const ndd::RoaringBitmap& bitmap) :
+        bitmap_(bitmap) {}
+    bool operator()(ndd::idInt id) override { return bitmap_.contains(id); }
 };
 
 class Filter {
@@ -55,8 +55,9 @@ private:
         MDBX_txn* txn;
         int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_RDONLY, &txn);
         if(rc != MDBX_SUCCESS) {
-            LOG_ERROR(
-                    1210, index_id_, "Failed to begin schema read transaction: " << mdbx_strerror(rc));
+            LOG_ERROR(1210,
+                      index_id_,
+                      "Failed to begin schema read transaction: " << mdbx_strerror(rc));
             return;
         }
 
@@ -89,8 +90,9 @@ private:
         MDBX_txn* txn;
         int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
         if(rc != MDBX_SUCCESS) {
-            LOG_ERROR(
-                    1208, index_id_, "Failed to begin schema write transaction: " << mdbx_strerror(rc));
+            LOG_ERROR(1208,
+                      index_id_,
+                      "Failed to begin schema write transaction: " << mdbx_strerror(rc));
             return;
         }
 
@@ -101,8 +103,9 @@ private:
         if(rc == MDBX_SUCCESS) {
             rc = mdbx_txn_commit(txn);
             if(rc != MDBX_SUCCESS) {
-                LOG_ERROR(
-                        1209, index_id_, "Failed to commit filter schema update: " << mdbx_strerror(rc));
+                LOG_ERROR(1209,
+                          index_id_,
+                          "Failed to commit filter schema update: " << mdbx_strerror(rc));
             }
         } else {
             mdbx_txn_abort(txn);
@@ -131,14 +134,13 @@ private:
         mdbx_env_set_maxdbs(env_, 10);
 
         // Set geometry for auto-grow using the filter map size settings
-        rc = mdbx_env_set_geometry(
-                env_,
-                -1,                                          // lower size bound (use default)
-                1ULL << settings::FILTER_MAP_SIZE_BITS,      // current/now size
-                1ULL << settings::FILTER_MAP_SIZE_MAX_BITS,  // upper size bound
-                1ULL << settings::FILTER_MAP_SIZE_BITS,      // growth step
-                -1,                                          // shrink threshold (use default)
-                -1);                                         // pagesize (use default)
+        rc = mdbx_env_set_geometry(env_,
+                                   -1,  // lower size bound (use default)
+                                   1ULL << settings::FILTER_MAP_SIZE_BITS,      // current/now size
+                                   1ULL << settings::FILTER_MAP_SIZE_MAX_BITS,  // upper size bound
+                                   1ULL << settings::FILTER_MAP_SIZE_BITS,      // growth step
+                                   -1,   // shrink threshold (use default)
+                                   -1);  // pagesize (use default)
         if(rc != MDBX_SUCCESS) {
             throw std::runtime_error("Failed to set geometry for filters");
         }
@@ -256,7 +258,9 @@ public:
                         str_val = val.get<bool>() ? "1" : "0";
                     } else {
                         str_val = std::to_string(val.get<int>());
-                        if (str_val.size() > 255) throw std::runtime_error("Category value too long");
+                        if(str_val.size() > 255) {
+                            throw std::runtime_error("Category value too long");
+                        }
                     }
                     std::string key = format_filter_key(field, str_val);
                     or_result = category_index_->get_bitmap_by_key(key);
@@ -294,7 +298,9 @@ public:
                                 str_val = std::to_string(v.get<int>());
                             }
                             if(!str_val.empty()) {
-                                if (str_val.size() > 255) throw std::runtime_error("Category value too long");
+                                if(str_val.size() > 255) {
+                                    throw std::runtime_error("Category value too long");
+                                }
                                 std::string key = format_filter_key(field, str_val);
                                 or_result |= category_index_->get_bitmap_by_key(key);
                             }
@@ -338,23 +344,28 @@ public:
             } else {
                 throw std::runtime_error("Unsupported operator: " + op);
             }
-            
+
             partial_results.push_back(std::move(or_result));
         }
 
         // Optimization: Sort by cardinality (smallest first)
-        std::sort(partial_results.begin(), partial_results.end(), 
-                 [](const ndd::RoaringBitmap& a, const ndd::RoaringBitmap& b) {
-                     return a.cardinality() < b.cardinality();
-                 });
+        std::sort(partial_results.begin(),
+                  partial_results.end(),
+                  [](const ndd::RoaringBitmap& a, const ndd::RoaringBitmap& b) {
+                      return a.cardinality() < b.cardinality();
+                  });
 
-        if (partial_results.empty()) return ndd::RoaringBitmap();
+        if(partial_results.empty()) {
+            return ndd::RoaringBitmap();
+        }
 
         ndd::RoaringBitmap final_result = partial_results[0];
         for(size_t i = 1; i < partial_results.size(); ++i) {
             final_result &= partial_results[i];
             // If result becomes empty, stop early
-            if(final_result.isEmpty()) return final_result;
+            if(final_result.isEmpty()) {
+                return final_result;
+            }
         }
 
         return final_result;
@@ -444,10 +455,9 @@ public:
                         filter_to_ids[filter_key].push_back(numeric_id);
                     } else {
                         LOG_WARN(1203,
-                                       index_id_,
-                                       "Unsupported filter type for field '" << field
-                                                                             << "' in filter: "
-                                                                             << value.dump());
+                                 index_id_,
+                                 "Unsupported filter type for field '"
+                                         << field << "' in filter: " << value.dump());
                     }
                 }
             } catch(const std::exception& e) {

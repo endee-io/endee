@@ -123,7 +123,9 @@ namespace ndd {
             std::vector<std::string> scan_values(const std::string& field) const {
                 std::vector<std::string> values;
                 MDBX_txn* txn;
-                if (mdbx_txn_begin(env_, nullptr, MDBX_TXN_RDONLY, &txn) != MDBX_SUCCESS) return values;
+                if(mdbx_txn_begin(env_, nullptr, MDBX_TXN_RDONLY, &txn) != MDBX_SUCCESS) {
+                    return values;
+                }
 
                 MDBX_cursor* cursor;
                 mdbx_cursor_open(txn, dbi_, &cursor);
@@ -135,7 +137,9 @@ namespace ndd {
                 int rc = mdbx_cursor_get(cursor, &key, &data, MDBX_SET_RANGE);
                 while(rc == MDBX_SUCCESS) {
                     std::string found_key((char*)key.iov_base, key.iov_len);
-                    if(found_key.rfind(prefix, 0) != 0) break;
+                    if(found_key.rfind(prefix, 0) != 0) {
+                        break;
+                    }
 
                     values.push_back(found_key.substr(prefix.size()));
                     rc = mdbx_cursor_get(cursor, &key, &data, MDBX_NEXT);

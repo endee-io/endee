@@ -45,8 +45,7 @@ struct IndexInfo {
     size_t dimension;
     size_t sparse_dim;
     std::string space_type_str;
-    ndd::quant::QuantizationLevel
-            quant_level;  // Selected quantization level
+    ndd::quant::QuantizationLevel quant_level;  // Selected quantization level
     int32_t checksum;
     size_t M;
     size_t ef_con;
@@ -234,9 +233,9 @@ private:
             if(!failed_vector_add_ids.empty()) {
                 entry.id_mapper->reclaim_failed_ids(failed_vector_add_ids);
                 LOG_INFO(2010,
-                               index_id,
-                               "Reclaimed " << failed_vector_add_ids.size()
-                                            << " failed VECTOR_ADD ids for reuse");
+                         index_id,
+                         "Reclaimed " << failed_vector_add_ids.size()
+                                      << " failed VECTOR_ADD ids for reuse");
             }
 
             // Mark as updated to trigger a save
@@ -354,7 +353,7 @@ private:
         if(remainingCapacity < settings::MAX_ELEMENTS_INCREMENT_TRIGGER) {
             size_t newMaxElements = maxElements + settings::MAX_ELEMENTS_INCREMENT;
             LOG_DEBUG("Auto-resizing index " << entry.index_id << " from " << maxElements << " to "
-                                            << newMaxElements << " elements");
+                                             << newMaxElements << " elements");
 
             try {
                 entry.alg->resizeIndex(newMaxElements);
@@ -377,8 +376,7 @@ private:
 
         // Update element count in metadata
         if(!metadata_manager_->updateElementCount(entry.index_id, entry.alg->getElementsCount())) {
-            LOG_WARN(
-                    2014, entry.index_id, "Failed to update element count in metadata");
+            LOG_WARN(2014, entry.index_id, "Failed to update element count in metadata");
         }
         entry.updated = false;
     }
@@ -406,7 +404,8 @@ public:
 
                     // Only evict if the index is not dirty (hasn't been updated)
                     if(it->second.updated) {
-                        LOG_WARN(2015, to_evict, "Cannot evict dirty index; it must be saved first");
+                        LOG_WARN(
+                                2015, to_evict, "Cannot evict dirty index; it must be saved first");
                         // Put it back at the front to try other indices
                         indices_list_.push_front(to_evict);
                         continue;
@@ -500,9 +499,8 @@ public:
                         saveIndex(pair.first);
                     }
                 } catch(const std::exception& e) {
-                    LOG_ERROR(2017,
-                                    pair.first,
-                                    "Failed to save index during shutdown: " << e.what());
+                    LOG_ERROR(
+                            2017, pair.first, "Failed to save index during shutdown: " << e.what());
                 }
             }
             LOG_DEBUG("Shutdown complete");
@@ -556,8 +554,6 @@ public:
         return true;
     }
 
-
-
     bool createIndex(const std::string& index_id,
                      const IndexConfig& config,
                      UserType user_type = UserType::Admin,
@@ -607,23 +603,23 @@ public:
 
         //create the directory and initialize sequence for IDMapper
         LOG_INFO(2021,
-                       index_id,
-                       "Creating ID mapper with user type " << userTypeToString(user_type));
+                 index_id,
+                 "Creating ID mapper with user type " << userTypeToString(user_type));
 
         // IDMapper now uses tier-based fixed bloom filter sizing based on user_type
         auto id_mapper = std::make_shared<IDMapper>(lmdb_dir, true, user_type);
 
-
         // Create HNSW directly with all necessary parameters
         ndd::quant::QuantizationLevel quant_level = config.quant_level;
-        auto vector_storage =
-                std::make_shared<VectorStorage>(index_dir, index_id, config.dim, config.quant_level);
+        auto vector_storage = std::make_shared<VectorStorage>(
+                index_dir, index_id, config.dim, config.quant_level);
 
         // Initialize Sparse Storage if needed
         std::unique_ptr<ndd::SparseVectorStorage> sparse_storage = nullptr;
         if(config.sparse_dim > 0) {
             std::string sparse_storage_dir = index_dir + "/sparse";
-            sparse_storage = std::make_unique<ndd::SparseVectorStorage>(sparse_storage_dir, index_id);
+            sparse_storage =
+                    std::make_unique<ndd::SparseVectorStorage>(sparse_storage_dir, index_id);
             if(!sparse_storage->initialize()) {
                 throw std::runtime_error("Failed to initialize sparse storage");
             }
@@ -642,7 +638,10 @@ public:
             return vs->get_vector(label, buffer);
         });
 
-        alg->setVectorFetcherBatch([vs = vector_storage](const ndd::idInt* labels, uint8_t* buffers, bool* success, size_t count) -> size_t {
+        alg->setVectorFetcherBatch([vs = vector_storage](const ndd::idInt* labels,
+                                                         uint8_t* buffers,
+                                                         bool* success,
+                                                         size_t count) -> size_t {
             return vs->get_vectors_batch_into(labels, buffers, success, count);
         });
 
@@ -737,7 +736,8 @@ public:
         std::unique_ptr<ndd::SparseVectorStorage> sparse_storage;
         if(sparse_dim > 0) {
             std::string sparse_storage_dir = index_dir + "/sparse";
-            sparse_storage = std::make_unique<ndd::SparseVectorStorage>(sparse_storage_dir, index_id);
+            sparse_storage =
+                    std::make_unique<ndd::SparseVectorStorage>(sparse_storage_dir, index_id);
             if(!sparse_storage->initialize()) {
                 throw std::runtime_error("Failed to initialize sparse storage for index: "
                                          + index_id);
@@ -749,7 +749,10 @@ public:
             return vs->get_vector(label, buffer);
         });
 
-        alg->setVectorFetcherBatch([vs = vector_storage](const ndd::idInt* labels, uint8_t* buffers, bool* success, size_t count) -> size_t {
+        alg->setVectorFetcherBatch([vs = vector_storage](const ndd::idInt* labels,
+                                                         uint8_t* buffers,
+                                                         bool* success,
+                                                         size_t count) -> size_t {
             return vs->get_vectors_batch_into(labels, buffers, success, count);
         });
 
@@ -815,9 +818,9 @@ public:
                 if(it != indices_.end()) {
                     // Cache removed
                     LOG_INFO(2025,
-                                   index_id,
-                                   "Reloaded index with "
-                                           << it->second.alg->getElementsCount() << " elements");
+                             index_id,
+                             "Reloaded index with " << it->second.alg->getElementsCount()
+                                                    << " elements");
                 }
             }
 
@@ -850,7 +853,10 @@ public:
             return vs->get_vector(label, buffer);
         });
 
-        new_alg->setVectorFetcherBatch([vs = entry.vector_storage](const ndd::idInt* labels, uint8_t* buffers, bool* success, size_t count) -> size_t {
+        new_alg->setVectorFetcherBatch([vs = entry.vector_storage](const ndd::idInt* labels,
+                                                                   uint8_t* buffers,
+                                                                   bool* success,
+                                                                   size_t count) -> size_t {
             return vs->get_vectors_batch_into(labels, buffers, success, count);
         });
 
@@ -980,8 +986,8 @@ public:
                     // Calculate start and end indices for this thread
                     size_t start_idx = t * chunk_size;
                     size_t end_idx = (start_idx + chunk_size < quantized_vectors.size())
-                                            ? (start_idx + chunk_size)
-                                            : quantized_vectors.size();
+                                             ? (start_idx + chunk_size)
+                                             : quantized_vectors.size();
 
                     // Process assigned chunk of vectors
                     for(size_t i = start_idx; i < end_idx; i++) {
@@ -1116,8 +1122,9 @@ public:
 
         if(empty_vector_count.load() > 0) {
             LOG_WARN(2032,
-                           index_id,
-                           "Skipped " << empty_vector_count.load() << " vectors during recovery because they were empty");
+                     index_id,
+                     "Skipped " << empty_vector_count.load()
+                                << " vectors during recovery because they were empty");
         }
 
         LOG_INFO(2033, index_id, "Recovered " << batch.size() << " vectors");
@@ -1334,8 +1341,9 @@ public:
 
             // 0. Compute Filter Bitmap (Shared)
             std::optional<ndd::RoaringBitmap> active_filter_bitmap;
-            if (!filter_array.empty()) {
-                active_filter_bitmap = entry.vector_storage->filter_store_->computeFilterBitmap(filter_array);
+            if(!filter_array.empty()) {
+                active_filter_bitmap =
+                        entry.vector_storage->filter_store_->computeFilterBitmap(filter_array);
             }
 
             // 1. Sparse Search (Async)
@@ -1360,7 +1368,8 @@ public:
                         sparse_query.values.push_back(p.second);
                     }
 
-                    const ndd::RoaringBitmap* filter_ptr = active_filter_bitmap.has_value() ? &(*active_filter_bitmap) : nullptr;
+                    const ndd::RoaringBitmap* filter_ptr =
+                            active_filter_bitmap.has_value() ? &(*active_filter_bitmap) : nullptr;
                     return entry.sparse_storage->search(sparse_query, k, filter_ptr);
                 });
             }
@@ -1375,48 +1384,59 @@ public:
                 std::vector<uint8_t> query_bytes =
                         ndd::quant::get_quantizer_dispatch(quant_level).quantize(query);
 
-                if (!active_filter_bitmap) {
+                if(!active_filter_bitmap) {
                     dense_results = entry.alg->searchKnn(query_bytes.data(), k, ef);
                 } else {
                     // Smart Filter Execution Strategy
                     auto& bitmap = *active_filter_bitmap;
                     size_t card = bitmap.cardinality();
 
-                    if (card == 0) {
+                    if(card == 0) {
                         // No results match filter
-                    } else if (card < params.prefilter_threshold) {
-                         // Strategy A: Brute Force on Small Subset
-                         std::vector<ndd::idInt> valid_ids;
-                         valid_ids.reserve(card);
-                         bitmap.iterate([](ndd::idInt id, void* ptr){
-                            static_cast<std::vector<ndd::idInt>*>(ptr)->push_back(id);
-                            return true;
-                         }, &valid_ids);
+                    } else if(card < params.prefilter_threshold) {
+                        // Strategy A: Brute Force on Small Subset
+                        std::vector<ndd::idInt> valid_ids;
+                        valid_ids.reserve(card);
+                        bitmap.iterate(
+                                [](ndd::idInt id, void* ptr) {
+                                    static_cast<std::vector<ndd::idInt>*>(ptr)->push_back(id);
+                                    return true;
+                                },
+                                &valid_ids);
 
-                         // Fetch vectors
-                         auto vector_batch = entry.vector_storage->get_vectors_batch(valid_ids);
-                         
-                         // Prepare subset for bruteforce search
-                         std::vector<std::pair<idInt, std::vector<uint8_t>>> vector_subset;
-                         vector_subset.reserve(vector_batch.size());
-                         for(const auto& [nid, vbytes] : vector_batch) {
-                             vector_subset.emplace_back(nid, vbytes);
-                         }
-                         
-                         dense_results = hnswlib::searchKnnSubset<float>(
-                             query_bytes.data(), vector_subset, k, space);
-                         
+                        // Fetch vectors
+                        auto vector_batch = entry.vector_storage->get_vectors_batch(valid_ids);
+
+                        // Prepare subset for bruteforce search
+                        std::vector<std::pair<idInt, std::vector<uint8_t>>> vector_subset;
+                        vector_subset.reserve(vector_batch.size());
+                        for(const auto& [nid, vbytes] : vector_batch) {
+                            vector_subset.emplace_back(nid, vbytes);
+                        }
+
+                        dense_results = hnswlib::searchKnnSubset<float>(
+                                query_bytes.data(), vector_subset, k, space);
+
                     } else {
                         // Strategy B: Filtered HNSW Search
                         BitMapFilterFunctor functor(bitmap);
                         size_t effective_ef = ef > 0 ? ef : settings::DEFAULT_EF_SEARCH;
 
                         // Try to use optimized templated search if algorithm matches
-                        auto* hnsw_alg = dynamic_cast<hnswlib::HierarchicalNSW<float>*>(entry.alg.get());
-                        if (hnsw_alg) {
-                             dense_results = hnsw_alg->searchKnn(query_bytes.data(), k, effective_ef, &functor, params.boost_percentage);
+                        auto* hnsw_alg =
+                                dynamic_cast<hnswlib::HierarchicalNSW<float>*>(entry.alg.get());
+                        if(hnsw_alg) {
+                            dense_results = hnsw_alg->searchKnn(query_bytes.data(),
+                                                                k,
+                                                                effective_ef,
+                                                                &functor,
+                                                                params.boost_percentage);
                         } else {
-                             dense_results = entry.alg->searchKnn(query_bytes.data(), k, effective_ef, &functor, params.boost_percentage);
+                            dense_results = entry.alg->searchKnn(query_bytes.data(),
+                                                                 k,
+                                                                 effective_ef,
+                                                                 &functor,
+                                                                 params.boost_percentage);
                         }
                     }
                 }
@@ -1605,8 +1625,7 @@ public:
                     }
                 } else {
                     LOG_DEBUG("Filter cardinality too high for pre-filtering ("
-                              << filter_cardinality
-                              << " >= " << params.prefilter_threshold
+                              << filter_cardinality << " >= " << params.prefilter_threshold
                               << "), returning post-filter results");
                 }
             }
@@ -1664,8 +1683,7 @@ public:
                 return true;
             }
         } catch(const std::filesystem::filesystem_error& e) {
-            LOG_ERROR(
-                    2040, index_id, "Failed to move index to deleted directory: " << e.what());
+            LOG_ERROR(2040, index_id, "Failed to move index to deleted directory: " << e.what());
             return false;
         }
 
@@ -1744,11 +1762,11 @@ public:
 
     // Orchestration methods (defined below after class)
     std::pair<bool, std::string> createBackupAsync(const std::string& index_id,
-                                                    const std::string& backup_name);
+                                                   const std::string& backup_name);
 
     std::pair<bool, std::string> restoreBackup(const std::string& backup_name,
-                                                const std::string& target_index_name,
-                                                const std::string& username);
+                                               const std::string& target_index_name,
+                                               const std::string& username);
 
     // Forwarding methods (no IndexManager internals needed)
     std::vector<std::string> listBackups(const std::string& username) {
@@ -1756,7 +1774,7 @@ public:
     }
 
     std::pair<bool, std::string> deleteBackup(const std::string& backup_name,
-                                               const std::string& username) {
+                                              const std::string& username) {
         return backup_store_.deleteBackup(backup_name, username);
     }
 
@@ -1764,8 +1782,7 @@ public:
         return backup_store_.getActiveBackup(username);
     }
 
-    nlohmann::json getBackupInfo(const std::string& backup_name,
-                                  const std::string& username) {
+    nlohmann::json getBackupInfo(const std::string& backup_name, const std::string& username) {
         return backup_store_.getBackupInfo(backup_name, username);
     }
 
@@ -1776,16 +1793,17 @@ public:
 
 // ========== IndexManager backup implementations ==========
 
-inline void IndexManager::executeBackupJob(const std::string& index_id, const std::string& backup_name) {
+inline void IndexManager::executeBackupJob(const std::string& index_id,
+                                           const std::string& backup_name) {
     std::string username;
     size_t upos = index_id.find('/');
-    if (upos != std::string::npos) {
+    if(upos != std::string::npos) {
         username = index_id.substr(0, upos);
     }
 
     try {
         std::string index_name;
-        if (upos != std::string::npos) {
+        if(upos != std::string::npos) {
             index_name = index_id.substr(upos + 1);
         } else {
             throw std::runtime_error("Invalid index ID format");
@@ -1812,24 +1830,25 @@ inline void IndexManager::executeBackupJob(const std::string& index_id, const st
 
         auto space_info = std::filesystem::space(user_backup_dir);
         if(space_info.available < index_size * 2) {
-            throw std::runtime_error("Insufficient disk space: need " +
-                std::to_string(index_size * 2 / MB) + " MB");
+            throw std::runtime_error("Insufficient disk space: need "
+                                     + std::to_string(index_size * 2 / MB) + " MB");
         }
 
         auto meta = metadata_manager_->getMetadata(index_id);
         nlohmann::json metadata_json;
         if(meta) {
             metadata_json["original_index"] = index_name;
-            metadata_json["timestamp"] = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+            metadata_json["timestamp"] =
+                    std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
             metadata_json["size_mb"] = index_size / MB;
             metadata_json["params"] = {{"M", meta->M},
-                           {"ef_construction", meta->ef_con},
-                           {"dim", meta->dimension},
-                           {"sparse_dim", meta->sparse_dim},
-                           {"space_type", meta->space_type_str},
-                           {"quant_level", static_cast<int>(meta->quant_level)},
-                           {"total_elements", meta->total_elements},
-                           {"checksum", meta->checksum}};
+                                       {"ef_construction", meta->ef_con},
+                                       {"dim", meta->dimension},
+                                       {"sparse_dim", meta->sparse_dim},
+                                       {"space_type", meta->space_type_str},
+                                       {"quant_level", static_cast<int>(meta->quant_level)},
+                                       {"total_elements", meta->total_elements},
+                                       {"checksum", meta->checksum}};
             LOG_DEBUG("Metadata prepared for backup: " << metadata_json.dump());
         } else {
             LOG_ERROR(2041, index_id, "Failed to get metadata for backup");
@@ -1846,16 +1865,20 @@ inline void IndexManager::executeBackupJob(const std::string& index_id, const st
             if(!metadata_json.empty()) {
                 std::ofstream meta_file(metadata_file_in_index, std::ios::binary);
                 if(!meta_file) {
-                    throw std::runtime_error("Failed to create metadata file: " + metadata_file_in_index);
+                    throw std::runtime_error("Failed to create metadata file: "
+                                             + metadata_file_in_index);
                 }
                 meta_file << metadata_json.dump(4);
                 meta_file.flush();
                 meta_file.close();
 
                 if(!std::filesystem::exists(metadata_file_in_index)) {
-                    throw std::runtime_error("Metadata file was not created: " + metadata_file_in_index);
+                    throw std::runtime_error("Metadata file was not created: "
+                                             + metadata_file_in_index);
                 }
-                LOG_DEBUG("Metadata file created: " << metadata_file_in_index << " (size: " << std::filesystem::file_size(metadata_file_in_index) << " bytes)");
+                LOG_DEBUG("Metadata file created: "
+                          << metadata_file_in_index << " (size: "
+                          << std::filesystem::file_size(metadata_file_in_index) << " bytes)");
             }
 
             std::string error_msg;
@@ -1870,7 +1893,9 @@ inline void IndexManager::executeBackupJob(const std::string& index_id, const st
             if(!std::filesystem::exists(backup_tar_temp)) {
                 throw std::runtime_error("Tar archive was not created: " + backup_tar_temp);
             }
-            LOG_DEBUG("Tar archive created successfully: " << backup_tar_temp << " (size: " << std::filesystem::file_size(backup_tar_temp) << " bytes)");
+            LOG_DEBUG("Tar archive created successfully: "
+                      << backup_tar_temp
+                      << " (size: " << std::filesystem::file_size(backup_tar_temp) << " bytes)");
 
             if(std::filesystem::exists(metadata_file_in_index)) {
                 std::filesystem::remove(metadata_file_in_index);
@@ -1889,7 +1914,7 @@ inline void IndexManager::executeBackupJob(const std::string& index_id, const st
 
         LOG_INFO(2043, index_id, "Backup completed: " << backup_name << " -> " << backup_tar_final);
 
-    } catch (const std::exception& e) {
+    } catch(const std::exception& e) {
         std::string user_backup_dir = backup_store_.getUserBackupDir(username);
         std::string user_temp_dir = backup_store_.getUserTempDir(username);
         std::string source_dir = data_dir_ + "/" + index_id;
@@ -1913,9 +1938,10 @@ inline void IndexManager::executeBackupJob(const std::string& index_id, const st
     }
 }
 
-inline std::pair<bool, std::string> IndexManager::restoreBackup(const std::string& backup_name,
-                                                                  const std::string& target_index_name,
-                                                                  const std::string& username) {
+inline std::pair<bool, std::string>
+IndexManager::restoreBackup(const std::string& backup_name,
+                            const std::string& target_index_name,
+                            const std::string& username) {
     std::pair<bool, std::string> result = backup_store_.validateBackupName(backup_name);
     if(!result.first) {
         return result;
@@ -1999,8 +2025,8 @@ inline std::pair<bool, std::string> IndexManager::restoreBackup(const std::strin
     }
 }
 
-inline std::pair<bool, std::string> IndexManager::createBackupAsync(const std::string& index_id,
-                                                                      const std::string& backup_name) {
+inline std::pair<bool, std::string>
+IndexManager::createBackupAsync(const std::string& index_id, const std::string& backup_name) {
     std::pair<bool, std::string> result = backup_store_.validateBackupName(backup_name);
     if(!result.first) {
         return result;
@@ -2008,20 +2034,20 @@ inline std::pair<bool, std::string> IndexManager::createBackupAsync(const std::s
 
     std::string username;
     size_t pos = index_id.find('/');
-    if (pos != std::string::npos) {
+    if(pos != std::string::npos) {
         username = index_id.substr(0, pos);
     } else {
         return {false, "Invalid index ID format"};
     }
 
-    if (backup_store_.hasActiveBackup(username)) {
+    if(backup_store_.hasActiveBackup(username)) {
         return {false, "Backup already in progress for user: " + username};
     }
 
     std::string user_backup_dir = backup_store_.getUserBackupDir(username);
     std::filesystem::create_directories(user_backup_dir);
     std::string backup_tar = user_backup_dir + "/" + backup_name + ".tar";
-    if (std::filesystem::exists(backup_tar)) {
+    if(std::filesystem::exists(backup_tar)) {
         return {false, "Backup already exists: " + backup_name};
     }
 

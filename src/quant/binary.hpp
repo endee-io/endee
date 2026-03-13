@@ -680,8 +680,8 @@ namespace ndd {
                         float dist = dist_acc[i];
 
                         for(size_t w = 0; w < block_len; ++w) {
-                            dist += __builtin_popcountll(
-                                    q_words[block_start + w] ^ v_words[block_start + w]);
+                            dist += __builtin_popcountll(q_words[block_start + w]
+                                                         ^ v_words[block_start + w]);
                         }
 
                         dist_acc[i] = dist;

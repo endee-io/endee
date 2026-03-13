@@ -20,7 +20,8 @@ namespace ndd {
         // Constructor from packed data
         SparseVector(const uint8_t* data, size_t data_size) {
             if(data_size < sizeof(uint16_t)) {
-                throw std::runtime_error("Invalid packed data: insufficient size for nr_nonzero field");
+                throw std::runtime_error(
+                        "Invalid packed data: insufficient size for nr_nonzero field");
             }
 
             const uint8_t* ptr = data;
@@ -32,7 +33,8 @@ namespace ndd {
             ptr += sizeof(uint16_t);
 
             // Validate remaining data size: nr_nonzero * (4 + 2) bytes
-            size_t expected_size = sizeof(uint16_t) + (nr_nonzero * (sizeof(uint32_t) + sizeof(uint16_t)));
+            size_t expected_size =
+                    sizeof(uint16_t) + (nr_nonzero * (sizeof(uint32_t) + sizeof(uint16_t)));
             if(data_size != expected_size) {
                 throw std::runtime_error("Invalid packed data: size mismatch");
             }
@@ -74,8 +76,8 @@ namespace ndd {
             uint16_t nr_nonzero = static_cast<uint16_t>(indices.size());
 
             // Calculate total size: nr_nonzero(2) + term_ids(4*nr_nonzero) + values(2*nr_nonzero)
-            size_t total_size =
-                    sizeof(uint16_t) + (nr_nonzero * sizeof(uint32_t)) + (nr_nonzero * sizeof(uint16_t));
+            size_t total_size = sizeof(uint16_t) + (nr_nonzero * sizeof(uint32_t))
+                                + (nr_nonzero * sizeof(uint16_t));
 
             // Serialize contiguously so the vector can be written to MDBX as one value blob.
             std::vector<uint8_t> packed(total_size);
@@ -173,7 +175,7 @@ namespace ndd {
         float dot(const std::vector<uint8_t>& packed_data) const {
             return dot(packed_data.data(), packed_data.size());
         }
-#endif //if 0
+#endif  //if 0
 
         // Utility methods
         bool empty() const { return indices.empty(); }

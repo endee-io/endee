@@ -106,61 +106,66 @@ inline std::mutex FunctionTimer::mutex;
 
 // Production logs share one formatter so every call site emits stable operational output.
 namespace ndd::log {
-constexpr int kNoCode = -1;
+    constexpr int kNoCode = -1;
 
-struct Context {
-    std::string username{"-"};
-    std::string index_name{"-"};
-};
+    struct Context {
+        std::string username{"-"};
+        std::string index_name{"-"};
+    };
 
-// Logs always render username/index_name, using "-" placeholders when scope is missing.
-inline std::string normalizeContextPart(std::string value) {
-    if(value.empty()) {
-        return "-";
-    }
-    return value;
-}
-
-inline Context makeContext(const std::string& username, const std::string& index_name) {
-    return {normalizeContextPart(username), normalizeContextPart(index_name)};
-}
-
-inline Context makeUserContext(const std::string& username) { return makeContext(username, "-"); }
-
-inline Context makeGlobalContext() { return makeContext("-", "-"); }
-
-inline Context contextFromIndexId(const std::string& index_id) {
-    const size_t slash_pos = index_id.find('/');
-    if(slash_pos == std::string::npos) {
-        return makeGlobalContext();
+    // Logs always render username/index_name, using "-" placeholders when scope is missing.
+    inline std::string normalizeContextPart(std::string value) {
+        if(value.empty()) {
+            return "-";
+        }
+        return value;
     }
 
-    return makeContext(index_id.substr(0, slash_pos), index_id.substr(slash_pos + 1));
-}
-
-inline Context contextFromString(const std::string& context) {
-    if(context.empty() || context == "-" || context == "-/-") {
-        return makeGlobalContext();
+    inline Context makeContext(const std::string& username, const std::string& index_name) {
+        return {normalizeContextPart(username), normalizeContextPart(index_name)};
     }
-    if(context.find('/') != std::string::npos) {
-        return contextFromIndexId(context);
-    }
-    return makeUserContext(context);
-}
 
-inline std::string formatContext(const Context& context) {
-    return normalizeContextPart(context.username) + "/"
-           + normalizeContextPart(context.index_name);
-}
-
-// Prefixes are either LEVEL_code for explicit codes or LEVEL for intentional code-less logs.
-inline void emit(const char* level, int code, const Context& context, const std::string& message) {
-    std::cerr << level;
-    if(code != kNoCode) {
-        std::cerr << "_" << code;
+    inline Context makeUserContext(const std::string& username) {
+        return makeContext(username, "-");
     }
-    std::cerr << ": " << formatContext(context) << ": " << message << std::endl;
-}
+
+    inline Context makeGlobalContext() {
+        return makeContext("-", "-");
+    }
+
+    inline Context contextFromIndexId(const std::string& index_id) {
+        const size_t slash_pos = index_id.find('/');
+        if(slash_pos == std::string::npos) {
+            return makeGlobalContext();
+        }
+
+        return makeContext(index_id.substr(0, slash_pos), index_id.substr(slash_pos + 1));
+    }
+
+    inline Context contextFromString(const std::string& context) {
+        if(context.empty() || context == "-" || context == "-/-") {
+            return makeGlobalContext();
+        }
+        if(context.find('/') != std::string::npos) {
+            return contextFromIndexId(context);
+        }
+        return makeUserContext(context);
+    }
+
+    inline std::string formatContext(const Context& context) {
+        return normalizeContextPart(context.username) + "/"
+               + normalizeContextPart(context.index_name);
+    }
+
+    // Prefixes are either LEVEL_code for explicit codes or LEVEL for intentional code-less logs.
+    inline void
+    emit(const char* level, int code, const Context& context, const std::string& message) {
+        std::cerr << level;
+        if(code != kNoCode) {
+            std::cerr << "_" << code;
+        }
+        std::cerr << ": " << formatContext(context) << ": " << message << std::endl;
+    }
 }  // namespace ndd::log
 
 #define NDD_LOG_EMIT(level, code, context, msg)                                                    \
@@ -170,12 +175,12 @@ inline void emit(const char* level, int code, const Context& context, const std:
         ndd::log::emit(level, code, context, __log_ss__.str());                                    \
     } while(0)
 
-// Arity dispatch keeps the public macros simple while selecting global, user, index, or explicit context.
+// Arity dispatch keeps the public macros simple while selecting global, user, index, or explicit
+// context.
 #define NDD_LOG_1(level, msg)                                                                      \
     NDD_LOG_EMIT(level, ndd::log::kNoCode, ndd::log::makeGlobalContext(), msg)
 
-#define NDD_LOG_2(level, code, msg)                                                                \
-    NDD_LOG_EMIT(level, code, ndd::log::makeGlobalContext(), msg)
+#define NDD_LOG_2(level, code, msg) NDD_LOG_EMIT(level, code, ndd::log::makeGlobalContext(), msg)
 
 #define NDD_LOG_3(level, code, context, msg)                                                       \
     NDD_LOG_EMIT(level, code, ndd::log::contextFromString(context), msg)

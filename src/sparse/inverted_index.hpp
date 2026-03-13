@@ -20,7 +20,7 @@
 #        include <arm_sve.h>
 #    endif
 #    include <arm_neon.h>
-#endif // defined(__x86_64__) || defined(_M_X64)
+#endif  // defined(__x86_64__) || defined(_M_X64)
 
 #include "mdbx/mdbx.h"
 #include "../core/types.hpp"
@@ -59,15 +59,21 @@ namespace ndd {
         ndd::idInt doc_id;
         float value;
 
-        PostingListEntry() : doc_id(0), value(0.0f) {}
-        PostingListEntry(ndd::idInt id, float val) : doc_id(id), value(val) {}
+        PostingListEntry() :
+            doc_id(0),
+            value(0.0f) {}
+        PostingListEntry(ndd::idInt id, float val) :
+            doc_id(id),
+            value(val) {}
     };
 
     struct ScoredDoc {
         ndd::idInt doc_id;
         float score;
 
-        ScoredDoc(ndd::idInt id, float s) : doc_id(id), score(s) {}
+        ScoredDoc(ndd::idInt id, float s) :
+            doc_id(id),
+            score(s) {}
 
         bool operator<(const ScoredDoc& other) const {
             // Reverse ordering so std::priority_queue behaves like a min-heap on score.
@@ -86,16 +92,15 @@ namespace ndd {
         bool initialize();
 
         bool addDocumentsBatch(MDBX_txn* txn,
-                                const std::vector<std::pair<ndd::idInt, SparseVector>>& docs);
+                               const std::vector<std::pair<ndd::idInt, SparseVector>>& docs);
 
         bool removeDocument(MDBX_txn* txn, ndd::idInt doc_id, const SparseVector& vec);
 
         size_t getTermCount() const;
         size_t getVocabSize() const;
 
-        std::vector<std::pair<ndd::idInt, float>>search(const SparseVector& query,
-                                                        size_t k,
-                                                        const ndd::RoaringBitmap* filter = nullptr);
+        std::vector<std::pair<ndd::idInt, float>>
+        search(const SparseVector& query, size_t k, const ndd::RoaringBitmap* filter = nullptr);
 
     private:
         friend class InvertedIndexTestPeer;
@@ -148,8 +153,7 @@ namespace ndd {
         }
 
         static inline ndd::idInt blockOffsetToDocId(uint32_t block_nr, BlockOffset block_offset) {
-            uint64_t base = static_cast<uint64_t>(block_nr)
-                            * static_cast<uint64_t>(kBlockCapacity);
+            uint64_t base = static_cast<uint64_t>(block_nr) * static_cast<uint64_t>(kBlockCapacity);
             return static_cast<ndd::idInt>(base + static_cast<uint64_t>(block_offset));
         }
 
@@ -192,43 +196,41 @@ namespace ndd {
 #ifdef NDD_INV_IDX_PRUNE_DEBUG
             uint32_t initial_entries;
             uint32_t pruned_entries;
-#endif // NDD_INV_IDX_PRUNE_DEBUG
+#endif  // NDD_INV_IDX_PRUNE_DEBUG
 
             void init(MDBX_cursor* cursor,
-                    uint32_t term_id,
-                    float term_weight,
-                    float global_max,
-                    uint32_t total_entries,
-                    const InvertedIndex* index);
+                      uint32_t term_id,
+                      float term_weight,
+                      float global_max,
+                      uint32_t total_entries,
+                      const InvertedIndex* index);
 
             inline float valueAt(uint32_t idx) const {
-                if (value_bits == 32) {
+                if(value_bits == 32) {
                     return ((const float*)values_ptr)[idx];
                 }
                 return dequantize(((const uint8_t*)values_ptr)[idx], max_value);
             }
 
             inline bool isLiveAt(uint32_t idx) const {
-                if (value_bits == 32) {
+                if(value_bits == 32) {
                     return ((const float*)values_ptr)[idx] > 0.0f;
                 }
                 return ((const uint8_t*)values_ptr)[idx] > 0;
             }
 
-            inline float currentValue() const {
-                return valueAt(current_entry_idx);
-            }
+            inline float currentValue() const { return valueAt(current_entry_idx); }
 
             void advanceToNextLive();
             void next();
             void advance(ndd::idInt target_doc_id);
 
-            float upperBound() const {
-                return global_max * term_weight;
-            }
+            float upperBound() const { return global_max * term_weight; }
 
             uint32_t remainingEntries() const {
-                if (current_doc_id == EXHAUSTED_DOC_ID) return 0;
+                if(current_doc_id == EXHAUSTED_DOC_ID) {
+                    return 0;
+                }
                 return remaining_entries;
             }
 
@@ -238,7 +240,7 @@ namespace ndd {
 
             inline void consumeEntries(uint32_t count) {
                 // Pruning relies on remaining_entries being conservative and monotonic.
-                if (count >= remaining_entries) {
+                if(count >= remaining_entries) {
                     remaining_entries = 0;
                 } else {
                     remaining_entries -= count;
@@ -255,19 +257,19 @@ namespace ndd {
 
         private:
             static inline float dequantize(uint8_t val, float max_val) {
-                if (max_val <= settings::NEAR_ZERO) return 0.0f;
+                if(max_val <= settings::NEAR_ZERO) {
+                    return 0.0f;
+                }
                 return (float)val * (max_val / UINT8_MAX);
             }
         };
 
         size_t findDocIdSIMD(const uint32_t* doc_ids,
-                                size_t size,
-                                size_t start_idx,
-                                uint32_t target) const;
+                             size_t size,
+                             size_t start_idx,
+                             uint32_t target) const;
 
-        size_t findNextLiveSIMD(const uint8_t* values,
-                                size_t size,
-                                size_t start_idx) const;
+        size_t findNextLiveSIMD(const uint8_t* values, size_t size, size_t start_idx) const;
 
         template <bool StoreFloats>
         static bool accumulateBatchScores(PostingListIterator* it,
@@ -277,47 +279,43 @@ namespace ndd {
                                           float* scores_buf,
                                           float term_weight);
 
-        PostingListHeader readPostingListHeader(MDBX_txn* txn,
-                                                uint32_t term_id,
-                                                bool* out_found = nullptr) const;
+        PostingListHeader
+        readPostingListHeader(MDBX_txn* txn, uint32_t term_id, bool* out_found = nullptr) const;
 
-        bool writePostingListHeader(MDBX_txn* txn,
-                                    uint32_t term_id,
-                                    const PostingListHeader& header);
+        bool
+        writePostingListHeader(MDBX_txn* txn, uint32_t term_id, const PostingListHeader& header);
 
         bool deletePostingListHeader(MDBX_txn* txn, uint32_t term_id);
 
         bool loadBlockEntries(MDBX_txn* txn,
-                            uint32_t term_id,
-                            uint32_t block_nr,
-                            std::vector<PostingListEntry>* entries,
-                            uint32_t* out_live_in_block,
-                            float* out_max_value,
-                            bool* out_found) const;
+                              uint32_t term_id,
+                              uint32_t block_nr,
+                              std::vector<PostingListEntry>* entries,
+                              uint32_t* out_live_in_block,
+                              float* out_max_value,
+                              bool* out_found) const;
 
         bool saveBlockEntries(MDBX_txn* txn,
-                            uint32_t term_id,
-                            uint32_t block_nr,
-                            const std::vector<PostingListEntry>& entries,
-                            uint32_t live_in_block,
-                            float max_val);
+                              uint32_t term_id,
+                              uint32_t block_nr,
+                              const std::vector<PostingListEntry>& entries,
+                              uint32_t live_in_block,
+                              float max_val);
 
         bool deleteBlock(MDBX_txn* txn, uint32_t term_id, uint32_t block_nr);
 
-        bool parseBlockViewFromValue(const MDBX_val& data,
-                                    uint32_t block_nr,
-                                    BlockView* out_view) const;
+        bool
+        parseBlockViewFromValue(const MDBX_val& data, uint32_t block_nr, BlockView* out_view) const;
 
         bool iterateTermBlocks(
-            MDBX_txn* txn,
-            uint32_t term_id,
-            const std::function<bool(uint32_t block_nr, const MDBX_val& data)>& callback) const;
+                MDBX_txn* txn,
+                uint32_t term_id,
+                const std::function<bool(uint32_t block_nr, const MDBX_val& data)>& callback) const;
 
         float recomputeGlobalMaxFromBlocks(MDBX_txn* txn, uint32_t term_id) const;
 
-        static void applyHeaderDelta(PostingListHeader& header,
-                                     int64_t total_delta,
-                                     int64_t live_delta);
+        static void
+        applyHeaderDelta(PostingListHeader& header, int64_t total_delta, int64_t live_delta);
 
         bool loadTermInfo();
 
@@ -325,13 +323,11 @@ namespace ndd {
         bool writeSuperBlock(MDBX_txn* txn, const SuperBlock& sb);
         bool validateSuperBlock(MDBX_txn* txn);
 
-        bool addDocumentsBatchInternal(
-            MDBX_txn* txn,
-            const std::vector<std::pair<ndd::idInt, SparseVector>>& docs);
+        bool
+        addDocumentsBatchInternal(MDBX_txn* txn,
+                                  const std::vector<std::pair<ndd::idInt, SparseVector>>& docs);
 
-        bool removeDocumentInternal(MDBX_txn* txn,
-                                    ndd::idInt doc_id,
-                                    const SparseVector& vec);
+        bool removeDocumentInternal(MDBX_txn* txn, ndd::idInt doc_id, const SparseVector& vec);
 
         void pruneLongest(std::vector<PostingListIterator*>& iters, float min_score);
     };

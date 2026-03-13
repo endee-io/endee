@@ -13,7 +13,7 @@
 
 #include "json/nlohmann_json.hpp"
 #include "../utils/settings.hpp"
-#include "mdbx/mdbx.h"
+#include "db_backend.hpp"
 #include "../utils/log.hpp"
 #include "../core/types.hpp"
 #include "../hnsw/hnswlib.h" // For BaseFilterFunctor
@@ -44,6 +44,7 @@ private:
     MDBX_dbi dbi_;  // Used for schema storage
     std::string index_id_;
     std::string path_;
+    ndd::db::EnvResizeConfig map_config_;
     std::unique_ptr<ndd::filter::NumericIndex> numeric_index_;
     std::unique_ptr<ndd::filter::CategoryIndex> category_index_;
 
@@ -85,28 +86,16 @@ private:
             j[k] = static_cast<int>(v);
         }
         std::string json_str = j.dump();
+        try {
+            ndd::db::with_write_txn_retry(env_, map_config_, index_id_, [&](MDBX_txn* txn) {
+                MDBX_val key{const_cast<char*>(SCHEMA_KEY), strlen(SCHEMA_KEY)};
+                MDBX_val data{const_cast<char*>(json_str.c_str()), json_str.size()};
 
-        MDBX_txn* txn;
-        int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
-        if(rc != MDBX_SUCCESS) {
-            LOG_ERROR(
-                    1208, index_id_, "Failed to begin schema write transaction: " << mdbx_strerror(rc));
-            return;
-        }
-
-        MDBX_val key{const_cast<char*>(SCHEMA_KEY), strlen(SCHEMA_KEY)};
-        MDBX_val data{const_cast<char*>(json_str.c_str()), json_str.size()};
-
-        rc = mdbx_put(txn, dbi_, &key, &data, MDBX_UPSERT);
-        if(rc == MDBX_SUCCESS) {
-            rc = mdbx_txn_commit(txn);
-            if(rc != MDBX_SUCCESS) {
-                LOG_ERROR(
-                        1209, index_id_, "Failed to commit filter schema update: " << mdbx_strerror(rc));
-            }
-        } else {
-            mdbx_txn_abort(txn);
-            LOG_ERROR(1211, index_id_, "Failed to persist filter schema: " << mdbx_strerror(rc));
+                const int rc = mdbx_put(txn, dbi_, &key, &data, MDBX_UPSERT);
+                ndd::db::throw_if_error(rc, "Failed to persist filter schema");
+            });
+        } catch(const std::exception& e) {
+            LOG_ERROR(1211, index_id_, "Failed to persist filter schema: " << e.what());
         }
     }
 
@@ -130,15 +119,7 @@ private:
         // max DBs to allow multiple databases (main + schema + numeric_forward + numeric_inverted)
         mdbx_env_set_maxdbs(env_, 10);
 
-        // Set geometry for auto-grow using the filter map size settings
-        rc = mdbx_env_set_geometry(
-                env_,
-                -1,                                          // lower size bound (use default)
-                1ULL << settings::FILTER_MAP_SIZE_BITS,      // current/now size
-                1ULL << settings::FILTER_MAP_SIZE_MAX_BITS,  // upper size bound
-                1ULL << settings::FILTER_MAP_SIZE_BITS,      // growth step
-                -1,                                          // shrink threshold (use default)
-                -1);                                         // pagesize (use default)
+        rc = ndd::db::configure_env_mapsize(env_, map_config_);
         if(rc != MDBX_SUCCESS) {
             throw std::runtime_error("Failed to set geometry for filters");
         }
@@ -149,25 +130,14 @@ private:
             throw std::runtime_error("Failed to open filter environment");
         }
 
-        MDBX_txn* txn;
-        rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
-        if(rc != 0) {
-            throw std::runtime_error("Failed to begin filter transaction");
-        }
-
-        rc = mdbx_dbi_open(txn, nullptr, MDBX_CREATE, &dbi_);
-        if(rc != 0) {
-            mdbx_txn_abort(txn);
-            throw std::runtime_error("Failed to open filter database");
-        }
-        rc = mdbx_txn_commit(txn);
-        if(rc != 0) {
-            throw std::runtime_error("Failed to commit filter transaction");
-        }
+        ndd::db::with_write_txn_retry(env_, map_config_, index_id_, [&](MDBX_txn* txn) {
+            const int open_rc = mdbx_dbi_open(txn, nullptr, MDBX_CREATE, &dbi_);
+            ndd::db::throw_if_error(open_rc, "Failed to open filter database");
+        });
 
         // Initialize Indices
-        numeric_index_ = std::make_unique<ndd::filter::NumericIndex>(env_);
-        category_index_ = std::make_unique<ndd::filter::CategoryIndex>(env_);
+        numeric_index_ = std::make_unique<ndd::filter::NumericIndex>(env_, &map_config_, index_id_);
+        category_index_ = std::make_unique<ndd::filter::CategoryIndex>(env_, &map_config_, index_id_);
 
         load_schema();
     }
@@ -179,7 +149,8 @@ private:
 public:
     Filter(const std::string& path, const std::string& index_id) :
         index_id_(index_id),
-        path_(path) {
+        path_(path),
+        map_config_("filter-store", settings::FILTER_MAP_SIZE_MAX_BITS, settings::FILTER_MAP_GROWTH_BITS) {
         std::filesystem::create_directories(path);
         init_environment();
     }

@@ -131,6 +131,7 @@ namespace hnswlib {
             labelOffset_ = sizeLinksBaseLayer_ + sizeof(flagInt);
 
             dataBaseLayer_ = (char*)malloc(maxElements_ * sizeDataAtBaseLayer_);
+            // dataBaseLayer_ = (char*)malloc(10 * sizeDataAtBaseLayer_);
             if(!dataBaseLayer_) {
                 throw std::runtime_error(
                         "Unable to allocate "

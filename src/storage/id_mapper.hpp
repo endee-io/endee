@@ -1,6 +1,6 @@
 #pragma once
 
-#include "mdbx/mdbx.h"
+#include "db_backend.hpp"
 #include "log.hpp"
 #include "auth.hpp"
 #include "wal.hpp"
@@ -20,7 +20,8 @@ class IDMapper {
 public:
     IDMapper(const std::string& path, bool is_new = false, UserType user_type = UserType::Admin) :
         path_(path),
-        user_type_(user_type) {
+        user_type_(user_type),
+        map_config_("id-mapper", settings::ID_MAPPER_MAP_SIZE_MAX_BITS, settings::ID_MAPPER_MAP_GROWTH_BITS) {
         if(is_new) {
             std::filesystem::create_directories(path);
         }
@@ -30,15 +31,7 @@ public:
                                      + mdbx_strerror(rc));
         }
 
-        // Set geometry for auto-grow
-        rc = mdbx_env_set_geometry(
-                env_,
-                -1,                                             // lower size bound (use default)
-                1ULL << settings::ID_MAPPER_MAP_SIZE_BITS,      // current/now size
-                1ULL << settings::ID_MAPPER_MAP_SIZE_MAX_BITS,  // upper size bound
-                1ULL << settings::ID_MAPPER_MAP_SIZE_BITS,      // growth step
-                -1,                                             // shrink threshold (use default)
-                -1);                                            // pagesize (use default)
+        rc = ndd::db::configure_env_mapsize(env_, map_config_);
         if(rc != MDBX_SUCCESS) {
             throw std::runtime_error(std::string("Failed to set geometry: ") + mdbx_strerror(rc));
         }
@@ -46,28 +39,14 @@ public:
         rc = mdbx_env_open(
                 env_, path.c_str(), MDBX_WRITEMAP | MDBX_MAPASYNC | MDBX_NORDAHEAD, 0664);
         if(rc != MDBX_SUCCESS) {
-            throw std::runtime_error(std::string("Failed to open environment: ")
+            throw std::runtime_error(std::string("Failed to open environment IDMapper: ")
                                      + mdbx_strerror(rc));
         }
 
-        MDBX_txn* txn;
-        rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
-        if(rc != MDBX_SUCCESS) {
-            throw std::runtime_error(std::string("Failed to begin transaction: ")
-                                     + mdbx_strerror(rc));
-        }
-
-        rc = mdbx_dbi_open(txn, nullptr, MDBX_CREATE, &dbi_);
-        if(rc != MDBX_SUCCESS) {
-            mdbx_txn_abort(txn);
-            throw std::runtime_error(std::string("Failed to open database: ") + mdbx_strerror(rc));
-        }
-
-        rc = mdbx_txn_commit(txn);
-        if(rc != MDBX_SUCCESS) {
-            throw std::runtime_error(std::string("Failed to commit transaction: ")
-                                     + mdbx_strerror(rc));
-        }
+        ndd::db::with_write_txn_retry(env_, map_config_, path_, [&](MDBX_txn* txn) {
+            const int open_rc = mdbx_dbi_open(txn, nullptr, MDBX_CREATE, &dbi_);
+            ndd::db::throw_if_error(open_rc, "Failed to open id-mapper database");
+        });
 
         if(is_new) {
             init_next_id();
@@ -222,11 +201,22 @@ public:
                                          + std::to_string(fresh_ids_count));
             }
 
-            size_t new_id_index = 0;
+            std::vector<bool> needs_fresh_id(id_tuples.size(), false);
+            for(size_t i = 0; i < id_tuples.size(); ++i) {
+                needs_fresh_id[i] = std::get<2>(id_tuples[i]) && !std::get<3>(id_tuples[i])
+                                    && std::get<1>(id_tuples[i]) == 0;
+            }
 
             // Step 4: Write txn with auto-resize retry
             LOG_DEBUG("--- STEP 4: Writing to database ---");
-            auto try_write = [&](MDBX_txn* txn) -> int {
+            ndd::db::with_write_txn_retry(env_, map_config_, path_, [&](MDBX_txn* txn) {
+                for(size_t i = 0; i < id_tuples.size(); ++i) {
+                    if(needs_fresh_id[i]) {
+                        std::get<1>(id_tuples[i]) = 0;
+                    }
+                }
+
+                size_t new_id_index = 0;
                 int writes_attempted = 0;
                 for(auto& tup : id_tuples) {
                     // Write entries that need to be written to DB (is_new=true) but don't have ID=0
@@ -243,15 +233,7 @@ public:
                         writes_attempted++;
 
                         int rc = mdbx_put(txn, dbi_, &key, &data, MDBX_UPSERT);
-                        if(rc == MDBX_MAP_FULL) {
-                            LOG_DEBUG("WRITE ERROR: MDBX_MAP_FULL for key=[" << str_id << "]");
-                            return MDBX_MAP_FULL;
-                        }
-                        if(rc != MDBX_SUCCESS) {
-                            LOG_DEBUG("WRITE ERROR: [" << str_id
-                                                       << "] error: " << mdbx_strerror(rc));
-                            return rc;
-                        }
+                        ndd::db::throw_if_error(rc, "Failed to write id-mapper entry for " + str_id);
 
                         LOG_DEBUG("WRITE SUCCESS: [" << str_id << "] with ID: " << id);
 
@@ -261,7 +243,7 @@ public:
                             LOG_DEBUG("ERROR: new_id_index ("
                                       << new_id_index << ") >= new_ids.size() (" << new_ids.size()
                                       << ")");
-                            return MDBX_PROBLEM;  // Internal error
+                            throw std::runtime_error("ID assignment exceeded generated fresh IDs");
                         }
                         idInt new_id = new_ids[new_id_index++];
                         const std::string& str_id = std::get<0>(tup);
@@ -272,42 +254,14 @@ public:
                         writes_attempted++;
 
                         int rc = mdbx_put(txn, dbi_, &key, &data, MDBX_UPSERT);
-                        if(rc == MDBX_MAP_FULL) {
-                            LOG_DEBUG("WRITE_NEW ERROR: MDBX_MAP_FULL for key=[" << str_id << "]");
-                            return MDBX_MAP_FULL;
-                        }
-                        if(rc != MDBX_SUCCESS) {
-                            LOG_DEBUG("WRITE_NEW ERROR: [" << str_id
-                                                           << "] error: " << mdbx_strerror(rc));
-                            return rc;
-                        }
+                        ndd::db::throw_if_error(
+                                rc,
+                                "Failed to write fresh id-mapper entry for " + str_id);
 
                         std::get<1>(tup) = new_id;
                     }
                 }
-                return MDBX_SUCCESS;
-            };
-
-            MDBX_txn* txn;
-            int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
-            if(rc != MDBX_SUCCESS) {
-                throw std::runtime_error("Failed to begin write transaction: "
-                                         + std::string(mdbx_strerror(rc)));
-            }
-
-            rc = try_write(txn);
-            // MDBX auto-grows, no manual resize needed
-            if(rc != MDBX_SUCCESS) {
-                mdbx_txn_abort(txn);
-                throw std::runtime_error("Failed to insert new IDs: "
-                                         + std::string(mdbx_strerror(rc)));
-            }
-
-            rc = mdbx_txn_commit(txn);
-            if(rc != MDBX_SUCCESS) {
-                throw std::runtime_error("Failed to commit transaction: "
-                                         + std::string(mdbx_strerror(rc)));
-            }
+            });
             LOG_DEBUG("Write transaction committed successfully");
         } else {
             LOG_DEBUG("No new IDs needed, skipping write transaction");
@@ -392,89 +346,92 @@ public:
     // Returns the deleted numeric_ids, if strings is not found, returns 0
     std::vector<idInt> deletePoints(const std::vector<std::string>& external_ids) {
         std::vector<idInt> deleted_ids;
-        MDBX_txn* txn;
-        mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
+        ndd::db::with_write_txn_retry(env_, map_config_, path_, [&](MDBX_txn* txn) {
+            deleted_ids.clear();
 
-        MDBX_val key, data;
-        for(const auto& ext_id : external_ids) {
-            key.iov_len = ext_id.size();
-            key.iov_base = const_cast<char*>(ext_id.data());
+            MDBX_val key, data;
+            for(const auto& ext_id : external_ids) {
+                key.iov_len = ext_id.size();
+                key.iov_base = const_cast<char*>(ext_id.data());
 
-            if(mdbx_get(txn, dbi_, &key, &data) == MDBX_SUCCESS) {
-                idInt label = *reinterpret_cast<idInt*>(data.iov_base);
-                deleted_ids.push_back(label);
-                mdbx_del(txn, dbi_, &key, nullptr);
-            } else {
-                deleted_ids.push_back(0);
-            }
-        }
-
-        // Now append deleted_ids to DELETED_IDS_KEY
-        if(!deleted_ids.empty()) {
-            std::string del_key = DELETED_IDS_KEY;
-            MDBX_val del_mdb_key, del_mdb_val;
-
-            del_mdb_key.iov_len = del_key.size();
-            del_mdb_key.iov_base = const_cast<char*>(del_key.data());
-
-            // Fetch existing
-            std::vector<idInt> existing;
-            if(mdbx_get(txn, dbi_, &del_mdb_key, &del_mdb_val) == MDBX_SUCCESS) {
-                size_t count = del_mdb_val.iov_len / sizeof(idInt);
-                idInt* raw = reinterpret_cast<idInt*>(del_mdb_val.iov_base);
-                existing.insert(existing.end(), raw, raw + count);
-            }
-
-            // Append new ones
-            for(idInt l : deleted_ids) {
-                if(l != 0) {
-                    existing.push_back(l);
+                if(mdbx_get(txn, dbi_, &key, &data) == MDBX_SUCCESS) {
+                    idInt label = *reinterpret_cast<idInt*>(data.iov_base);
+                    deleted_ids.push_back(label);
+                    const int del_rc = mdbx_del(txn, dbi_, &key, nullptr);
+                    if(del_rc != MDBX_SUCCESS && del_rc != MDBX_NOTFOUND) {
+                        throw std::runtime_error("Failed to delete ID mapper entry for " + ext_id);
+                    }
+                } else {
+                    deleted_ids.push_back(0);
                 }
             }
 
-            del_mdb_val.iov_len = existing.size() * sizeof(idInt);
-            del_mdb_val.iov_base = existing.data();
-            mdbx_put(txn, dbi_, &del_mdb_key, &del_mdb_val, MDBX_UPSERT);
-        }
+            if(!deleted_ids.empty()) {
+                std::string del_key = DELETED_IDS_KEY;
+                MDBX_val del_mdb_key, del_mdb_val;
 
-        mdbx_txn_commit(txn);
+                del_mdb_key.iov_len = del_key.size();
+                del_mdb_key.iov_base = const_cast<char*>(del_key.data());
+
+                std::vector<idInt> existing;
+                if(mdbx_get(txn, dbi_, &del_mdb_key, &del_mdb_val) == MDBX_SUCCESS) {
+                    size_t count = del_mdb_val.iov_len / sizeof(idInt);
+                    idInt* raw = reinterpret_cast<idInt*>(del_mdb_val.iov_base);
+                    existing.insert(existing.end(), raw, raw + count);
+                }
+
+                for(idInt label : deleted_ids) {
+                    if(label != 0) {
+                        existing.push_back(label);
+                    }
+                }
+
+                del_mdb_val.iov_len = existing.size() * sizeof(idInt);
+                del_mdb_val.iov_base = existing.data();
+                ndd::db::throw_if_error(
+                        mdbx_put(txn, dbi_, &del_mdb_key, &del_mdb_val, MDBX_UPSERT),
+                        "Failed to append deleted IDs");
+            }
+        });
         return deleted_ids;
     }
 
     // returns a vector of deleted ids after removing them from DELETED_IDS_KEY
     std::vector<idInt> getDeletedIds(size_t max_count) {
         std::vector<idInt> result;
-        MDBX_txn* txn;
-        mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
+        ndd::db::with_write_txn_retry(env_, map_config_, path_, [&](MDBX_txn* txn) -> bool {
+            std::string del_key = DELETED_IDS_KEY;
+            MDBX_val key, val;
+            key.iov_len = del_key.size();
+            key.iov_base = const_cast<char*>(del_key.data());
 
-        std::string del_key = DELETED_IDS_KEY;
-        MDBX_val key, val;
-        key.iov_len = del_key.size();
-        key.iov_base = const_cast<char*>(del_key.data());
+            if(mdbx_get(txn, dbi_, &key, &val) != MDBX_SUCCESS) {
+                result.clear();
+                return true;
+            }
 
-        if(mdbx_get(txn, dbi_, &key, &val) != MDBX_SUCCESS) {
-            mdbx_txn_abort(txn);
-            return result;
-        }
+            size_t total = val.iov_len / sizeof(idInt);
+            idInt* raw = reinterpret_cast<idInt*>(val.iov_base);
 
-        size_t total = val.iov_len / sizeof(idInt);
-        idInt* raw = reinterpret_cast<idInt*>(val.iov_base);
+            size_t count = std::min(max_count, total);
+            result.assign(raw, raw + count);
 
-        size_t count = std::min(max_count, total);
-        result.insert(result.end(), raw, raw + count);
+            if(count < total) {
+                MDBX_val new_val;
+                new_val.iov_len = (total - count) * sizeof(idInt);
+                new_val.iov_base = raw + count;
+                ndd::db::throw_if_error(
+                        mdbx_put(txn, dbi_, &key, &new_val, MDBX_UPSERT),
+                        "Failed to persist remaining deleted IDs");
+            } else {
+                const int del_rc = mdbx_del(txn, dbi_, &key, nullptr);
+                if(del_rc != MDBX_SUCCESS && del_rc != MDBX_NOTFOUND) {
+                    throw std::runtime_error("Failed to delete deleted-ids key");
+                }
+            }
 
-        // Write back the remaining
-        if(count < total) {
-            MDBX_val new_val;
-            new_val.iov_len = (total - count) * sizeof(idInt);
-            new_val.iov_base = raw + count;
-            mdbx_put(txn, dbi_, &key, &new_val, MDBX_UPSERT);
-        } else {
-            // Delete the key entirely
-            mdbx_del(txn, dbi_, &key, nullptr);
-        }
-
-        mdbx_txn_commit(txn);
+            return true;
+        });
         return result;
     }
 
@@ -494,6 +451,7 @@ private:
     MDBX_dbi dbi_;
     std::string path_;
     UserType user_type_;
+    ndd::db::EnvResizeConfig map_config_;
     mutable std::mutex mutex_;  // Only used for next_id management
     // Along with string:number pairs, the database also stores a key for next_id. They key for next
     // id also has random alphanumeric characters to avoid collision with other keys. The key is
@@ -504,52 +462,31 @@ private:
     // Atomic operation to get and increment next_ids
     std::vector<idInt> get_next_ids(size_t size = 1) {
         std::lock_guard<std::mutex> lock(mutex_);
-        MDBX_txn* txn;
-        int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
-        if(rc != 0) {
-            throw std::runtime_error(std::string("Failed to begin transaction: ")
-                                     + mdbx_strerror(rc));
-        }
-
-        try {
+        idInt current_id = 0;
+        ndd::db::with_write_txn_retry(env_, map_config_, path_, [&](MDBX_txn* txn) {
             MDBX_val key{(void*)NEXT_ID_KEY.c_str(), NEXT_ID_KEY.size()};
             MDBX_val data;
-            idInt current_id = 0;
 
-            rc = mdbx_get(txn, dbi_, &key, &data);
-            if(rc == 0) {
+            int rc = mdbx_get(txn, dbi_, &key, &data);
+            if(rc == MDBX_SUCCESS) {
                 current_id = *(idInt*)data.iov_base;
             } else if(rc != MDBX_NOTFOUND) {
                 throw std::runtime_error(std::string("Failed to get next_id: ")
                                          + mdbx_strerror(rc));
             }
 
-            // CRITICAL FIX: Log VECTOR_ADD to WAL BEFORE incrementing next_id
-            // This is now handled in create_ids_batch after ID generation
-
             idInt next_id = current_id + size;
             data.iov_len = sizeof(idInt);
             data.iov_base = &next_id;
 
-            rc = mdbx_put(txn, dbi_, &key, &data, MDBX_UPSERT);
-            if(rc != 0) {
-                throw std::runtime_error(std::string("Failed to store next_id: ")
-                                         + mdbx_strerror(rc));
-            }
+            ndd::db::throw_if_error(
+                    mdbx_put(txn, dbi_, &key, &data, MDBX_UPSERT),
+                    "Failed to store next_id");
+        });
 
-            rc = mdbx_txn_commit(txn);
-            if(rc != 0) {
-                throw std::runtime_error(std::string("Failed to commit transaction: ")
-                                         + mdbx_strerror(rc));
-            }
-            // Return a vector of ids starting from current_id
-            std::vector<idInt> ids(size);
-            std::iota(ids.begin(), ids.end(), current_id);
-            return ids;
-        } catch(...) {
-            mdbx_txn_abort(txn);
-            throw;
-        }
+        std::vector<idInt> ids(size);
+        std::iota(ids.begin(), ids.end(), current_id);
+        return ids;
     }
 
     // Helper method to add IDs to deleted_ids list
@@ -558,76 +495,47 @@ private:
             return;
         }
 
-        MDBX_txn* txn;
-        int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
-        if(rc != 0) {
-            return;  // Silently fail for recovery
-        }
-
         try {
-            std::string del_key = DELETED_IDS_KEY;
-            MDBX_val del_mdb_key, del_mdb_val;
+            ndd::db::with_write_txn_retry(env_, map_config_, path_, [&](MDBX_txn* txn) {
+                std::string del_key = DELETED_IDS_KEY;
+                MDBX_val del_mdb_key, del_mdb_val;
 
-            del_mdb_key.iov_len = del_key.size();
-            del_mdb_key.iov_base = const_cast<char*>(del_key.data());
+                del_mdb_key.iov_len = del_key.size();
+                del_mdb_key.iov_base = const_cast<char*>(del_key.data());
 
-            // Fetch existing deleted IDs
-            std::vector<idInt> existing;
-            if(mdbx_get(txn, dbi_, &del_mdb_key, &del_mdb_val) == MDBX_SUCCESS) {
-                size_t count = del_mdb_val.iov_len / sizeof(idInt);
-                idInt* raw = reinterpret_cast<idInt*>(del_mdb_val.iov_base);
-                existing.insert(existing.end(), raw, raw + count);
-            }
+                std::vector<idInt> existing;
+                if(mdbx_get(txn, dbi_, &del_mdb_key, &del_mdb_val) == MDBX_SUCCESS) {
+                    size_t count = del_mdb_val.iov_len / sizeof(idInt);
+                    idInt* raw = reinterpret_cast<idInt*>(del_mdb_val.iov_base);
+                    existing.insert(existing.end(), raw, raw + count);
+                }
 
-            // Add new IDs
-            for(idInt id : ids) {
-                existing.push_back(id);
-            }
+                existing.insert(existing.end(), ids.begin(), ids.end());
 
-            // Write back to DB
-            del_mdb_val.iov_len = existing.size() * sizeof(idInt);
-            del_mdb_val.iov_base = existing.data();
-            mdbx_put(txn, dbi_, &del_mdb_key, &del_mdb_val, MDBX_UPSERT);
-
-            mdbx_txn_commit(txn);
+                del_mdb_val.iov_len = existing.size() * sizeof(idInt);
+                del_mdb_val.iov_base = existing.data();
+                ndd::db::throw_if_error(
+                        mdbx_put(txn, dbi_, &del_mdb_key, &del_mdb_val, MDBX_UPSERT),
+                        "Failed to update deleted_ids list");
+            });
         } catch(...) {
-            mdbx_txn_abort(txn);
+            // Recovery path intentionally swallows persistence failures.
         }
     }
 
     // Initialize next_id .. called only once during construction
     void init_next_id() {
-        MDBX_txn* txn;
-        int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
-        if(rc != 0) {
-            throw std::runtime_error(std::string("Failed to begin transaction: ")
-                                     + mdbx_strerror(rc));
-        }
-
-        try {
+        ndd::db::with_write_txn_retry(env_, map_config_, path_, [&](MDBX_txn* txn) {
             MDBX_val key{(void*)NEXT_ID_KEY.c_str(), NEXT_ID_KEY.size()};
             MDBX_val data;
             idInt next_id = 1;  // Default starting value
 
-            // Store the next_id (whether new or existing)
             data.iov_len = sizeof(idInt);
             data.iov_base = &next_id;
-            rc = mdbx_put(txn, dbi_, &key, &data, MDBX_UPSERT);
-            if(rc != 0) {
-                throw std::runtime_error(std::string("Failed to store next_id: ")
-                                         + mdbx_strerror(rc));
-            }
-
-            rc = mdbx_txn_commit(txn);
-            if(rc != 0) {
-                throw std::runtime_error(std::string("Failed to commit transaction: ")
-                                         + mdbx_strerror(rc));
-            }
-
-        } catch(...) {
-            mdbx_txn_abort(txn);
-            throw;
-        }
+            ndd::db::throw_if_error(
+                    mdbx_put(txn, dbi_, &key, &data, MDBX_UPSERT),
+                    "Failed to initialize next_id");
+        });
     }
 };
 

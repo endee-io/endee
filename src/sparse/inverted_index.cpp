@@ -267,8 +267,15 @@ namespace ndd {
     void printSparseUpdateDebugStats() {}
 #endif // ND_SPARSE_INSTRUMENT
 
-    InvertedIndex::InvertedIndex(MDBX_env* env, size_t vocab_size, const std::string& index_id)
-        : env_(env), blocked_term_postings_dbi_(0), vocab_size_(vocab_size), index_id_(index_id) {}
+    InvertedIndex::InvertedIndex(MDBX_env* env,
+                                 size_t vocab_size,
+                                 const std::string& index_id,
+                                 ndd::db::EnvResizeConfig* map_config)
+        : env_(env),
+          blocked_term_postings_dbi_(0),
+          vocab_size_(vocab_size),
+          index_id_(index_id),
+          map_config_(map_config) {}
 
     void InvertedIndex::applyHeaderDelta(PostingListHeader& header,
                                         int64_t total_delta,
@@ -334,31 +341,61 @@ namespace ndd {
     bool InvertedIndex::initialize() {
         std::unique_lock<std::shared_mutex> lock(mutex_);
 
-        MDBX_txn* txn = nullptr;
-        int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
-        if (rc != MDBX_SUCCESS) {
-            LOG_ERROR(2204, index_id_, "Failed to begin sparse index init transaction: " << mdbx_strerror(rc));
-            return false;
-        }
+        try {
+            if(map_config_) {
+                const bool initialized = ndd::db::with_write_txn_retry(
+                        env_,
+                        *map_config_,
+                        index_id_,
+                        [&](MDBX_txn* txn) {
+                            int rc = mdbx_dbi_open(txn,
+                                                   "blocked_term_postings",
+                                                   MDBX_CREATE | MDBX_INTEGERKEY,
+                                                   &blocked_term_postings_dbi_);
+                            if(rc != MDBX_SUCCESS) {
+                                LOG_ERROR(2205,
+                                          index_id_,
+                                          "Failed to open blocked_term_postings DBI: "
+                                                  << mdbx_strerror(rc));
+                                return false;
+                            }
 
-        rc = mdbx_dbi_open(txn,
-                            "blocked_term_postings",
-                            MDBX_CREATE | MDBX_INTEGERKEY,
-                            &blocked_term_postings_dbi_);
-        if (rc != MDBX_SUCCESS) {
-            LOG_ERROR(2205, index_id_, "Failed to open blocked_term_postings DBI: " << mdbx_strerror(rc));
-            mdbx_txn_abort(txn);
-            return false;
-        }
+                            return validateSuperBlock(txn);
+                        });
+                if(!initialized) {
+                    return false;
+                }
+            } else {
+                MDBX_txn* txn = nullptr;
+                int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
+                if (rc != MDBX_SUCCESS) {
+                    LOG_ERROR(2204, index_id_, "Failed to begin sparse index init transaction: " << mdbx_strerror(rc));
+                    return false;
+                }
 
-        if (!validateSuperBlock(txn)) {
-            mdbx_txn_abort(txn);
-            return false;
-        }
+                rc = mdbx_dbi_open(txn,
+                                    "blocked_term_postings",
+                                    MDBX_CREATE | MDBX_INTEGERKEY,
+                                    &blocked_term_postings_dbi_);
+                if (rc != MDBX_SUCCESS) {
+                    LOG_ERROR(2205, index_id_, "Failed to open blocked_term_postings DBI: " << mdbx_strerror(rc));
+                    mdbx_txn_abort(txn);
+                    return false;
+                }
 
-        rc = mdbx_txn_commit(txn);
-        if (rc != MDBX_SUCCESS) {
-            LOG_ERROR(2206, index_id_, "Failed to commit sparse index init transaction: " << mdbx_strerror(rc));
+                if (!validateSuperBlock(txn)) {
+                    mdbx_txn_abort(txn);
+                    return false;
+                }
+
+                rc = mdbx_txn_commit(txn);
+                if (rc != MDBX_SUCCESS) {
+                    LOG_ERROR(2206, index_id_, "Failed to commit sparse index init transaction: " << mdbx_strerror(rc));
+                    return false;
+                }
+            }
+        } catch(const std::exception& e) {
+            LOG_ERROR(2206, index_id_, "Sparse index init failed: " << e.what());
             return false;
         }
 
@@ -936,6 +973,7 @@ namespace ndd {
         MDBX_val data{const_cast<SuperBlock*>(&sb), sizeof(SuperBlock)};
 
         int rc = mdbx_put(txn, blocked_term_postings_dbi_, &key, &data, MDBX_UPSERT);
+        ndd::db::throw_if_map_full(rc, "writeSuperBlock hit map-full");
         if (rc != MDBX_SUCCESS) {
             LOG_ERROR(2213, index_id_, "writeSuperBlock MDBX put failed: " << mdbx_strerror(rc));
             return false;
@@ -983,6 +1021,7 @@ namespace ndd {
         MDBX_val data{const_cast<PostingListHeader*>(&header), sizeof(PostingListHeader)};
 
         int rc = mdbx_put(txn, blocked_term_postings_dbi_, &key, &data, MDBX_UPSERT);
+        ndd::db::throw_if_map_full(rc, "writePostingListHeader hit map-full");
         if (rc != MDBX_SUCCESS) {
             LOG_ERROR(2215,
                       index_id_,
@@ -1199,6 +1238,7 @@ namespace ndd {
         MDBX_val value{buffer.data(), buffer.size()};
 
         int rc = mdbx_put(txn, blocked_term_postings_dbi_, &key, &value, MDBX_UPSERT);
+        ndd::db::throw_if_map_full(rc, "saveBlockEntries hit map-full");
         if (rc != MDBX_SUCCESS) {
             LOG_ERROR(2223,
                       index_id_,

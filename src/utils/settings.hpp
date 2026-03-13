@@ -46,16 +46,44 @@ namespace settings {
     // MDBX default map sizes. Growth step and initial size are the same for all databases.
     // System tables
     constexpr size_t INDEX_META_MAP_SIZE_BITS = 21;      // 2 MiB
+    constexpr size_t INDEX_META_MAP_GROWTH_BITS = 22;      // 4 MiB
+    // constexpr size_t INDEX_META_MAP_SIZE_MAX_BITS = 29;  // 512 MiB
     constexpr size_t INDEX_META_MAP_SIZE_MAX_BITS = 27;  // 128 MiB
-    // Index-related tables
+
+    // Index tables
     constexpr size_t ID_MAPPER_MAP_SIZE_BITS = 24;      // 16 MiB
-    constexpr size_t ID_MAPPER_MAP_SIZE_MAX_BITS = 33;  // 8 GiB
+    constexpr size_t ID_MAPPER_MAP_GROWTH_BITS = 24;      // 16 MiB
+    constexpr size_t ID_MAPPER_MAP_SIZE_MAX_BITS = 30;  // 1 GiB
+    // constexpr size_t ID_MAPPER_MAP_SIZE_MAX_BITS = 33;  // 8 GiB
+
+    // Filter tables
     constexpr size_t FILTER_MAP_SIZE_BITS = 24;         // 16 MiB
-    constexpr size_t FILTER_MAP_SIZE_MAX_BITS = 36;     // 64 GiB
+    constexpr size_t FILTER_MAP_GROWTH_BITS = 24;         // 16 MiB
+    constexpr size_t FILTER_MAP_SIZE_MAX_BITS = 29;     // 512 MiB
+    // constexpr size_t FILTER_MAP_SIZE_MAX_BITS = 36;     // 64 GiB
+
+    // Metadata tables
     constexpr size_t METADATA_MAP_SIZE_BITS = 27;       // 128 MiB
-    constexpr size_t METADATA_MAP_SIZE_MAX_BITS = 39;   // 512 GiB
+    constexpr size_t METADATA_MAP_GROWTH_BITS = 27;       // 128 MiB
+    constexpr size_t METADATA_MAP_SIZE_MAX_BITS = 30;   // 1 GiB
+    // constexpr size_t METADATA_MAP_SIZE_MAX_BITS = 39;   // 512 GiB
+
+    // Vector store table
+    // constexpr size_t VECTOR_MAP_SIZE_BITS = 24;         // 16 MiB
     constexpr size_t VECTOR_MAP_SIZE_BITS = 30;         // 1 GiB
-    constexpr size_t VECTOR_MAP_SIZE_MAX_BITS = 42;     // 4 TiB
+    constexpr size_t VECTOR_MAP_GROWTH_BITS = 30;         // 1 GiB
+    // constexpr size_t VECTOR_MAP_SIZE_MAX_BITS = 42;     // 4 TiB
+    //constexpr size_t VECTOR_MAP_SIZE_MAX_BITS = 31;     //2 GiB
+    constexpr size_t VECTOR_MAP_SIZE_MAX_BITS = 27;     //128 MB
+
+    // Sparse tables
+    constexpr size_t SPARSE_MAP_SIZE_BITS = 30;         // 1 GiB
+    constexpr size_t SPARSE_MAP_GROWTH_BITS = 30;         // 1 GiB
+    // constexpr size_t SPARSE_MAP_SIZE_MAX_BITS = 40;     // 1 TiB
+    constexpr size_t SPARSE_MAP_SIZE_MAX_BITS = 30;     // 1 GiB
+
+    constexpr size_t MDBX_PAGE_SIZE_BITS = 16;     //64KB
+    //constexpr size_t MDBX_PAGE_SIZE_BITS = 12;     //4KB
 
     constexpr size_t MAX_LINK_LIST_LOCKS = 65536;
 

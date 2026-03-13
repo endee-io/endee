@@ -143,6 +143,7 @@ private:
     std::deque<std::string> indices_list_;
     std::unordered_map<std::string, CacheEntry> indices_;
     std::shared_mutex indices_mutex_;
+    size_t max_active_indices_;
     std::string data_dir_;
     // This is for locking the LRU
     std::shared_mutex active_indices_mutex_;
@@ -385,7 +386,7 @@ private:
 
 public:
     // Evict the last index if the total size exceeds the limit
-    void evictIfNeeded() {
+    void evictIfNeeded(size_t reserve_slots = 0) {
         // Go through indices and get the total size. If it exceeds the limit, evict the last one
         size_t total_size = 0;
         for(auto& [index_id, entry] : indices_) {
@@ -393,28 +394,47 @@ public:
                 total_size += entry.alg->getApproxSizeGB();
             }
         }
-        if(total_size > settings::MAX_MEMORY_GB) {
-            // Make sure that there is at least one index in memory and we use only 80% of the total
-            // size
-            while((total_size > 0.80 * settings::MAX_MEMORY_GB) && (indices_list_.size() > 1)) {
-                // Pop from the back of the active indices list
+
+        const size_t min_indices_to_keep = reserve_slots > 0 ? 0 : 1;
+        auto exceeds_limits = [&]() {
+            return total_size > 0.80 * settings::MAX_MEMORY_GB
+                   || indices_.size() + reserve_slots > max_active_indices_;
+        };
+
+        while(exceeds_limits() && indices_.size() > min_indices_to_keep) {
+            bool evicted = false;
+            size_t candidates_remaining = indices_list_.size();
+
+            while(candidates_remaining-- > 0 && indices_.size() > min_indices_to_keep) {
                 std::string to_evict = indices_list_.back();
                 indices_list_.pop_back();
+
                 auto it = indices_.find(to_evict);
-                if(it != indices_.end()) {
-                    total_size -= it->second.alg->getApproxSizeGB();
-
-                    // Only evict if the index is not dirty (hasn't been updated)
-                    if(it->second.updated) {
-                        LOG_WARN(2015, to_evict, "Cannot evict dirty index; it must be saved first");
-                        // Put it back at the front to try other indices
-                        indices_list_.push_front(to_evict);
-                        continue;
-                    }
-
-                    LOG_INFO(2016, to_evict, "Evicting clean index from cache");
-                    indices_.erase(it);
+                if(it == indices_.end()) {
+                    continue;
                 }
+
+                // Only evict if the index is not dirty (hasn't been updated)
+                if(it->second.updated) {
+                    LOG_WARN(2015, to_evict, "Cannot evict dirty index; it must be saved first");
+                    // Put it back at the front to try other indices
+                    indices_list_.push_front(to_evict);
+                    continue;
+                }
+
+                total_size -= it->second.alg ? it->second.alg->getApproxSizeGB() : 0;
+                // std::cerr << "\033[1m[EVICT] Evicting inactive index from cache: " << to_evict
+                //           << "\033[0m" << std::endl;
+                LOG_INFO(2016, to_evict, "Evicting clean index from cache");
+                indices_.erase(it);
+                evicted = true;
+                break;
+            }
+
+            if(!evicted) {
+                LOG_WARN(2047,
+                         "Unable to evict enough indexes to satisfy active-index or memory limits");
+                break;
             }
         }
     }
@@ -471,6 +491,7 @@ public:
     IndexManager(size_t max_indices,
                  const std::string& data_dir,
                  const PersistenceConfig& persistence_config = PersistenceConfig{}) :
+        max_active_indices_(std::max<size_t>(1, max_indices)),
         data_dir_(data_dir),
         persistence_config_(persistence_config),
         backup_store_(data_dir) {
@@ -599,7 +620,7 @@ public:
         // Evict if needed (clean indices only)
         {
             std::unique_lock<std::shared_mutex> temp_lock(indices_mutex_);
-            evictIfNeeded();
+            evictIfNeeded(1);
         }
 
         hnswlib::SpaceType space_type = hnswlib::getSpaceType(config.space_type_str);
@@ -687,6 +708,10 @@ public:
         LOG_INFO(2022, index_id, "Saving newly created index");
         // Index is marked as updated so it needs to be saved immediately for crash recovery
         saveIndex(index_id);
+        {
+            std::unique_lock<std::shared_mutex> lock(indices_mutex_);
+            evictIfNeeded();
+        }
         return true;
     }
 

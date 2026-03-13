@@ -10,7 +10,7 @@
 #include <unordered_map>
 #include "log.hpp"
 #include "settings.hpp"
-#include "mdbx/mdbx.h"
+#include "db_backend.hpp"
 #include "quant/common.hpp"
 
 struct IndexMetadata {
@@ -65,10 +65,12 @@ private:
     MDBX_env* metadata_env_;
     MDBX_dbi metadata_dbi_;
     std::string metadata_dir_;
+    ndd::db::EnvResizeConfig map_config_;
 
 public:
     MetadataManager(const std::string& base_dir) :
-        metadata_dir_(base_dir + "/meta") {
+        metadata_dir_(base_dir + "/meta"),
+        map_config_("index-metadata", settings::INDEX_META_MAP_SIZE_MAX_BITS, settings::INDEX_META_MAP_GROWTH_BITS) {
         std::filesystem::create_directories(metadata_dir_);
         initEnvironment();
     }
@@ -81,37 +83,18 @@ public:
     // Store metadata for an index
     bool storeMetadata(const std::string& index_id, const IndexMetadata& metadata) {
         std::string key = index_id;
-        MDBX_txn* txn;
-        int rc = mdbx_txn_begin(metadata_env_, nullptr, MDBX_TXN_READWRITE, &txn);
-        if(rc != 0) {
-            LOG_ERROR(
-                    1501, index_id, "Failed to begin metadata transaction: " << mdbx_strerror(rc));
-            return false;
-        }
 
         try {
-            auto json_str = metadata.to_json().dump();
-            MDBX_val db_key{(void*)key.c_str(), key.size()};
-            MDBX_val data{(void*)json_str.c_str(), json_str.size()};
+            ndd::db::with_write_txn_retry(metadata_env_, map_config_, index_id, [&](MDBX_txn* txn) {
+                auto json_str = metadata.to_json().dump();
+                MDBX_val db_key{(void*)key.c_str(), key.size()};
+                MDBX_val data{(void*)json_str.c_str(), json_str.size()};
 
-            rc = mdbx_put(txn, metadata_dbi_, &db_key, &data, MDBX_UPSERT);
-            if(rc != 0) {
-                mdbx_txn_abort(txn);
-                LOG_ERROR(
-                        1502, index_id, "Failed to store metadata: " << mdbx_strerror(rc));
-                return false;
-            }
-
-            rc = mdbx_txn_commit(txn);
-            if(rc != 0) {
-                LOG_ERROR(
-                        1503, index_id, "Failed to commit metadata transaction: " << mdbx_strerror(rc));
-                return false;
-            }
-
+                const int rc = mdbx_put(txn, metadata_dbi_, &db_key, &data, MDBX_UPSERT);
+                ndd::db::throw_if_error(rc, "Failed to store metadata");
+            });
             return true;
         } catch(const std::exception& e) {
-            mdbx_txn_abort(txn);
             LOG_ERROR(1504, index_id, "Exception while storing metadata: " << e.what());
             return false;
         }
@@ -168,35 +151,21 @@ public:
     // Delete metadata for an index
     bool deleteMetadata(const std::string& index_id) {
         std::string key = index_id;
-        MDBX_txn* txn;
-        int rc = mdbx_txn_begin(metadata_env_, nullptr, MDBX_TXN_READWRITE, &txn);
-        if(rc != MDBX_SUCCESS) {
-            LOG_ERROR(
-                    1509, index_id, "Failed to begin metadata delete transaction: " << mdbx_strerror(rc));
-            return false;
-        }
 
         try {
-            MDBX_val db_key{(void*)key.c_str(), key.size()};
+            return ndd::db::with_write_txn_retry(metadata_env_, map_config_, index_id, [&](MDBX_txn* txn) {
+                MDBX_val db_key{(void*)key.c_str(), key.size()};
 
-            rc = mdbx_del(txn, metadata_dbi_, &db_key, nullptr);
-            if(rc != MDBX_SUCCESS && rc != MDBX_NOTFOUND) {
-                mdbx_txn_abort(txn);
-                LOG_ERROR(
-                        1510, index_id, "Failed to delete metadata: " << mdbx_strerror(rc));
-                return false;
-            }
+                const int rc = mdbx_del(txn, metadata_dbi_, &db_key, nullptr);
+                if(rc != MDBX_SUCCESS && rc != MDBX_NOTFOUND) {
+                    LOG_ERROR(
+                            1510, index_id, "Failed to delete metadata: " << mdbx_strerror(rc));
+                    return false;
+                }
 
-            rc = mdbx_txn_commit(txn);
-            if(rc != MDBX_SUCCESS) {
-                LOG_ERROR(
-                        1511, index_id, "Failed to commit metadata delete transaction: " << mdbx_strerror(rc));
-                return false;
-            }
-
-            return true;
+                return true;
+            });
         } catch(const std::exception& e) {
-            mdbx_txn_abort(txn);
             LOG_ERROR(1512, index_id, "Exception while deleting metadata: " << e.what());
             return false;
         }
@@ -337,15 +306,7 @@ private:
                                      + mdbx_strerror(rc));
         }
 
-        // Set geometry for auto-grow
-        rc = mdbx_env_set_geometry(
-                metadata_env_,
-                -1,                                              // lower size bound (use default)
-                1ULL << settings::INDEX_META_MAP_SIZE_BITS,      // current/now size
-                1ULL << settings::INDEX_META_MAP_SIZE_MAX_BITS,  // upper size bound
-                1ULL << settings::INDEX_META_MAP_SIZE_BITS,      // growth step
-                -1,                                              // shrink threshold (use default)
-                -1);                                             // pagesize (use default)
+        rc = ndd::db::configure_env_mapsize(metadata_env_, map_config_);
         if(rc != MDBX_SUCCESS) {
             throw std::runtime_error(std::string("Failed to set geometry: ") + mdbx_strerror(rc));
         }
@@ -359,24 +320,9 @@ private:
                                      + mdbx_strerror(rc));
         }
 
-        MDBX_txn* txn;
-        rc = mdbx_txn_begin(metadata_env_, nullptr, MDBX_TXN_READWRITE, &txn);
-        if(rc != 0) {
-            throw std::runtime_error(std::string("Failed to begin transaction: ")
-                                     + mdbx_strerror(rc));
-        }
-
-        rc = mdbx_dbi_open(txn, nullptr, MDBX_CREATE, &metadata_dbi_);
-        if(rc != 0) {
-            mdbx_txn_abort(txn);
-            throw std::runtime_error(std::string("Failed to open metadata database: ")
-                                     + mdbx_strerror(rc));
-        }
-
-        rc = mdbx_txn_commit(txn);
-        if(rc != 0) {
-            throw std::runtime_error(std::string("Failed to commit transaction: ")
-                                     + mdbx_strerror(rc));
-        }
+        ndd::db::with_write_txn_retry(metadata_env_, map_config_, metadata_dir_, [&](MDBX_txn* txn) {
+            const int open_rc = mdbx_dbi_open(txn, nullptr, MDBX_CREATE, &metadata_dbi_);
+            ndd::db::throw_if_error(open_rc, "Failed to open metadata database");
+        });
     }
 };

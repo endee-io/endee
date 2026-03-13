@@ -1,6 +1,6 @@
 #pragma once
 
-#include "mdbx/mdbx.h"
+#include "db_backend.hpp"
 #include "log.hpp"
 #include "../quant/dispatch.hpp"
 #include "../filter/filter.hpp"
@@ -24,6 +24,7 @@ private:
     size_t vector_dim_;
     ndd::quant::QuantizationLevel quant_level_;
     size_t bytes_per_vector_;
+    ndd::db::EnvResizeConfig map_config_;
 
     void init_environment() {
         int rc = mdbx_env_create(&env_);
@@ -31,14 +32,7 @@ private:
             throw std::runtime_error("Failed to create LMDB env");
         }
 
-        // Set geometry for auto-grow using the vector map size settings
-        rc = mdbx_env_set_geometry(env_,
-                                   -1,  // lower size bound (use default)
-                                   1ULL << settings::VECTOR_MAP_SIZE_BITS,      // current/now size
-                                   1ULL << settings::VECTOR_MAP_SIZE_MAX_BITS,  // upper size bound
-                                   1ULL << settings::VECTOR_MAP_SIZE_BITS,      // growth step
-                                   -1,   // shrink threshold (use default)
-                                   -1);  // pagesize (use default)
+        rc = ndd::db::configure_env_mapsize(env_, map_config_);
         if(rc != MDBX_SUCCESS) {
             throw std::runtime_error("Failed to set geometry");
         }
@@ -48,26 +42,17 @@ private:
         rc = mdbx_env_open(
                 env_, path_.c_str(), MDBX_WRITEMAP | MDBX_MAPASYNC | MDBX_NORDAHEAD, 0664);
         if(rc != MDBX_SUCCESS) {
-            throw std::runtime_error("Failed to open environment");
+            throw std::runtime_error("Failed to open environment VectorStore");
         }
 
-        MDBX_txn* txn;
-        rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
-        if(rc != MDBX_SUCCESS) {
-            throw std::runtime_error("Failed to begin transaction");
-        }
-
-        rc = mdbx_dbi_open(txn, settings::DEFAULT_SUBINDEX.c_str(), MDBX_CREATE | MDBX_INTEGERKEY, &dbi_);
-        if(rc != MDBX_SUCCESS) {
-            mdbx_txn_abort(txn);
-            throw std::runtime_error("Failed to open database");
-        }
-
-        rc = mdbx_txn_commit(txn);
-        if(rc != MDBX_SUCCESS) {
-            throw std::runtime_error("Failed to commit transaction: "
-                                        + std::string(mdbx_strerror(rc)));
-        }
+        ndd::db::with_write_txn_retry(env_, map_config_, index_id_, [&](MDBX_txn* txn) {
+            const int open_rc = mdbx_dbi_open(
+                    txn,
+                    settings::DEFAULT_SUBINDEX.c_str(),
+                    MDBX_CREATE | MDBX_INTEGERKEY,
+                    &dbi_);
+            ndd::db::throw_if_error(open_rc, "Failed to open vector database");
+        });
     }
 
 public:
@@ -78,7 +63,8 @@ public:
         index_id_(index_id),
         path_(path),
         vector_dim_(vector_dim),
-        quant_level_(quant_level) {
+        quant_level_(quant_level),
+        map_config_("vector-store", settings::VECTOR_MAP_SIZE_MAX_BITS, settings::VECTOR_MAP_GROWTH_BITS) {
         bytes_per_vector_ =
                 ndd::quant::get_quantizer_dispatch(quant_level_).get_storage_size(vector_dim);
         std::filesystem::create_directories(path);
@@ -257,16 +243,7 @@ public:
         if(batch.empty()) {
             return;
         }
-
-        auto try_commit = [&](MDBX_txn* txn) {
-            int rc = mdbx_txn_commit(txn);
-            if(rc != MDBX_SUCCESS) {
-                throw std::runtime_error("Failed to commit transaction: "
-                                         + std::string(mdbx_strerror(rc)));
-            }
-        };
-
-        auto write_batch = [&](MDBX_txn* txn) -> int {
+        ndd::db::with_write_txn_retry(env_, map_config_, index_id_, [&](MDBX_txn* txn) {
             for(const auto& [numeric_id, vector_bytes] : batch) {
                 if(vector_bytes.size() != bytes_per_vector_) {
                     throw std::runtime_error("Vector byte size mismatch");
@@ -275,25 +252,10 @@ public:
                 MDBX_val key{const_cast<ndd::idInt*>(&numeric_id), sizeof(ndd::idInt)};
                 MDBX_val data{const_cast<uint8_t*>(vector_bytes.data()), vector_bytes.size()};
 
-                int rc = mdbx_put(txn, dbi_, &key, &data, MDBX_UPSERT);
+                const int rc = mdbx_put(txn, dbi_, &key, &data, MDBX_UPSERT);
+                ndd::db::throw_if_error(rc, "Failed to store vector bytes");
             }
-            return MDBX_SUCCESS;
-        };
-
-        MDBX_txn* txn;
-        int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
-        if(rc != MDBX_SUCCESS) {
-            throw std::runtime_error("Failed to begin transaction");
-        }
-
-        rc = write_batch(txn);
-        // MDBX auto-grows, no manual resize needed
-        if(rc != MDBX_SUCCESS) {
-            mdbx_txn_abort(txn);
-            throw std::runtime_error("Failed to store vector");
-        }
-
-        try_commit(txn);
+        });
     }
 
     std::vector<std::pair<ndd::idInt, std::vector<uint8_t>>>
@@ -333,28 +295,14 @@ public:
     }
 
     void remove(ndd::idInt numeric_id) {
-        MDBX_txn* txn;
-        int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
-        if(rc != MDBX_SUCCESS) {
-            throw std::runtime_error("Failed to begin transaction");
-        }
-
-        try {
+        ndd::db::with_write_txn_retry(env_, map_config_, index_id_, [&](MDBX_txn* txn) {
             MDBX_val key{const_cast<ndd::idInt*>(&numeric_id), sizeof(ndd::idInt)};
 
-            rc = mdbx_del(txn, dbi_, &key, nullptr);
+            int rc = mdbx_del(txn, dbi_, &key, nullptr);
             if(rc != MDBX_SUCCESS && rc != MDBX_NOTFOUND) {
                 throw std::runtime_error("Failed to delete vector data");
             }
-
-            rc = mdbx_txn_commit(txn);
-            if(rc != MDBX_SUCCESS) {
-                throw std::runtime_error("Failed to commit vector deletion");
-            }
-        } catch(...) {
-            mdbx_txn_abort(txn);
-            throw;
-        }
+        });
     }
 
     ndd::quant::QuantizationLevel getQuantLevel() const { return quant_level_; }
@@ -372,6 +320,15 @@ private:
     MDBX_env* env_;
     MDBX_dbi dbi_;
     std::string path_;
+    ndd::db::EnvResizeConfig map_config_;
+
+    static constexpr MDBX_env_flags_t env_open_flags() {
+#if defined(NDD_DB_BACKEND_LMDB)
+        return MDBX_WRITEMAP | MDBX_MAPASYNC | MDBX_NORDAHEAD;
+#else
+        return MDBX_NOSUBDIR | MDBX_WRITEMAP | MDBX_MAPASYNC | MDBX_NORDAHEAD;
+#endif
+    }
 
     void init_environment() {
         int rc = mdbx_env_create(&env_);
@@ -379,49 +336,30 @@ private:
             throw std::runtime_error("Failed to create LMDB env");
         }
 
-        // Set geometry for auto-grow
-        rc = mdbx_env_set_geometry(
-                env_,
-                -1,                                            // lower size bound (use default)
-                1ULL << settings::METADATA_MAP_SIZE_BITS,      // current/now size
-                1ULL << settings::METADATA_MAP_SIZE_MAX_BITS,  // upper size bound
-                1ULL << settings::METADATA_MAP_SIZE_BITS,      // growth step
-                -1,                                            // shrink threshold (use default)
-                -1);                                           // pagesize (use default)
+        rc = ndd::db::configure_env_mapsize(env_, map_config_);
         if(rc != MDBX_SUCCESS) {
             throw std::runtime_error("Failed to set geometry");
         }
 
         rc = mdbx_env_open(env_,
                            path_.c_str(),
-                           MDBX_NOSUBDIR | MDBX_WRITEMAP | MDBX_MAPASYNC | MDBX_NORDAHEAD,
+                           env_open_flags(),
                            0664);
         if(rc != MDBX_SUCCESS) {
-            throw std::runtime_error("Failed to open environment");
+            throw std::runtime_error(
+                    "Failed to open environment MetaStore: " + std::string(mdbx_strerror(rc)));
         }
 
-        MDBX_txn* txn;
-        rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
-        if(rc != MDBX_SUCCESS) {
-            throw std::runtime_error("Failed to begin transaction");
-        }
-
-        rc = mdbx_dbi_open(txn, nullptr, MDBX_CREATE | MDBX_INTEGERKEY, &dbi_);
-        if(rc != MDBX_SUCCESS) {
-            mdbx_txn_abort(txn);
-            throw std::runtime_error("Failed to open database");
-        }
-
-        rc = mdbx_txn_commit(txn);
-        if(rc != MDBX_SUCCESS) {
-            throw std::runtime_error("Failed to commit transaction: "
-                                     + std::string(mdbx_strerror(rc)));
-        }
+        ndd::db::with_write_txn_retry(env_, map_config_, path_, [&](MDBX_txn* txn) {
+            const int open_rc = mdbx_dbi_open(txn, nullptr, MDBX_CREATE | MDBX_INTEGERKEY, &dbi_);
+            ndd::db::throw_if_error(open_rc, "Failed to open metadata database");
+        });
     }
 
 public:
     MetaStore(const std::string& path) :
-        path_(path) {
+        path_(path),
+        map_config_("meta-store", settings::METADATA_MAP_SIZE_MAX_BITS, settings::METADATA_MAP_GROWTH_BITS) {
         std::filesystem::create_directories(path);
         init_environment();
     }
@@ -435,16 +373,7 @@ public:
         if(batch.empty()) {
             return;
         }
-
-        auto try_commit = [&](MDBX_txn* txn) {
-            int rc = mdbx_txn_commit(txn);
-            if(rc != MDBX_SUCCESS) {
-                throw std::runtime_error("Failed to commit transaction: "
-                                         + std::string(mdbx_strerror(rc)));
-            }
-        };
-
-        auto write_batch = [&](MDBX_txn* txn) {
+        ndd::db::with_write_txn_retry(env_, map_config_, path_, [&](MDBX_txn* txn) {
             for(const auto& [numeric_id, meta] : batch) {
                 msgpack::sbuffer sbuf;
                 msgpack::pack(sbuf, meta);
@@ -453,26 +382,9 @@ public:
                 MDBX_val data{const_cast<char*>(sbuf.data()), sbuf.size()};
 
                 int rc = mdbx_put(txn, dbi_, &key, &data, MDBX_UPSERT);
-                if(rc != MDBX_SUCCESS) {
-                }
+                ndd::db::throw_if_error(rc, "Failed to store metadata batch");
             }
-            return MDBX_SUCCESS;
-        };
-
-        MDBX_txn* txn;
-        int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
-        if(rc != MDBX_SUCCESS) {
-            throw std::runtime_error("Failed to begin transaction");
-        }
-
-        rc = write_batch(txn);
-        // MDBX auto-grows, no manual resize needed
-        if(rc != MDBX_SUCCESS) {
-            mdbx_txn_abort(txn);
-            throw std::runtime_error("Failed to store meta");
-        }
-
-        try_commit(txn);
+        });
     }
 
     void store_meta(ndd::idInt id, const ndd::VectorMeta& meta) { store_meta_batch({{id, meta}}); }
@@ -503,28 +415,14 @@ public:
     }
 
     void remove(ndd::idInt numeric_id) {
-        MDBX_txn* txn;
-        int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
-        if(rc != MDBX_SUCCESS) {
-            throw std::runtime_error("Failed to begin transaction");
-        }
-
-        try {
+        ndd::db::with_write_txn_retry(env_, map_config_, path_, [&](MDBX_txn* txn) {
             MDBX_val key{const_cast<ndd::idInt*>(&numeric_id), sizeof(ndd::idInt)};
 
-            rc = mdbx_del(txn, dbi_, &key, nullptr);
+            int rc = mdbx_del(txn, dbi_, &key, nullptr);
             if(rc != MDBX_SUCCESS && rc != MDBX_NOTFOUND) {
                 throw std::runtime_error("Failed to delete metadata");
             }
-
-            rc = mdbx_txn_commit(txn);
-            if(rc != MDBX_SUCCESS) {
-                throw std::runtime_error("Failed to commit metadata deletion");
-            }
-        } catch(...) {
-            mdbx_txn_abort(txn);
-            throw;
-        }
+        });
     }
 };
 

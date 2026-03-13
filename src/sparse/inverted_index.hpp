@@ -22,7 +22,7 @@
 #    include <arm_neon.h>
 #endif // defined(__x86_64__) || defined(_M_X64)
 
-#include "mdbx/mdbx.h"
+#include "db_backend.hpp"
 #include "../core/types.hpp"
 #include "../utils/log.hpp"
 #include "../utils/settings.hpp"
@@ -80,7 +80,10 @@ namespace ndd {
     // and write the block back.
     class InvertedIndex {
     public:
-        InvertedIndex(MDBX_env* env, size_t vocab_size, const std::string& index_id);
+        InvertedIndex(MDBX_env* env,
+                      size_t vocab_size,
+                      const std::string& index_id,
+                      ndd::db::EnvResizeConfig* map_config = nullptr);
         ~InvertedIndex() = default;
 
         bool initialize();
@@ -104,6 +107,7 @@ namespace ndd {
         MDBX_dbi blocked_term_postings_dbi_;
         size_t vocab_size_;
         std::string index_id_;
+        ndd::db::EnvResizeConfig* map_config_;
 
         // Cached per-term max values loaded from posting-list metadata. Search uses this
         // to skip absent terms quickly and to compute pruning bounds.

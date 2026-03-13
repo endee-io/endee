@@ -99,6 +99,8 @@ option(USE_AVX2   "Enable AVX2 (FMA, F16C)" OFF)
 option(USE_SVE2   "Enable SVE2 (INT8/16, FP16)" OFF)
 option(USE_NEON   "Enable NEON (FP16, DotProd)" OFF)
 option(NDD_INV_IDX_STORE_FLOATS "Store raw float 32 values in sparse index (no quantization)" OFF)
+set(NDD_DB_BACKEND "mdbx" CACHE STRING "Database backend to compile against (mdbx or lmdb)")
+set_property(CACHE NDD_DB_BACKEND PROPERTY STRINGS mdbx lmdb)
 
 # Check if any SIMD option is selected
 if(NOT USE_AVX512 AND NOT USE_AVX2 AND NOT USE_SVE2 AND NOT USE_NEON)
@@ -224,9 +226,34 @@ endif()
 # =======================
 find_package(Threads REQUIRED)
 
-# Find MDBX (replaces LMDB)
-find_path(LMDB_INCLUDE_DIR NAMES mdbx.h PATHS ${CMAKE_SOURCE_DIR}/third_party/mdbx NO_DEFAULT_PATH)
-file(GLOB LMDB_SOURCES ${CMAKE_SOURCE_DIR}/third_party/mdbx/*.c)
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/src/utils/settings.hpp" NDD_DB_PAGE_BITS_LINE
+     REGEX "constexpr size_t MDBX_PAGE_SIZE_BITS = [0-9]+")
+if(NOT NDD_DB_PAGE_BITS_LINE)
+    message(FATAL_ERROR "Failed to extract MDBX_PAGE_SIZE_BITS from src/utils/settings.hpp")
+endif()
+list(GET NDD_DB_PAGE_BITS_LINE 0 NDD_DB_PAGE_BITS_LINE)
+string(REGEX MATCH "constexpr size_t MDBX_PAGE_SIZE_BITS = ([0-9]+)" _match "${NDD_DB_PAGE_BITS_LINE}")
+set(NDD_DB_PAGE_SIZE_BITS "${CMAKE_MATCH_1}")
+if(NOT NDD_DB_PAGE_SIZE_BITS)
+    message(FATAL_ERROR "Could not parse MDBX_PAGE_SIZE_BITS from: ${NDD_DB_PAGE_BITS_LINE}")
+endif()
+math(EXPR NDD_DB_PAGE_SIZE_BYTES "1 << ${NDD_DB_PAGE_SIZE_BITS}")
+
+string(TOLOWER "${NDD_DB_BACKEND}" NDD_DB_BACKEND)
+if(NDD_DB_BACKEND STREQUAL "mdbx")
+    set(NDD_DB_BACKEND_DEFINITION NDD_DB_BACKEND_MDBX)
+    set(DB_BACKEND_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/third_party/mdbx")
+    file(GLOB DB_BACKEND_SOURCES ${CMAKE_SOURCE_DIR}/third_party/mdbx/*.c)
+elseif(NDD_DB_BACKEND STREQUAL "lmdb")
+    set(NDD_DB_BACKEND_DEFINITION NDD_DB_BACKEND_LMDB)
+    set(DB_BACKEND_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/third_party/lmdb")
+    set(DB_BACKEND_SOURCES
+        ${CMAKE_SOURCE_DIR}/third_party/lmdb/mdb.c
+        ${CMAKE_SOURCE_DIR}/third_party/lmdb/midl.c
+    )
+else()
+    message(FATAL_ERROR "Unsupported NDD_DB_BACKEND='${NDD_DB_BACKEND}'. Use 'mdbx' or 'lmdb'.")
+endif()
 
 # -----------------------
 # Derive binary name
@@ -263,14 +290,15 @@ add_library(ndd_core OBJECT ${NDD_CORE_SOURCES})
 add_executable(${NDD_BINARY_NAME}
     src/main.cpp
     $<TARGET_OBJECTS:ndd_core>
-    ${LMDB_SOURCES}
+    ${DB_BACKEND_SOURCES}
     third_party/roaring_bitmap/roaring.c
 )
 
-# Set MDBX-specific compile flags
-set_source_files_properties(${LMDB_SOURCES} PROPERTIES
-    COMPILE_FLAGS "-DMDBX_BUILD_SHARED_LIBRARY=0 -DMDBX_BUILD_FLAGS=\\\"NDD_EMBEDDED\\\""
-)
+if(NDD_DB_BACKEND STREQUAL "mdbx")
+    set_source_files_properties(${DB_BACKEND_SOURCES} PROPERTIES
+        COMPILE_FLAGS "-DMDBX_BUILD_SHARED_LIBRARY=0 -DMDBX_BUILD_FLAGS=\\\"NDD_EMBEDDED\\\""
+    )
+endif()
 
 # Include directories
 target_include_directories(ndd_core PRIVATE
@@ -283,7 +311,7 @@ target_include_directories(ndd_core PRIVATE
     ${CROW_INCLUDE_DIR}
     ${MSGPACK_INCLUDE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/src/roaring
-    ${LMDB_INCLUDE_DIR}
+    ${DB_BACKEND_INCLUDE_DIR}
     ${ASIO_INCLUDE_DIR}
     ${OPENSSL_INCLUDE_DIR}
     ${CURL_INCLUDE_DIRS}
@@ -298,7 +326,7 @@ target_include_directories(${NDD_BINARY_NAME} PRIVATE
     ${CROW_INCLUDE_DIR}
     ${MSGPACK_INCLUDE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/src/roaring
-    ${LMDB_INCLUDE_DIR}
+    ${DB_BACKEND_INCLUDE_DIR}
     ${ASIO_INCLUDE_DIR}
     ${OPENSSL_INCLUDE_DIR}
     ${CURL_INCLUDE_DIRS}
@@ -347,6 +375,13 @@ if(NDD_INV_IDX_STORE_FLOATS)
     target_compile_definitions(${NDD_BINARY_NAME} PRIVATE NDD_INV_IDX_STORE_FLOATS)
 endif()
 
+target_compile_definitions(ndd_core PRIVATE ${NDD_DB_BACKEND_DEFINITION})
+target_compile_definitions(${NDD_BINARY_NAME} PRIVATE ${NDD_DB_BACKEND_DEFINITION})
+if(NDD_DB_BACKEND STREQUAL "lmdb")
+    target_compile_definitions(ndd_core PRIVATE MDB_FIXED_PAGESIZE=${NDD_DB_PAGE_SIZE_BYTES})
+    target_compile_definitions(${NDD_BINARY_NAME} PRIVATE MDB_FIXED_PAGESIZE=${NDD_DB_PAGE_SIZE_BYTES})
+endif()
+
 # Add ASIO definitions
 target_compile_definitions(ndd_core PRIVATE
     ASIO_STANDALONE
@@ -384,6 +419,8 @@ if(ENABLE_TESTING)
 endif()
 
 message(STATUS "Processor: ${CMAKE_SYSTEM_PROCESSOR}")
+message(STATUS "DB backend: ${NDD_DB_BACKEND}")
+message(STATUS "DB page size: ${NDD_DB_PAGE_SIZE_BYTES}")
 if(USE_AVX512)
     message(STATUS "SIMD Mode: AVX512")
 elseif(USE_AVX2)
@@ -394,7 +431,7 @@ elseif(USE_NEON)
     message(STATUS "SIMD Mode: NEON")
 endif()
 message(STATUS "ASIO include dir: ${ASIO_INCLUDE_DIR}")
-message(STATUS "LMDB include dir: ${LMDB_INCLUDE_DIR}")
+message(STATUS "DB backend include dir: ${DB_BACKEND_INCLUDE_DIR}")
 message(STATUS "OpenSSL include dir: ${OPENSSL_INCLUDE_DIR}")
 
 # Create a symbolic link named 'ndd' pointing to the architecture-specific binary

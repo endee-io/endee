@@ -4,7 +4,7 @@
 #include <vector>
 #include <stdexcept>
 #include <iostream>
-#include "mdbx/mdbx.h"
+#include "db_backend.hpp"
 #include "../utils/log.hpp"
 #include "../core/types.hpp"
 
@@ -15,6 +15,8 @@ namespace ndd {
         private:
             MDBX_env* env_;
             MDBX_dbi dbi_;
+            ndd::db::EnvResizeConfig* map_config_;
+            std::string context_;
 
             static std::string format_filter_key(const std::string& field,
                                                  const std::string& value) {
@@ -75,48 +77,24 @@ namespace ndd {
 
                 std::vector<char> buffer(required_size);
                 bitmap.write(buffer.data(), true);
+                ndd::db::with_write_txn_retry(env_, *map_config_, context_, [&](MDBX_txn* txn) {
+                    MDBX_val key{const_cast<char*>(filter_key.c_str()), filter_key.size()};
+                    MDBX_val data{const_cast<char*>(buffer.data()), buffer.size()};
 
-                MDBX_val key{const_cast<char*>(filter_key.c_str()), filter_key.size()};
-                MDBX_val data{const_cast<char*>(buffer.data()), buffer.size()};
-
-                MDBX_txn* txn;
-                int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
-                if(rc != MDBX_SUCCESS) {
-                    throw std::runtime_error("Failed to begin write transaction: "
-                                             + std::string(mdbx_strerror(rc)));
-                }
-
-                rc = mdbx_put(txn, dbi_, &key, &data, MDBX_UPSERT);
-                if(rc != MDBX_SUCCESS) {
-                    mdbx_txn_abort(txn);
-                    throw std::runtime_error("Failed to store bitmap: "
-                                             + std::string(mdbx_strerror(rc)));
-                }
-
-                rc = mdbx_txn_commit(txn);
-                if(rc != MDBX_SUCCESS) {
-                    throw std::runtime_error("Failed to commit transaction: "
-                                             + std::string(mdbx_strerror(rc)));
-                }
+                    const int rc = mdbx_put(txn, dbi_, &key, &data, MDBX_UPSERT);
+                    ndd::db::throw_if_error(rc, "Failed to store category bitmap");
+                });
             }
 
         public:
-            CategoryIndex(MDBX_env* env) :
-                env_(env) {
-                MDBX_txn* txn;
-                int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
-                if(rc != MDBX_SUCCESS) {
-                    throw std::runtime_error("Failed to begin txn for CategoryIndex init");
-                }
-
-                // Open named DB for category/boolean
-                rc = mdbx_dbi_open(txn, "category_idx", MDBX_CREATE, &dbi_);
-                if(rc != MDBX_SUCCESS) {
-                    mdbx_txn_abort(txn);
-                    throw std::runtime_error("Failed to open category_idx dbi");
-                }
-
-                mdbx_txn_commit(txn);
+            CategoryIndex(MDBX_env* env, ndd::db::EnvResizeConfig* map_config, const std::string& context) :
+                env_(env),
+                map_config_(map_config),
+                context_(context) {
+                ndd::db::with_write_txn_retry(env_, *map_config_, context_, [&](MDBX_txn* txn) {
+                    const int rc = mdbx_dbi_open(txn, "category_idx", MDBX_CREATE, &dbi_);
+                    ndd::db::throw_if_error(rc, "Failed to open category_idx dbi");
+                });
             }
 
             // Faceting: List all unique values for a field

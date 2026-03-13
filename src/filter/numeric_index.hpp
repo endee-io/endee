@@ -7,7 +7,7 @@
 #include <algorithm>
 #include <stdexcept>
 #include <iostream>
-#include "mdbx/mdbx.h"
+#include "db_backend.hpp"
 #include "../utils/log.hpp"
 #include "../core/types.hpp"
 
@@ -209,6 +209,8 @@ namespace ndd {
             MDBX_env* env_;
             MDBX_dbi forward_dbi_;   // ID -> Value (Field:ID -> Value)
             MDBX_dbi inverted_dbi_;  // BucketKey -> BucketBlob
+            ndd::db::EnvResizeConfig* map_config_;
+            std::string context_;
 
             std::string make_forward_key(const std::string& field, ndd::idInt id) {
                 return field + ":" + std::to_string(id);
@@ -241,31 +243,26 @@ namespace ndd {
             }
 
         public:
-            NumericIndex(MDBX_env* env) : env_(env) {
-                MDBX_txn* txn;
-                if (mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn) == MDBX_SUCCESS) {
-                    mdbx_dbi_open(txn, "numeric_forward", MDBX_CREATE, &forward_dbi_);
-                    mdbx_dbi_open(txn, "numeric_inverted", MDBX_CREATE, &inverted_dbi_);
-                    mdbx_txn_commit(txn);
-                }
+            NumericIndex(MDBX_env* env, ndd::db::EnvResizeConfig* map_config, const std::string& context) :
+                env_(env),
+                map_config_(map_config),
+                context_(context) {
+                ndd::db::with_write_txn_retry(env_, *map_config_, context_, [&](MDBX_txn* txn) {
+                    int rc = mdbx_dbi_open(txn, "numeric_forward", MDBX_CREATE, &forward_dbi_);
+                    ndd::db::throw_if_error(rc, "Failed to open numeric_forward dbi");
+                    rc = mdbx_dbi_open(txn, "numeric_inverted", MDBX_CREATE, &inverted_dbi_);
+                    ndd::db::throw_if_error(rc, "Failed to open numeric_inverted dbi");
+                });
             }
 
             void put(const std::string& field, ndd::idInt id, uint32_t value) {
-                MDBX_txn* txn;
-                mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
-                try {
+                ndd::db::with_write_txn_retry(env_, *map_config_, context_, [&](MDBX_txn* txn) {
                     put_internal(txn, field, id, value);
-                    mdbx_txn_commit(txn);
-                } catch(...) {
-                    mdbx_txn_abort(txn);
-                    throw;
-                }
+                });
             }
 
             void remove(const std::string& field, ndd::idInt id) {
-                MDBX_txn* txn;
-                mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
-                try {
+                ndd::db::with_write_txn_retry(env_, *map_config_, context_, [&](MDBX_txn* txn) {
                     std::string fwd_key_str = make_forward_key(field, id);
                     MDBX_val fwd_key{const_cast<char*>(fwd_key_str.data()), fwd_key_str.size()};
                     MDBX_val fwd_val;
@@ -274,14 +271,12 @@ namespace ndd {
                         uint32_t old_val;
                         std::memcpy(&old_val, fwd_val.iov_base, sizeof(uint32_t));
                         remove_from_buckets(txn, field, old_val, id);
-                        mdbx_del(txn, forward_dbi_, &fwd_key, nullptr);
+                        const int rc = mdbx_del(txn, forward_dbi_, &fwd_key, nullptr);
+                        if(rc != MDBX_SUCCESS && rc != MDBX_NOTFOUND) {
+                            throw std::runtime_error("Failed to delete numeric forward key");
+                        }
                     }
-
-                    mdbx_txn_commit(txn);
-                } catch(...) {
-                    mdbx_txn_abort(txn);
-                    throw;
-                }
+                });
             }
 
         private:
@@ -300,7 +295,8 @@ namespace ndd {
 
                 // 2. Update Forward
                 MDBX_val new_val_data{&value, sizeof(uint32_t)};
-                mdbx_put(txn, forward_dbi_, &fwd_key, &new_val_data, MDBX_UPSERT);
+                int rc = mdbx_put(txn, forward_dbi_, &fwd_key, &new_val_data, MDBX_UPSERT);
+                ndd::db::throw_if_error(rc, "Failed to update numeric forward index");
 
                 // 3. Add to Inverted Buckets
                 add_to_buckets(txn, field, value, id);
@@ -312,7 +308,9 @@ namespace ndd {
                 MDBX_val key{const_cast<char*>(bkey_str.data()), bkey_str.size()};
                 MDBX_val data;
                 MDBX_cursor* cursor;
-                mdbx_cursor_open(txn, inverted_dbi_, &cursor);
+                ndd::db::throw_if_error(
+                        mdbx_cursor_open(txn, inverted_dbi_, &cursor),
+                        "Failed to open numeric inverted cursor");
 
                 // Scan backward to find bucket covering 'value'
                 int rc = mdbx_cursor_get(cursor, &key, &data, MDBX_SET_RANGE);
@@ -340,11 +338,15 @@ namespace ndd {
                              if (b.remove(id)) {
                                  // Save back or Delete if empty
                                  if (b.is_empty()) {
-                                     mdbx_cursor_del(cursor, static_cast<MDBX_put_flags_t>(0));
+                                     ndd::db::throw_if_error(
+                                             mdbx_cursor_del(cursor, static_cast<MDBX_put_flags_t>(0)),
+                                             "Failed to delete empty numeric bucket");
                                  } else {
                                      auto bytes = b.serialize();
                                      MDBX_val new_data{bytes.data(), bytes.size()};
-                                     mdbx_cursor_put(cursor, &key, &new_data, MDBX_CURRENT);
+                                     ndd::db::throw_if_error(
+                                             mdbx_cursor_put(cursor, &key, &new_data, MDBX_CURRENT),
+                                             "Failed to rewrite numeric bucket");
                                  }
                              }
                          }
@@ -355,7 +357,9 @@ namespace ndd {
 
             void add_to_buckets(MDBX_txn* txn, const std::string& field, uint32_t value, ndd::idInt id) {
                 MDBX_cursor* cursor;
-                mdbx_cursor_open(txn, inverted_dbi_, &cursor);
+                ndd::db::throw_if_error(
+                        mdbx_cursor_open(txn, inverted_dbi_, &cursor),
+                        "Failed to open numeric bucket cursor");
 
                 // Find candidate bucket
                 std::string search_key = make_bucket_key(field, value);
@@ -405,7 +409,9 @@ namespace ndd {
                     target_key_str = make_bucket_key(field, value);
                     MDBX_val k{const_cast<char*>(target_key_str.data()), target_key_str.size()};
                     MDBX_val v{bytes.data(), bytes.size()};
-                    mdbx_put(txn, inverted_dbi_, &k, &v, MDBX_UPSERT);
+                    ndd::db::throw_if_error(
+                            mdbx_put(txn, inverted_dbi_, &k, &v, MDBX_UPSERT),
+                            "Failed to create numeric bucket");
                     
                 } else {
                     // Update existing
@@ -457,7 +463,9 @@ namespace ndd {
                              auto bytes = b.serialize();
                              MDBX_val k2{const_cast<char*>(target_key_str.data()), target_key_str.size()};
                              MDBX_val v2{bytes.data(), bytes.size()};
-                             mdbx_cursor_put(cursor, &k2, &v2, MDBX_CURRENT);
+                             ndd::db::throw_if_error(
+                                     mdbx_cursor_put(cursor, &k2, &v2, MDBX_CURRENT),
+                                     "Failed to rewrite overflow numeric bucket");
                              mdbx_cursor_close(cursor);
                              return;
                          }
@@ -498,7 +506,9 @@ namespace ndd {
                          auto left_bytes = b.serialize();
                          MDBX_val left_v{left_bytes.data(), left_bytes.size()};
                          MDBX_val left_k{const_cast<char*>(target_key_str.data()), target_key_str.size()};
-                         mdbx_cursor_put(cursor, &left_k, &left_v, MDBX_CURRENT);
+                         ndd::db::throw_if_error(
+                                 mdbx_cursor_put(cursor, &left_k, &left_v, MDBX_CURRENT),
+                                 "Failed to update left numeric bucket");
 
                          // Save Right
                          auto right_bytes = right_b.serialize();
@@ -507,7 +517,9 @@ namespace ndd {
                          MDBX_val right_v{right_bytes.data(), right_bytes.size()};
                          
                          // Use put for new key
-                         mdbx_put(txn, inverted_dbi_, &right_k, &right_v, MDBX_UPSERT);
+                         ndd::db::throw_if_error(
+                                 mdbx_put(txn, inverted_dbi_, &right_k, &right_v, MDBX_UPSERT),
+                                 "Failed to create right numeric bucket");
 
                     } else {
                         // Normal Insert
@@ -516,7 +528,9 @@ namespace ndd {
                         MDBX_val new_data{bytes.data(), bytes.size()};
                         
                         // Use cursor put to update current
-                         mdbx_cursor_put(cursor, &k, &new_data, MDBX_CURRENT);
+                         ndd::db::throw_if_error(
+                                 mdbx_cursor_put(cursor, &k, &new_data, MDBX_CURRENT),
+                                 "Failed to update numeric bucket");
                     }
                 }
                 mdbx_cursor_close(cursor);

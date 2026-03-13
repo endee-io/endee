@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>AI Semantic Search using Endee</title>
+
+    <style>
+
+        body{
+            font-family: Arial;
+            background:#f4f6f8;
+            text-align:center;
+            padding:40px;
+        }
+
+        h1{
+            color:#333;
+        }
+
+        .box{
+            background:white;
+            padding:25px;
+            margin:20px auto;
+            width:450px;
+            border-radius:10px;
+            box-shadow:0px 0px 10px rgba(0,0,0,0.1);
+        }
+
+        input,button{
+            padding:10px;
+            margin:10px;
+            width:80%;
+        }
+
+        button{
+            background:#007BFF;
+            color:white;
+            border:none;
+            cursor:pointer;
+        }
+
+        button:hover{
+            background:#0056b3;
+        }
+
+        #result{
+            margin-top:20px;
+            font-weight:bold;
+            color:#222;
+        }
+
+    </style>
+
+</head>
+
+
+<body>
+
+<h1>AI Semantic Search using Endee Vector Database</h1>
+
+<div class="box">
+
+<h3>Upload PDF Document</h3>
+
+<input type="file" id="pdfFile">
+
+<br>
+
+<button onclick="uploadPDF()">Upload</button>
+
+<p id="uploadStatus"></p>
+
+</div>
+
+
+<div class="box">
+
+<h3>Ask Question</h3>
+
+<input id="question" placeholder="Ask question from document">
+
+<br>
+
+<button onclick="askQuestion()">Search</button>
+
+<p id="result"></p>
+
+</div>
+
+
+<script>
+
+function uploadPDF(){
+
+let file = document.getElementById("pdfFile").files[0]
+
+let formData = new FormData()
+
+formData.append("file",file)
+
+fetch("/upload",{
+method:"POST",
+body:formData
+})
+
+.then(res=>res.json())
+
+.then(data=>{
+
+document.getElementById("uploadStatus").innerText =
+data.message
+
+})
+
+}
+
+
+function askQuestion(){
+
+let q = document.getElementById("question").value
+
+fetch("/ask",{
+
+method:"POST",
+
+headers:{
+"Content-Type":"application/json"
+},
+
+body:JSON.stringify({
+query:q
+})
+
+})
+
+.then(res=>res.json())
+
+.then(data=>{
+
+document.getElementById("result").innerText =
+data.answer || JSON.stringify(data)
+
+})
+
+}
+
+</script>
+
+
+</body>
+
+</html>

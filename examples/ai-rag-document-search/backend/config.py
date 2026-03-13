@@ -1,0 +1,10 @@
+import os
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "YOUR_OPENAI_API_KEY")
+
+VECTOR_DB_URL = "http://localhost:8001"
+
+CHUNK_SIZE = 500
+CHUNK_OVERLAP = 100
+
+TOP_K_RESULTS = 3

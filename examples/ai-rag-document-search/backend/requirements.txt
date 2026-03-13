@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+python-multipart
+pypdf
+sentence-transformers
+numpy
+openai
+requests

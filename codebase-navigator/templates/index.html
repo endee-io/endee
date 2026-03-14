@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Codebase Navigator</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+</head>
+<body>
+  <main class="container">
+    <header class="header">
+      <h1>AI Codebase Navigator</h1>
+      <p>Index, search, and ask questions over your codebase with Endee.</p>
+    </header>
+
+    <section class="card status-card">
+      <h2>Server Status</h2>
+      <p>
+        Endee:
+        {% if server_ok %}
+          <span class="badge success">Connected</span>
+        {% else %}
+          <span class="badge danger">Not Connected</span>
+        {% endif %}
+      </p>
+      <p>Default Index: <strong>{{ default_index }}</strong></p>
+
+      {% if indices %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Vectors</th>
+              <th>Dimensions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for idx in indices %}
+            <tr>
+              <td>{{ idx.get('name', '-') }}</td>
+              <td>{{ idx.get('vector_count', '-') }}</td>
+              <td>{{ idx.get('dimensions', '-') }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+        <p class="muted">No indices discovered yet.</p>
+      {% endif %}
+    </section>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        <section class="flash-wrap">
+          {% for category, message in messages %}
+            <div class="flash {{ category }}">{{ message }}</div>
+          {% endfor %}
+        </section>
+      {% endif %}
+    {% endwith %}
+
+    <section class="grid">
+      <article class="card">
+        <h2>Index Codebase</h2>
+        <form method="post" action="{{ url_for('run_indexing') }}">
+          <label>Directory Path</label>
+          <input type="text" name="directory" placeholder="C:\\path\\to\\project" required />
+
+          <label>Index Name</label>
+          <input type="text" name="index_name" value="{{ default_index }}" />
+
+          <label>Exclude Dirs (comma separated)</label>
+          <input type="text" name="exclude_dirs" placeholder=".git,node_modules,build" />
+
+          <label class="checkbox-row">
+            <input type="checkbox" name="recreate" value="true" />
+            Recreate index
+          </label>
+
+          <button type="submit">Start Indexing</button>
+        </form>
+      </article>
+
+      <article class="card">
+        <h2>Semantic Search</h2>
+        <form method="post" action="{{ url_for('run_search') }}">
+          <label>Query</label>
+          <input type="text" name="query" value="{{ query }}" placeholder="authentication middleware" required />
+
+          <div class="row">
+            <div>
+              <label>Top K</label>
+              <input type="number" name="top_k" min="1" max="50" value="10" />
+            </div>
+            <div>
+              <label>Language</label>
+              <input type="text" name="language" placeholder="python, cpp, ts" />
+            </div>
+          </div>
+
+          <label>Path Filter</label>
+          <input type="text" name="path_filter" placeholder="src/auth" />
+
+          <label>Index Name</label>
+          <input type="text" name="index_name" value="{{ default_index }}" />
+
+          <button type="submit">Search</button>
+        </form>
+      </article>
+
+      <article class="card">
+        <h2>Ask (RAG)</h2>
+        <form method="post" action="{{ url_for('run_ask') }}">
+          <label>Question</label>
+          <textarea name="question" rows="4" placeholder="How does authentication flow work?" required>{{ question }}</textarea>
+
+          <div class="row">
+            <div>
+              <label>Top K</label>
+              <input type="number" name="top_k" min="1" max="20" value="5" />
+            </div>
+            <div>
+              <label>Language</label>
+              <input type="text" name="language" placeholder="optional" />
+            </div>
+          </div>
+
+          <label>Index Name</label>
+          <input type="text" name="index_name" value="{{ default_index }}" />
+
+          <button type="submit">Ask</button>
+        </form>
+      </article>
+    </section>
+
+    {% if search_results %}
+    <section class="card">
+      <h2>Search Results</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Score</th>
+              <th>File</th>
+              <th>Lines</th>
+              <th>Type</th>
+              <th>Name</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in search_results %}
+            <tr>
+              <td>{{ '%.4f'|format(r.score) }}</td>
+              <td>{{ r.file_path }}</td>
+              <td>{{ r.start_line }} - {{ r.end_line }}</td>
+              <td>{{ r.chunk_type }}</td>
+              <td>{{ r.name or '-' }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+    {% endif %}
+
+    {% if ask_answer %}
+    <section class="card">
+      <h2>Answer</h2>
+      <pre class="answer">{{ ask_answer }}</pre>
+      {% if ask_sources %}
+      <h3>Sources</h3>
+      <ul>
+        {% for src in ask_sources %}
+        <li>{{ src }}</li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+    </section>
+    {% endif %}
+  </main>
+</body>
+</html>

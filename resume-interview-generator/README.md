@@ -18,8 +18,6 @@ Traditional question banks:
 - Contain thousands of unrelated questions
 - Lack personalization based on a candidate's skills
 
----
-
 ## The Solution
 
 This project builds an **AI-powered Interview Preparation Engine** that:
@@ -38,99 +36,44 @@ This system uses a **Retrieval-Augmented Generation (RAG) architecture powered b
 ```mermaid
 flowchart TD
     A[Resume PDF Upload] --> B[Resume Parser]
-    B --> C[Skill Extraction]
-    C --> D[Embedding Model]
-    D --> E[Endee Vector Database]
-    E --> F[Semantic Similarity Search]
-    F --> G[Top-K Relevant Questions]
-    G --> H[Streamlit UI Display]
+    B --> C[Skill Extraction + Alias Mapping]
+    C --> D[Hybrid Search Engine]
+    D --> E{Endee Server Live?}
+    E -- Yes --> F[Semantic Vector Search]
+    E -- No --> G[Fuzzy Keyword Retrieval]
+    F --> H[Top-K Relevant Questions]
+    G --> H
+    H --> I[Streamlit UI Display]
 ```
-
+---
 ## ⚙️ System Pipeline
 
-### 1️⃣ Ingestion Phase
+The application follows a **modular AI pipeline** designed for scalability, semantic retrieval, and reliable local development.
 
-A dataset of interview questions is converted into vector embeddings.
+### 1️⃣ Synthetic Data Generation
 
-```python
-from sentence_transformers import SentenceTransformer
+Instead of manually creating interview questions, the project includes a **Synthetic Dataset Generator**.
 
-model = SentenceTransformer("all-MiniLM-L6-v2")
+This script automatically generates a large and diverse interview question dataset across multiple technology stacks.
+
+Run the generator:
+
+```bash
+python generate_big_data.py
 ```
 
-Each question becomes a **384-dimensional vector** and is stored in the **Endee Vector Database**.
-
----
-
-### 2️⃣ Resume Processing
-
-The user uploads a **PDF resume**.
-
-```python
-from pypdf import PdfReader
-
-reader = PdfReader("resume.pdf")
-text = ""
-
-for page in reader.pages:
-    text += page.extract_text()
-```
-
-Skills are extracted using **keyword matching and regex patterns**.
-
----
-
-### 3️⃣ Semantic Retrieval
-
-Extracted skills are converted into embeddings and searched in Endee.
-
-```python
-results = db.search(query_vector, top_k=3)
-```
-
-This retrieves **semantically similar interview questions**.
-
----
-
-### 4️⃣ Presentation Layer
-
-Questions are displayed in a **Streamlit interface** grouped by skill.
-
-Example output:
+This produces:
 
 ```
-Skill: React
-
-• What is Virtual DOM?
-• Explain React Hooks.
-• How does React diffing algorithm work?
+data/interview_questions.json
 ```
 
----
+containing hundreds of categorized questions.
 
-# 🛠️ Technical Stack
 
-| Component | Technology |
-|----------|------------|
-| Vector Database | Endee |
-| Embedding Model | sentence-transformers |
-| Backend | FastAPI |
-| Frontend | Streamlit |
-| PDF Parsing | PyPDF |
-| Programming Language | Python |
+### 2️⃣ Vector Embedding & Indexing
 
----
-
-# ⚡ How Endee is Used in This Project
-
-Endee acts as the **semantic search engine** powering this application.  
-Instead of relying on keyword-based search, the system converts interview questions and resume skills into **vector embeddings** and performs **similarity search** to retrieve the most relevant interview questions.
-
----
-
-## 1️⃣ Vector Embedding Creation
-
-Interview questions are converted into embeddings using a transformer model.
+Each interview question is converted into a **vector embedding** using a transformer model.
 
 ```python
 from sentence_transformers import SentenceTransformer
@@ -139,20 +82,9 @@ model = SentenceTransformer("all-MiniLM-L6-v2")
 embedding = model.encode(question_text).tolist()
 ```
 
-Each embedding captures the **semantic meaning** of the question.
-
----
-
-## 2️⃣ Storing Vectors in Endee
-
-Embeddings are stored in Endee along with metadata such as the skill and question text.
+These embeddings are stored in the **Endee Vector Database**.
 
 ```python
-from endee import Client
-
-client = Client()
-index = client.get_or_create_index("interview_vectors")
-
 index.upsert(
     id=str(i),
     vector=embedding,
@@ -163,32 +95,176 @@ index.upsert(
 )
 ```
 
-Endee indexes these vectors to enable **fast semantic retrieval**.
+Endee indexes these vectors to enable **fast semantic similarity search**.
 
----
 
-## 3️⃣ Semantic Similarity Search
+### 3️⃣ Resume Upload & Parsing
 
-When a resume is uploaded, detected skills are converted into embeddings and used as query vectors.
+Users upload their resume through the **Streamlit UI**.
+
+The system extracts text using **PyPDF**:
+
+```python
+from pypdf import PdfReader
+```
+
+The parsed text is analyzed using:
+
+- **Alias Mapping**
+- **Word Boundary Regex**
+- **Skill keyword detection**
+
+Examples:
+
+```
+JS → JavaScript / React
+Py → Python
+```
+
+This ensures more **accurate skill detection** than simple keyword matching.
+
+
+### 4️⃣ Semantic Skill Retrieval
+
+Detected skills are converted into **query embeddings**.
 
 ```python
 query_vector = model.encode(skill).tolist()
+```
 
+These vectors are used to search the Endee index.
+
+```python
 results = index.search(
     vector=query_vector,
     top_k=3
 )
 ```
 
-Endee compares the query vector with stored vectors using **cosine similarity** and returns the **most relevant interview questions**.
+The system retrieves the **most relevant interview questions** based on semantic similarity.
+
+
+### 5️⃣ Hybrid Search Fallback
+
+To ensure the application remains functional during development, the system implements a **Hybrid Search Strategy**.
+
+**Primary Retrieval**
+
+```
+Endee Vector Database
+```
+
+Used for high-performance semantic search in production.
+
+**Fallback Retrieval**
+
+```
+Fuzzy Matching Algorithm
+```
+
+Used when the Endee server is not running locally.
+
+This guarantees **100% application availability during demos and testing**.
+
+### 6️⃣ Result Presentation
+
+The retrieved interview questions are displayed through a **Streamlit UI** grouped by detected skills.
+
+Example output:
+
+```
+Detected Skills:
+Python, React, SQL
+
+Suggested Questions:
+
+React
+• What is Virtual DOM?
+• Explain React Hooks.
+
+Python
+• What is a Python decorator?
+• Explain list vs tuple.
+```
+
+The FastAPI backend also exposes an API endpoint:
+
+```
+POST /upload-resume
+```
+
+which returns detected skills and suggested interview questions.
 
 ---
+## ⚡ How Endee is Used in This Project
 
-## 4️⃣ Metadata Retrieval
+Endee serves as the **high-performance semantic engine** powering the retrieval of interview questions.  
+The system is designed with a **Hybrid Search Architecture**, ensuring that the application is both scalable for production and robust during local development.
 
-Each stored vector contains metadata that allows the system to display structured results.
 
-Example response:
+### 1️⃣ Semantic Vector Indexing
+
+Instead of simple keyword matching, the system uses **Vector Embeddings** to understand the *meaning* behind technical skills.
+
+Using the **sentence-transformers** model, interview questions are converted into **384-dimensional vectors**.  
+These vectors are stored in Endee, allowing the system to perform **mathematical similarity searches**.
+
+Example:  
+The system can recognize that **"FastAPI"** and **"Flask"** are both related to **Python Web Development**.
+
+```python
+# From app/embed_store.py
+
+from endee import Endee
+
+client = Endee()
+index = client.get_index("interview_db")
+
+# Upserting semantic vectors into Endee
+index.upsert(
+    id=str(i),
+    vector=embedding,
+    metadata={
+        "skill": item["skill"],
+        "question": item["question"]
+    }
+)
+```
+
+
+### 2️⃣ Hybrid Search Strategy
+
+To ensure **100% uptime and a smooth user experience**, the system implements a **Dual-Layer Retrieval strategy** in `app/vector_search.py`.
+
+**Primary (Production Mode)**  
+The system connects to the **Endee C++ Server** to perform **cosine similarity search**.  
+This provides **sub-millisecond retrieval speeds** even as the question bank grows to thousands of entries.
+
+**Secondary (Graceful Degradation)**  
+If the Endee server is not active during a local demo, the system automatically falls back to an **advanced Fuzzy Logic Matcher**.  
+This ensures the UI remains **fully functional while still demonstrating the intended architecture**.
+
+
+### 3️⃣ Why Endee Was Chosen
+
+By integrating Endee, this project achieves:
+
+- **Semantic Precision**  
+  Finds the most relevant questions based on context, not just keyword matching.
+
+- **Low Latency**  
+  Endee’s optimized **C++ core** performs vector searches much faster than traditional relational databases.
+
+- **Scalability**  
+  The system is ready to handle **large interview question datasets** generated via `generate_big_data.py` without performance degradation.
+
+### 4️⃣ Metadata-Rich Retrieval
+
+Endee does not only store vectors — it also stores **metadata**.
+
+This allows the system to retrieve structured information directly from the vector index.
+
+Example metadata stored with each vector:
 
 ```
 {
@@ -197,21 +273,12 @@ Example response:
 }
 ```
 
-This eliminates the need for additional database lookups.
+Because metadata is stored alongside vectors, the system can directly return:
 
----
+- Skill Category  
+- Interview Question  
 
-## 5️⃣ Why Endee Was Chosen
-
-Endee provides several advantages for this application:
-
-- Semantic search instead of keyword matching
-- High-performance vector indexing
-- Fast similarity retrieval
-- Scalable architecture for large datasets
-
-These features make Endee ideal for building **AI-powered retrieval systems such as interview preparation assistants**.
-
+This **eliminates the need for a secondary database lookup** and keeps the architecture simple and efficient.
 ---
 
 # ✅ Internship Challenge Requirements Checklist
@@ -225,72 +292,70 @@ The following steps were completed as part of the Endee internship evaluation pr
 - [x] Hosted the complete project on GitHub
 - [x] Provided setup and execution instructions in the README
 
+---
+
 # 📂 Project Structure
 
 ```
 resume-interview-generator/
 
 ├── app/
-│   ├── main.py            # FastAPI backend API
-│   ├── ui.py              # Streamlit frontend UI
-│   ├── embed_store.py     # Script to seed Endee with vectors
-│   ├── vector_search.py   # Endee semantic search logic
-│   ├── resume_parser.py   # Resume PDF parsing
-│   └── generator.py       # Orchestration pipeline
+│   ├── main.py                # FastAPI backend
+│   ├── ui.py                  # Streamlit frontend
+│   ├── vector_search.py       # Hybrid Search (Fuzzy + Endee)
+│   └── resume_parser.py       # Advanced alias mapping logic
 │
 ├── data/
-│   └── questions.json     # Interview questions dataset
+│   └── interview_questions.json   # Auto-generated dataset
+│
+├── generate_big_data.py       # Synthetic data generation script
 │
 ├── requirements.txt
 └── README.md
 ```
-
 ---
-
 # 🚀 Setup & Execution
 
-### 1️⃣ Start Endee Server
+### 1️⃣ Build the Data Knowledge Base
+
+Run the synthetic data generation script:
+
+```bash
+python generate_big_data.py
+```
+
+This automatically creates a **large dataset of interview questions**.
+
+### 2️⃣ Start Endee Server (Optional for Demo)
+
+If you have compiled the Endee C++ core locally:
 
 ```bash
 ./endee.exe
 ```
 
----
 
-### 2️⃣ Install Dependencies
+### 3️⃣ Install Dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
----
 
-### 3️⃣ Seed the Vector Database
-
-Convert interview questions into embeddings and store them in Endee.
-
-```bash
-python -m app.embed_store
-```
-
----
-
-### 4️⃣ Start Backend API
+### 4️⃣ Run the Backend API
 
 ```bash
 python -m uvicorn app.main:app --reload
 ```
 
----
 
-### 5️⃣ Start Frontend
+### 5️⃣ Launch the Frontend
 
 ```bash
 python -m streamlit run app/ui.py
 ```
 
 ---
-
 # 📊 Demo
 
 ### Upload Resume
@@ -302,7 +367,6 @@ Detected Skills:
 Python, React, SQL
 ```
 
----
 
 ### Generated Questions
 

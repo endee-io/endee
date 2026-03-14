@@ -1,0 +1,33 @@
+# WSL Sensei – AI Assistant for Windows + WSL Development
+# Core dependencies
+
+# Vector embeddings
+sentence-transformers==3.0.1
+torch==2.3.1
+transformers==4.41.2
+
+# Endee vector database Python SDK
+endee==0.1.6
+
+# Web API
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+pydantic==2.7.4
+
+# HTTP client
+httpx==0.27.0
+requests==2.32.3
+
+# CLI
+click==8.1.7
+rich==13.7.1
+
+# LLM backends (choose one or both)
+openai==1.35.7          # OpenAI / OpenAI-compatible (Ollama)
+anthropic==0.30.0       # Anthropic Claude (optional)
+
+# Utilities
+python-dotenv==1.0.1
+tqdm==4.66.4
+pathlib2==2.3.7
+chardet==5.2.0

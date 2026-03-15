@@ -1,0 +1,59 @@
+version: "3.9"
+
+services:
+  # ─────────────────────────────────────────────
+  #  Endee – vector database
+  # ─────────────────────────────────────────────
+  endee:
+    image: endeeio/endee-server:latest
+    container_name: endee-server
+    ports:
+      - "8080:8080"
+    ulimits:
+      nofile: 100000
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "200m"
+        max-file: "5"
+    environment:
+      NDD_NUM_THREADS: 0          # 0 = auto-detect CPU threads
+      NDD_AUTH_TOKEN: ""          # set a token to enable auth
+    volumes:
+      - endee-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/api/v1/indexes"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # ─────────────────────────────────────────────
+  #  DocuMind backend – FastAPI
+  # ─────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: documind-backend
+    ports:
+      - "8000:8000"
+    environment:
+      ENDEE_BASE_URL: "http://endee:8080/api/v1"
+      ENDEE_AUTH_TOKEN: ""
+      # Uncomment and set your OpenAI key for LLM answers
+      # OPENAI_API_KEY: ""
+      # OPENAI_MODEL: "gpt-3.5-turbo"
+      # Or use Ollama (point to a running Ollama container / host)
+      # OLLAMA_BASE_URL: "http://host.docker.internal:11434"
+      # OLLAMA_MODEL: "llama3"
+    volumes:
+      - ./backend:/app        # live-reload friendly
+    depends_on:
+      endee:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  endee-data:

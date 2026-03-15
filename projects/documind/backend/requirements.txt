@@ -1,0 +1,19 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9
+pydantic==2.8.2
+python-dotenv==1.0.1
+
+# Endee vector database SDK
+endee
+
+# Embeddings
+sentence-transformers==3.0.1
+torch==2.3.1
+
+# Document parsing
+pypdf==4.3.1
+
+# LLM integrations (optional)
+openai==1.51.0
+requests==2.32.3

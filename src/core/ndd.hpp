@@ -130,6 +130,10 @@ struct CacheEntry {
     CacheEntry& operator=(CacheEntry&&) = delete;
 };
 
+#ifdef NDD_SERVERLESS
+    #include "../../serverless/usage_stats_severless.hpp"
+#endif
+
 struct PersistenceConfig {
     size_t save_every_n_updates{settings::SAVE_EVERY_N_UPDATES};
     std::chrono::minutes save_interval{settings::SAVE_EVERY_N_MINUTES};
@@ -292,6 +296,11 @@ private:
                 saveIndex(index_id);
             }
         }
+
+        #ifdef NDD_SERVERLESS
+        // Collect and send usage stats (serverless only)
+        serverless::collectAndSendUsageStats(indices_);
+        #endif
     }
 
     // Get index entry with proper lock management - does NOT hold locks after return

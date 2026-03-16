@@ -39,8 +39,22 @@
 #include "cpu_compat_check/check_avx_compat.hpp"
 #include "cpu_compat_check/check_arm_compat.hpp"
 
+#ifdef NDD_SERVERLESS
+#include "../serverless/middleware_serverless.hpp"
+#include "../serverless/admin_routes_serverless.hpp"
+#endif
+
 using ndd::quant::quantLevelToString;
 using ndd::quant::stringToQuantLevel;
+
+
+// Global CPU feature flags (initialized once at startup)
+// Note: No longer needed since VNNI INT16 is part of standard AVX512-VNNI
+
+#ifdef NDD_SERVERLESS
+// Enterprise mode: use ServerlessAuthMiddleware
+using AuthMiddleware = ServerlessAuthMiddleware;
+#else
 
 // Authentication middleware for open-source mode
 // If NDD_AUTH_TOKEN is set: token is required
@@ -83,6 +97,8 @@ struct AuthMiddleware : crow::ILocalMiddleware {
 
     void after_handle(crow::request&, crow::response&, context&) {}
 };
+#endif  // NDD_SERVERLESS
+
 // Helper function to send error messages in JSON format
 inline crow::response json_error(int code, const std::string& message) {
     crow::json::wvalue err_json({{"error", message}});
@@ -192,23 +208,32 @@ int main(int argc, char** argv) {
     if(!is_cpu_compatible()) {
         LOG_ERROR(1004, "CPU is not compatible; server startup aborted");
         return 0;
+    }    
+
+#ifdef NDD_SERVERLESS
+    // Enterprise mode: NDD_AUTH_TOKEN is mandatory
+    if(settings::AUTH_TOKEN.empty()) {
+        std::cerr << "FATAL: NDD_AUTH_TOKEN must be set in enterprise mode." << std::endl;
+        return 1;
     }
-    LOG_INFO("SERVER_ID: " << settings::SERVER_ID);
-    LOG_INFO("SERVER_PORT: " << settings::SERVER_PORT);
-    LOG_INFO("DATA_DIR: " << settings::DATA_DIR);
-    LOG_INFO("NUM_PARALLEL_INSERTS: " << settings::NUM_PARALLEL_INSERTS);
-    LOG_INFO("NUM_RECOVERY_THREADS: " << settings::NUM_RECOVERY_THREADS);
-    LOG_INFO("MAX_MEMORY_GB: " << settings::MAX_MEMORY_GB);
-    LOG_INFO("ENABLE_DEBUG_LOG: " << settings::ENABLE_DEBUG_LOG);
-    LOG_INFO("AUTH_TOKEN: " << settings::AUTH_TOKEN);
-    LOG_INFO("AUTH_ENABLED: " << settings::AUTH_ENABLED);
-    LOG_INFO("DEFAULT_USERNAME: " << settings::DEFAULT_USERNAME);
-    LOG_INFO("DEFAULT_SERVER_TYPE: " << settings::DEFAULT_SERVER_TYPE);
-    LOG_INFO("DEFAULT_DATA_DIR: " << settings::DEFAULT_DATA_DIR);
-    LOG_INFO("DEFAULT_MAX_ACTIVE_INDICES: " << settings::DEFAULT_MAX_ACTIVE_INDICES);
-    LOG_INFO("DEFAULT_MAX_ELEMENTS: " << settings::DEFAULT_MAX_ELEMENTS);
-    LOG_INFO("DEFAULT_MAX_ELEMENTS_INCREMENT: " << settings::DEFAULT_MAX_ELEMENTS_INCREMENT);
-    LOG_INFO("DEFAULT_MAX_ELEMENTS_INCREMENT_TRIGGER: "
+#endif
+
+    LOG_DEBUG("SERVER_ID: " << settings::SERVER_ID);
+    LOG_DEBUG("SERVER_PORT: " << settings::SERVER_PORT);
+    LOG_DEBUG("DATA_DIR: " << settings::DATA_DIR);
+    LOG_DEBUG("NUM_PARALLEL_INSERTS: " << settings::NUM_PARALLEL_INSERTS);
+    LOG_DEBUG("NUM_RECOVERY_THREADS: " << settings::NUM_RECOVERY_THREADS);
+    LOG_DEBUG("MAX_MEMORY_GB: " << settings::MAX_MEMORY_GB);
+    LOG_DEBUG("ENABLE_DEBUG_LOG: " << settings::ENABLE_DEBUG_LOG);
+    LOG_DEBUG("AUTH_TOKEN: " << settings::AUTH_TOKEN);
+    LOG_DEBUG("AUTH_ENABLED: " << settings::AUTH_ENABLED);
+    LOG_DEBUG("DEFAULT_USERNAME: " << settings::DEFAULT_USERNAME);
+    LOG_DEBUG("DEFAULT_SERVER_TYPE: " << settings::DEFAULT_SERVER_TYPE);
+    LOG_DEBUG("DEFAULT_DATA_DIR: " << settings::DEFAULT_DATA_DIR);
+    LOG_DEBUG("DEFAULT_MAX_ACTIVE_INDICES: " << settings::DEFAULT_MAX_ACTIVE_INDICES);
+    LOG_DEBUG("DEFAULT_MAX_ELEMENTS: " << settings::DEFAULT_MAX_ELEMENTS);
+    LOG_DEBUG("DEFAULT_MAX_ELEMENTS_INCREMENT: " << settings::DEFAULT_MAX_ELEMENTS_INCREMENT);
+    LOG_DEBUG("DEFAULT_MAX_ELEMENTS_INCREMENT_TRIGGER: "
               << settings::DEFAULT_MAX_ELEMENTS_INCREMENT_TRIGGER);
 
     // Path to React build directory
@@ -251,7 +276,8 @@ int main(int argc, char** argv) {
     });
 
     // ========= USER ENDPOINTS ==========
-    // Get user info for the configured single user
+#ifndef NDD_SERVERLESS
+    // Get user info - returns default user info 
     CROW_ROUTE(app, "/api/v1/users/<string>/info")
             .CROW_MIDDLEWARES(app, AuthMiddleware)
             .methods("GET"_method)([&auth_manager, &app](const crow::request& req,
@@ -269,28 +295,8 @@ int main(int argc, char** argv) {
                     return json_error_500(ctx.username, req.url, std::string("Error: ") + e.what());
                 }
             });
+#endif
 
-    // Get user type - always returns Admin in open-source mode
-    CROW_ROUTE(app, "/api/v1/users/<string>/type")
-            .CROW_MIDDLEWARES(app, AuthMiddleware)
-            .methods("GET"_method)([&auth_manager, &app](const crow::request& req,
-                                                         const std::string& target_username) {
-                auto& ctx = app.get_context<AuthMiddleware>(req);
-
-                try {
-                    auto user_type = auth_manager.getUserType(target_username);
-                    if(!user_type) {
-                        return json_error(404, "User not found");
-                    }
-
-                    crow::json::wvalue response(
-                            {{"username", settings::DEFAULT_USERNAME}, {"user_type", "Admin"}});
-
-                    return crow::response(200, response.dump());
-                } catch(const std::exception& e) {
-                    return json_error_500(ctx.username, req.url, std::string("Error: ") + e.what());
-                }
-            });
 
     CROW_ROUTE(app, "/api/v1/stats").methods("GET"_method)([](const crow::request& req) {
         crow::json::wvalue response(
@@ -404,9 +410,49 @@ int main(int argc, char** argv) {
                                    quant_level,
                                    checksum};
 
+#ifdef NDD_SERVERLESS
+                // Enterprise mode: enforce tier-based limits
+
+                // Enforce index count limit
+                int max_indices = getMaxAllowedIndices(ctx.user_type);
+                if(max_indices != -1) {
+                    auto user_indices = index_manager.listUserIndexes(ctx.username);
+                    if(static_cast<int>(user_indices.size()) >= max_indices) {
+                        return json_error(403,
+                            "Maximum index count (" + std::to_string(max_indices) +
+                            ") reached for your tier");
+                    }
+                }
+
+                // Enforce vector count limit (if size_in_millions specified)
+                if(size_in_millions > 0) {
+                    size_t max_vectors = getMaxVectorsPerIndex(ctx.user_type);
+                    size_t requested_vectors = size_in_millions * 1'000'000;
+                    if(requested_vectors > max_vectors) {
+                        return json_error(403,
+                            "Requested vector count exceeds tier limit of " +
+                            std::to_string(max_vectors));
+                    }
+                }
+
+                // Enforce precision limit
+                if(!isPrecisionAllowed(ctx.user_type, quant_level)) {
+                    return json_error(403,
+                        "Precision '" + quantLevelToString(quant_level) +
+                        "' is not available for your tier. Allowed: " +
+                        getAllowedPrecisionNames(ctx.user_type));
+                }
+#endif
+
                 try {
-                    // Pass the full index_id to index_manager using the Admin user type
+
+#ifdef NDD_SERVERLESS
+                    // Pass user's actual tier type
+                    index_manager.createIndex(index_id, config, ctx.user_type, size_in_millions);
+#else
+                    // OSS: Pass Admin user type (no limits)
                     index_manager.createIndex(index_id, config, UserType::Admin, size_in_millions);
+#endif
                     return crow::response(200, "Index created successfully");
                 } catch(const std::runtime_error& e) {
                     LOG_WARN(1019, index_id, "Create-index request failed: " << e.what());
@@ -1174,6 +1220,13 @@ int main(int argc, char** argv) {
                                           std::string("Error: ") + e.what());
                 }
             });
+
+#ifdef NDD_SERVERLESS
+    // ============================================================
+    // ENTERPRISE ADMIN ENDPOINTS (18 endpoints)
+    // ============================================================
+    registerAdminRoutes(app, auth_manager, index_manager);
+#endif
 
     // ============================================================
     // REACT SPA SERVING WITH CLIENT-SIDE ROUTING SUPPORT

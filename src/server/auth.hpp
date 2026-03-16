@@ -10,7 +10,11 @@
 #include "log.hpp"
 #include "settings.hpp"
 
-// Simplified for open-source mode - only Admin type exists
+// Enterprise mode: use extended auth system
+#ifdef NDD_SERVERLESS
+    #include "../../serverless/auth_serverless.hpp"
+#else
+// OSS mode: Simplified for open-source - only Admin type exists
 enum class UserType { Admin };
 
 inline std::string userTypeToString(UserType type) {
@@ -138,3 +142,5 @@ public:
         return userInfo;
     }
 };
+
+#endif  // NDD_SERVERLESS

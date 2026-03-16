@@ -58,8 +58,9 @@ The server listens on port `8080`. For detailed setup paths, supported operating
 - [Hosted Quick Start Docs](https://docs.endee.io/quick-start)
 
 ## Use Cases
-
-### RAG and AI Retrieval
+*   `ndd_data_dir=DIR`: Set the data directory.
+*   `binary_file=FILE`: Set the binary file to run.
+*   `ndd_auth_token=TOKEN`: Set the authentication token (mandatory).
 
 Use Endee as the retrieval layer for question answering, chat assistants, copilots, and other RAG applications that need fast vector search with metadata-aware filtering.
 
@@ -118,22 +119,217 @@ Current developer entry points:
 
 We welcome contributions from the community to help make vector search faster and more accessible for everyone.
 
+<<<<<<< HEAD
 - Submit pull requests for fixes, features, and improvements
 - Report bugs or performance issues through GitHub issues
 - Propose enhancements for search quality, performance, and deployment workflows
+=======
 
-## License
+* **SIMD Selectors (Choose One):**
+* `-DUSE_AVX2=ON`
+* `-DUSE_AVX512=ON`
+* `-DUSE_NEON=ON`
+* `-DUSE_SVE2=ON`
 
-Endee is open source software licensed under the **Apache License 2.0**. See the [LICENSE](./LICENSE) file for full terms.
 
-## Trademark and Branding
+**Example (x86_64 AVX512 Release):**
 
-“Endee” and the Endee logo are trademarks of Endee Labs.
+```bash
+cmake -DCMAKE_BUILD_TYPE=Release \
+      -DUSE_AVX512=ON \
+      ..
+```
 
-The Apache License 2.0 does not grant permission to use the Endee name, logos, or branding in a way that suggests endorsement or affiliation.
+### Step 3: Compile
 
-If you offer a hosted or managed service based on this software, you must use your own branding and avoid implying it is an official Endee service.
+```bash
+make -j$(nproc)
+```
 
-## Third-Party Software
+### Running the Built Binary
 
-This project includes or depends on third-party software components licensed under their respective open-source licenses. Use of those components is governed by their own license terms.
+After a successful build, the binary will be generated in the `build/` directory.
+
+### Binary Naming
+
+The output binary name depends on the SIMD flag used during compilation:
+
+* `ndd-avx2`
+* `ndd-avx512`
+* `ndd-neon` (or `ndd-neon-darwin` for mac)
+* `ndd-sve2`
+
+A symlink called `ndd` links to the binary compiled for the current build.
+
+### Runtime Environment Variables
+
+Some environment variables **ndd** reads at runtime:
+
+* `NDD_DATA_DIR`: Defines the data directory
+* `NDD_AUTH_TOKEN`: Authentication token (mandatory)
+
+### Authentication
+
+`NDD_AUTH_TOKEN` is **mandatory**. The server will not start without it. All API requests require the token in the `Authorization` header.
+
+```bash
+# Generate a secure token
+export NDD_AUTH_TOKEN=$(openssl rand -hex 32)
+./build/ndd
+
+# All APIs require the token in Authorization header
+curl -H "Authorization: $NDD_AUTH_TOKEN" http://{{BASE_URL}}/api/v1/index/list
+```
+
+### Execution Example
+
+To run the database using the AVX2 binary and a local `data` folder:
+
+```bash
+# 1. Create the data directory
+mkdir -p ./data
+
+# 2. Export the environment variable and run
+export NDD_DATA_DIR=$(pwd)/data
+./build/ndd
+```
+
+Alternatively, as a single line:
+
+```bash
+NDD_DATA_DIR=./data ./build/ndd
+```
+
+---
+
+
+
+## 3. Docker Deployment
+
+We provide a Dockerfile for easy containerization. This ensures a consistent runtime environment and simplifies the deployment process across various platforms.
+
+### Build the Image
+
+You **must** specify the target architecture (`avx2`, `avx512`, `neon`, `sve2`) using the `BUILD_ARCH` build argument and **must** specify `NDD_SERVERLESS=ON` to enable serverless features. You can optionally enable a debug build using the `DEBUG` argument.
+
+```bash
+# Production Build (AVX2) (for x86_64 systems)
+docker build --ulimit nofile=100000:100000 --build-arg BUILD_ARCH=avx2 --build-arg NDD_SERVERLESS=ON -t endee-enterprise:latest -f ./infra/Dockerfile .
+
+# Debug Build (Neon) (for arm64, mac apple silicon)
+docker build --ulimit nofile=100000:100000 --build-arg BUILD_ARCH=neon --build-arg DEBUG=true --build-arg NDD_SERVERLESS=ON -t endee-enterprise:latest -f ./infra/Dockerfile .
+```
+
+### Run the Container
+
+The container exposes port `8080` and stores data in `/data` inside container. You should persist this data using a docker volume.
+
+```bash
+docker run \
+  -p 8080:8080 \
+  -v nd-data:/data \
+  -e NDD_AUTH_TOKEN="your_secure_token" \
+  --name endee-enterprise \
+  endee-enterprise:latest
+```
+
+`NDD_AUTH_TOKEN` is **mandatory**. The server will not start without it.
+
+
+## 4. Running Docker container from registry
+
+You can run Endee directly using the pre-built image from Docker Hub without building locally.
+
+### Using Docker Compose
+
+Create a new directory for Endee:
+
+```bash
+mkdir endee && cd endee
+```
+
+Inside this directory, create a file named `docker-compose.yml` and copy the following content into it:
+
+```yaml
+services:
+  endee-enterprise:
+    image: endee-enterprise:latest
+    container_name: endee-enterprise
+    ports:
+      - "8080:8080"
+    environment:
+      NDD_NUM_THREADS: 0
+      NDD_AUTH_TOKEN: "your_secure_token"  # Required: set your auth token
+    volumes:
+      - nd-data:/data
+    restart: unless-stopped
+
+volumes:
+  nd-data:
+```
+
+Then run:
+```bash
+docker compose up -d
+```
+
+for more details visit [docs.endee.io](https://docs.endee.io/quick-start)
+
+
+## Serverless Build
+
+Endee supports a serverless mode with multi-user authentication, tier-based access control, and admin management APIs. Serverless mode is enabled via the `-DNDD_SERVERLESS=ON` CMake flag and uses the same codebase with conditional compilation.
+
+### Serverless Features
+
+* **Multi-user authentication** with MDBX-backed persistent storage
+* **4 user tiers**: Starter, Pro, Scale, Admin — each with configurable limits
+* **Tier-based limits**: vector count, dimension, and index count per tier
+* **Admin APIs**: 18 endpoints for user management, token management, and index administration
+* **Root token**: `NDD_AUTH_TOKEN` serves as the root admin token (mandatory)
+
+### Tier Limits
+
+| Tier | Max Vectors | Max Dimension | Max Indices |
+|------|-------------|---------------|-------------|
+| Starter | 1M | 2,000 | 3 |
+| Pro | 10M | 4,000 | 10 |
+| Scale | 100M | 8,000 | Unlimited |
+| Admin | 1B | Unlimited | Unlimited |
+
+### Building Serverless
+
+```bash
+mkdir build_enterprise && cd build_enterprise
+cmake -DNDD_SERVERLESS=ON -DUSE_NEON=ON ..
+make -j$(nproc)
+```
+
+Replace `-DUSE_NEON=ON` with the appropriate SIMD flag for your platform (`-DUSE_AVX2=ON`, `-DUSE_AVX512=ON`, `-DUSE_SVE2=ON`).
+
+### Running Serverless
+
+`NDD_AUTH_TOKEN` is **mandatory** in serverless mode. The server will exit with a fatal error if it is not set.
+
+```bash
+NDD_AUTH_TOKEN=your-root-token NDD_DATA_DIR=./data ./build_enterprise/ndd
+```
+
+The root token has Admin tier access (unlimited). Use it to create users and manage the system.
+
+### Serverless Auth Flow
+
+**1. Create a user** (auto-generates a token):
+```bash
+curl -X POST http://localhost:8080/api/v1/admin/users \
+  -H "Authorization: your-root-token" \
+  -H "Content-Type: application/json" \
+  -d '{"username": "alice", "user_type": "Starter"}'
+# Response: {"message":"User created successfully","username":"alice","user_type":"Starter","token":"alice:<generated-token>"}
+```
+
+**2. User authenticates with their token**:
+```bash
+curl http://localhost:8080/api/v1/index/list \
+  -H "Authorization: <generated-token>"
+```

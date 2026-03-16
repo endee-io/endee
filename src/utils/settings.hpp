@@ -229,3 +229,8 @@ namespace settings {
     }
 
 }  //namespace settings
+
+// Enterprise mode: add tier-specific constants
+#ifdef NDD_SERVERLESS
+#include "../../serverless/settings_serverless.hpp"
+#endif

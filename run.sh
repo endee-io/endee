@@ -17,7 +17,7 @@ Usage: $(basename "$0") [OPTIONS]
 Options:
   ndd_data_dir=DIR   Set the data directory (default: ./data)
   binary_file=FILE   Set the binary file to run (default: auto-detected in build/)
-  ndd_auth_token=TOKEN Set the auth token (default: empty)
+  ndd_auth_token=TOKEN Set the auth token (mandatory)
   --help, -h         Show this help message and exit
 
 Description:

@@ -100,6 +100,16 @@ option(USE_SVE2   "Enable SVE2 (INT8/16, FP16)" OFF)
 option(USE_NEON   "Enable NEON (FP16, DotProd)" OFF)
 option(NDD_INV_IDX_STORE_FLOATS "Store raw float 32 values in sparse index (no quantization)" OFF)
 
+# Serverless mode option
+option(NDD_SERVERLESS "Enable serverless multi-user auth" OFF)
+
+if(NDD_SERVERLESS)
+    add_compile_definitions(NDD_SERVERLESS)
+    message(STATUS "Serverless mode: ENABLED")
+else()
+    message(STATUS "Serverless mode: DISABLED (OSS)")
+endif()
+
 # Check if any SIMD option is selected
 if(NOT USE_AVX512 AND NOT USE_AVX2 AND NOT USE_SVE2 AND NOT USE_NEON)
     if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm|aarch64)")

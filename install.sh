@@ -254,6 +254,12 @@ build_project() {
             ;;
     esac
 
+    # --- Apply Serverless Flag ---
+    if [[ "$ENTERPRISE" == "ON" ]]; then
+        log "Serverless: ON"
+        cmake_args+=("-DNDD_SERVERLESS=ON")
+    fi
+
     # --- Apply CPU Optimization Flags ---
     if [[ -n "$CPU_TARGET" ]]; then
         log "CPU Target: $CPU_TARGET"
@@ -309,6 +315,7 @@ CPU Optimization Options (Select one):
   --sve2          Add -DUSE_SVE2=ON
 
 General Options:
+  --enterprise    Add -DNDD_SERVERLESS=ON
   --skip-deps     Skip the dependency installation step
   --help, -h      Show this help message and exit
 
@@ -362,6 +369,10 @@ parse_args() {
                 ;;
 
             # --- General ---
+            --enterprise)
+                ENTERPRISE="ON"
+                shift
+                ;;
             --skip-deps)
                 SKIP_DEPS=true
                 shift

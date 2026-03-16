@@ -1,7 +1,7 @@
 services:
-  endee-oss:
-    image: endee-oss:latest
-    container_name: endee-oss
+  endee-enterprise:
+    image: endee-enterprise:latest
+    container_name: endee-enterprise
     ports:
       - "8080:8080"
     ulimits:
@@ -20,16 +20,16 @@ services:
 # ----------------------------------------------------
     environment:
       NDD_NUM_THREADS: 0
-      NDD_AUTH_TOKEN: "" # Replace with your auth token
+      NDD_AUTH_TOKEN: "your_secure_token" # Required: set your auth token
     volumes:
-      - endee-data:/data
+      - nd-data:/data
     restart: unless-stopped
 
 volumes:
   # Modify the 'device' path below to change the host directory used for data persistence
-  endee-data:
-    # driver: local
-    # driver_opts:
-    # type: ext4
-    # o: bind
-    # device: ${PWD}/dockerdata
+  nd-data:
+    driver: local
+    driver_opts:
+      type: ext4
+      o: bind
+      device: /home/debian/mnt

@@ -24,6 +24,7 @@ WORKDIR /build_space
 # Copy source code
 COPY ./src /build_space/src
 COPY ./third_party /build_space/third_party
+COPY ./serverless /build_space/serverless
 COPY ./CMakeLists.txt /build_space/CMakeLists.txt
 COPY ./install.sh /build_space/install.sh
 
@@ -32,13 +33,19 @@ ARG BUILD_ARCH
 ENV BUILD_ARCH=${BUILD_ARCH}
 ARG DEBUG=false
 ENV DEBUG=${DEBUG}
+ARG NDD_SERVERLESS
+ENV NDD_SERVERLESS=${NDD_SERVERLESS}
 RUN chmod +x ./install.sh && \
+    if [ -z "$BUILD_ARCH" ]; then echo "ERROR: BUILD_ARCH is required (avx2|avx512|neon|sve2)" && exit 1; fi && \
+    if [ -z "$NDD_SERVERLESS" ]; then echo "ERROR: NDD_SERVERLESS=ON is required" && exit 1; fi && \
+    ENTERPRISE_FLAG="" && \
+    if [ "$NDD_SERVERLESS" = "ON" ]; then ENTERPRISE_FLAG="--enterprise"; fi && \
     if [ "$DEBUG" = "true" ]; then \
-        ./install.sh --${BUILD_ARCH} --debug_all --skip-deps; \
+        ./install.sh --${BUILD_ARCH} --debug_all --skip-deps ${ENTERPRISE_FLAG}; \
     else \
-        ./install.sh --${BUILD_ARCH} --release --skip-deps; \
+        ./install.sh --${BUILD_ARCH} --release --skip-deps ${ENTERPRISE_FLAG}; \
     fi && \
-    cp ./build/ndd-${BUILD_ARCH} ./ndd-server
+    cp ./build/ndd-${BUILD_ARCH} ./ndd
 
 # STAGE 2: RUNTIME
 FROM ${BASE_IMAGE}
@@ -65,8 +72,8 @@ RUN groupadd -r -g 1000 endee && \
     chmod 755 /data
 
 # Copy binary from builder
-COPY --from=builder /build_space/ndd-server /usr/local/bin/ndd-server
-RUN chmod +x /usr/local/bin/ndd-server
+COPY --from=builder /build_space/ndd /usr/local/bin/ndd
+RUN chmod +x /usr/local/bin/ndd
 
 # Copy frontend
 COPY --from=builder /build_space/frontend /usr/local/frontend
@@ -87,8 +94,8 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD curl -f http://localhost:8080/api/v1/health || exit 1
 
-LABEL org.opencontainers.image.title="endee-oss"
-LABEL org.opencontainers.image.description="Endee Open Source"
+LABEL org.opencontainers.image.title="endee-enterprise"
+LABEL org.opencontainers.image.description="Endee Enterprise"
 LABEL org.opencontainers.image.url="https://endee.io/"
 LABEL org.opencontainers.image.documentation="https://docs.endee.io/"
 LABEL org.opencontainers.image.vendor="Endee Labs"
@@ -97,6 +104,6 @@ LABEL org.opencontainers.image.source=""
 
 
 # Set the entrypoint
-ENTRYPOINT ["/usr/local/bin/ndd-server"]
+ENTRYPOINT ["/usr/local/bin/ndd"]
 
 CMD []

@@ -32,6 +32,7 @@
 // local includes
 #include "settings.hpp"
 #include "mdbx/mdbx.h"
+#include "json/nlohmann_json.hpp"
 #include "sparse/inverted_index.hpp"
 #include "core/ndd.hpp"
 #include "auth.hpp"
@@ -118,6 +119,43 @@ inline crow::response json_error_500(const std::string& username,
 inline crow::response
 json_error_500(const std::string& username, const std::string& path, const std::string& message) {
     return json_error_500(username, "-", path, message);
+}
+
+inline crow::response json_response(const nlohmann::ordered_json& payload, int code = 200) {
+    crow::response res(code);
+    res.set_header("Content-Type", "application/json");
+    res.body = payload.dump();
+    return res;
+}
+
+inline nlohmann::ordered_json make_index_list_item(const std::string& index_name,
+                                                   const IndexMetadata& metadata) {
+    nlohmann::ordered_json item = nlohmann::ordered_json::object();
+    item["name"] = index_name;
+    item["total_elements"] = static_cast<int64_t>(metadata.total_elements);
+    item["dimension"] = static_cast<int64_t>(metadata.dimension);
+    item["sparse_model"] = ndd::sparseScoringModelToString(metadata.sparse_model);
+    item["space_type"] = metadata.space_type_str;
+    item["precision"] = quantLevelToString(metadata.quant_level);
+    item["checksum"] = metadata.checksum;
+    item["M"] = static_cast<int64_t>(metadata.M);
+    item["created_at"] =
+            static_cast<int64_t>(std::chrono::system_clock::to_time_t(metadata.created_at));
+    return item;
+}
+
+inline nlohmann::ordered_json make_index_info_payload(const IndexInfo& info) {
+    nlohmann::ordered_json payload = nlohmann::ordered_json::object();
+    payload["total_elements"] = static_cast<int64_t>(info.total_elements);
+    payload["dimension"] = static_cast<int64_t>(info.dimension);
+    payload["sparse_model"] = ndd::sparseScoringModelToString(info.sparse_model);
+    payload["space_type"] = info.space_type_str;
+    payload["precision"] = quantLevelToString(info.quant_level);
+    payload["checksum"] = info.checksum;
+    payload["M"] = static_cast<int64_t>(info.M);
+    payload["ef_con"] = static_cast<int64_t>(info.ef_con);
+    payload["lib_token"] = settings::DEFAULT_LIB_TOKEN;
+    return payload;
 }
 
 /**
@@ -399,10 +437,28 @@ int main(int argc, char** argv) {
                     LOG_INFO(1018, index_id, "Creating index with custom size: " << size_in_millions << "M vectors");
                 }
 
-                size_t sparse_dim = body.has("sparse_dim") ? (size_t)body["sparse_dim"].i() : 0;
+                if(body.has("sparse_dim") || body.has("sparse_scoring_model")) {
+                    LOG_WARN(1019,
+                             index_id,
+                             "Create-index request used legacy sparse fields");
+                    return json_error(
+                        400,
+                        "Legacy sparse fields are not supported. Use sparse_model with one of: "
+                        "None, default, endee_bm25");
+                }
+
+                const std::string sparse_model_str =
+                        body.has("sparse_model") ? std::string(body["sparse_model"].s()) : "None";
+                const auto sparse_model = ndd::sparseScoringModelFromString(sparse_model_str);
+                if(!sparse_model.has_value()) {
+                    LOG_WARN(1019, index_id, "Invalid sparse_model: " << sparse_model_str);
+                    return json_error(
+                        400,
+                        "Invalid sparse_model. Must be one of: None, default, endee_bm25");
+                }
 
                 IndexConfig config{dim,
-                                   sparse_dim,
+                                   *sparse_model,
                                    settings::MAX_ELEMENTS,  // max elements
                                    body["space_type"].s(),
                                    m,
@@ -734,26 +790,14 @@ int main(int argc, char** argv) {
                 auto indexes_with_metadata = index_manager.listUserIndexes(ctx.username);
 
                 // Build a detailed response with array of index objects
-                std::vector<crow::json::wvalue> index_list;
+                nlohmann::ordered_json index_list = nlohmann::ordered_json::array();
                 for(const auto& [index_name, metadata] : indexes_with_metadata) {
-                    crow::json::wvalue index_info(
-                            {{"name", index_name},
-                             {"dimension", static_cast<int64_t>(metadata.dimension)},
-                             {"sparse_dim", static_cast<int64_t>(metadata.sparse_dim)},
-                             {"space_type", metadata.space_type_str},
-                             {"precision", quantLevelToString(metadata.quant_level)},
-                             {"total_elements", static_cast<int64_t>(metadata.total_elements)},
-                             {"checksum", metadata.checksum},
-                             {"M", static_cast<int64_t>(metadata.M)},
-                             {"created_at",
-                              static_cast<int64_t>(
-                                      std::chrono::system_clock::to_time_t(metadata.created_at))}});
-                    index_list.push_back(std::move(index_info));
+                    index_list.push_back(make_index_list_item(index_name, metadata));
                 }
 
-                crow::json::wvalue response;
+                nlohmann::ordered_json response = nlohmann::ordered_json::object();
                 response["indexes"] = std::move(index_list);
-                return crow::response(200, response.dump());
+                return json_response(response);
             });
 
     // Delete index
@@ -1199,17 +1243,7 @@ int main(int argc, char** argv) {
                         LOG_WARN(1055, ctx.username, index_name, "Index-info request for missing index");
                         return json_error(404, "Index does not exist");
                     }
-                    crow::json::wvalue response(
-                            {{"total_elements", static_cast<int64_t>(info->total_elements)},
-                             {"dimension", static_cast<int64_t>(info->dimension)},
-                             {"sparse_dim", static_cast<int64_t>(info->sparse_dim)},
-                             {"space_type", info->space_type_str},
-                             {"precision", quantLevelToString(info->quant_level)},
-                             {"checksum", info->checksum},
-                             {"M", static_cast<int64_t>(info->M)},
-                             {"ef_con", static_cast<int64_t>(info->ef_con)},
-                             {"lib_token", settings::DEFAULT_LIB_TOKEN}});
-                    return crow::response(200, response.dump());
+                    return json_response(make_index_info_payload(*info));
                 } catch(const std::runtime_error& e) {
                     LOG_WARN(1056, ctx.username, index_name, "Index-info request failed: " << e.what());
                     return json_error(404, std::string("Error: ") + e.what());

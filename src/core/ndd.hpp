@@ -4,6 +4,7 @@
 
 #include "hnsw/hnswlib.h"
 #include "settings.hpp"
+#include "types.hpp"
 #include "id_mapper.hpp"
 #include "vector_storage.hpp"
 #include "../sparse/sparse_storage.hpp"
@@ -30,7 +31,7 @@
 
 struct IndexConfig {
     size_t dim;
-    size_t sparse_dim = 0;  // 0 means dense-only
+    ndd::SparseScoringModel sparse_model = ndd::SparseScoringModel::NONE;
     size_t max_elements = settings::MAX_ELEMENTS;
     std::string space_type_str;
     size_t M = settings::DEFAULT_M;
@@ -43,7 +44,7 @@ struct IndexConfig {
 struct IndexInfo {
     size_t total_elements;
     size_t dimension;
-    size_t sparse_dim;
+    ndd::SparseScoringModel sparse_model = ndd::SparseScoringModel::NONE;
     std::string space_type_str;
     ndd::quant::QuantizationLevel
             quant_level;  // Selected quantization level
@@ -54,7 +55,7 @@ struct IndexInfo {
 
 struct CacheEntry {
     std::string index_id;
-    size_t sparse_dim = 0;
+    ndd::SparseScoringModel sparse_model = ndd::SparseScoringModel::NONE;
     std::unique_ptr<hnswlib::HierarchicalNSW<float>> alg;
     std::shared_ptr<IDMapper> id_mapper;
     std::shared_ptr<VectorStorage> vector_storage;
@@ -74,7 +75,7 @@ struct CacheEntry {
         last_access(std::chrono::system_clock::now()) {}
 
     CacheEntry(std::string index_id_,
-               size_t sparse_dim_,
+               ndd::SparseScoringModel sparse_model_,
                std::unique_ptr<hnswlib::HierarchicalNSW<float>> alg_,
                std::shared_ptr<IDMapper> mapper_,
                std::shared_ptr<VectorStorage> storage_,
@@ -98,7 +99,7 @@ struct CacheEntry {
 
         LOG_INFO(2005, index_id_, "Assigning index id");
         index_id = std::move(index_id_);
-        sparse_dim = sparse_dim_;
+        sparse_model = sparse_model_;
 
         id_mapper = std::move(mapper_);
 
@@ -630,9 +631,10 @@ public:
 
         // Initialize Sparse Storage if needed
         std::unique_ptr<ndd::SparseVectorStorage> sparse_storage = nullptr;
-        if(config.sparse_dim > 0) {
+        if(ndd::sparseModelEnabled(config.sparse_model)) {
             std::string sparse_storage_dir = index_dir + "/sparse";
-            sparse_storage = std::make_unique<ndd::SparseVectorStorage>(sparse_storage_dir, index_id);
+            sparse_storage = std::make_unique<ndd::SparseVectorStorage>(
+                sparse_storage_dir, index_id, config.sparse_model);
             if(!sparse_storage->initialize()) {
                 throw std::runtime_error("Failed to initialize sparse storage");
             }
@@ -666,7 +668,7 @@ public:
                     indices_.emplace(std::piecewise_construct,
                                      std::forward_as_tuple(index_id),
                                      std::forward_as_tuple(index_id,
-                                                           config.sparse_dim,
+                                                           config.sparse_model,
                                                            std::move(alg),
                                                            id_mapper,
                                                            vector_storage,
@@ -680,7 +682,7 @@ public:
         IndexMetadata metadata_entry;
         metadata_entry.name = index_name;
         metadata_entry.dimension = config.dim;
-        metadata_entry.sparse_dim = config.sparse_dim;
+        metadata_entry.sparse_model = config.sparse_model;
         metadata_entry.space_type_str = config.space_type_str;
         metadata_entry.quant_level = config.quant_level;
         metadata_entry.checksum = config.checksum;
@@ -720,12 +722,13 @@ public:
             throw std::runtime_error("Required files missing for index: " + index_id);
         }
 
-        // Load metadata to get sparse_dim
+        // Load metadata to get sparse_model
         auto metadata = metadata_manager_->getMetadata(index_id);
-        size_t sparse_dim = 0;
-        if(metadata) {
-            sparse_dim = metadata->sparse_dim;
+        if(!metadata) {
+            throw std::runtime_error("Missing or incompatible index metadata for index: "
+                                     + index_id);
         }
+        const ndd::SparseScoringModel sparse_model = metadata->sparse_model;
 
         // Step 1: Load HNSW index (automatically adjusts cache based on element count and cache
         // percentage)
@@ -742,11 +745,12 @@ public:
         auto vector_storage = std::make_shared<VectorStorage>(
                 index_dir, index_id, alg->getDimension(), alg->getQuantLevel());
 
-        // Initialize Sparse Storage if sparse_dim > 0
+        // Initialize Sparse Storage if sparse_model is enabled
         std::unique_ptr<ndd::SparseVectorStorage> sparse_storage;
-        if(sparse_dim > 0) {
+        if(ndd::sparseModelEnabled(sparse_model)) {
             std::string sparse_storage_dir = index_dir + "/sparse";
-            sparse_storage = std::make_unique<ndd::SparseVectorStorage>(sparse_storage_dir, index_id);
+            sparse_storage = std::make_unique<ndd::SparseVectorStorage>(
+                sparse_storage_dir, index_id, sparse_model);
             if(!sparse_storage->initialize()) {
                 throw std::runtime_error("Failed to initialize sparse storage for index: "
                                          + index_id);
@@ -771,7 +775,7 @@ public:
                 indices_.emplace(std::piecewise_construct,
                                  std::forward_as_tuple(index_id),
                                  std::forward_as_tuple(index_id,
-                                                       sparse_dim,
+                                                       sparse_model,
                                                        std::move(alg),
                                                        id_mapper,
                                                        vector_storage,
@@ -907,13 +911,19 @@ public:
             // Handle Sparse Vectors if storage is initialized
             if(entry.sparse_storage) {
                 if constexpr(std::is_same_v<VectorType, ndd::HybridVectorObject>) {
+                    /**
+                     * Forward every hybrid doc, including empty sparse payloads, so the sparse
+                     * storage layer can treat upserts as replacements and clear old sparse state.
+                     */
                     std::vector<std::pair<ndd::idInt, ndd::SparseVector>> sparse_batch;
                     sparse_batch.reserve(vectors.size());
 
                     for(size_t i = 0; i < vectors.size(); ++i) {
                         const auto& vec = vectors[i];
+                        ndd::SparseVector sparse_vec;
                         if(!vec.sparse_ids.empty()) {
-                            // Sort indices and values together
+                            // Sort indices and values together so replacement writes preserve the
+                            // inverted index ordering invariants.
                             std::vector<std::pair<uint32_t, float>> pairs;
                             pairs.reserve(vec.sparse_ids.size());
                             for(size_t k = 0; k < vec.sparse_ids.size(); ++k) {
@@ -923,20 +933,25 @@ public:
                                 return a.first < b.first;
                             });
 
-                            ndd::SparseVector sparse_vec;
                             sparse_vec.indices.reserve(pairs.size());
                             sparse_vec.values.reserve(pairs.size());
                             for(const auto& p : pairs) {
                                 sparse_vec.indices.push_back(p.first);
                                 sparse_vec.values.push_back(p.second);
                             }
-
-                            sparse_batch.emplace_back(numeric_ids[i].first, std::move(sparse_vec));
                         }
+
+                        sparse_batch.emplace_back(numeric_ids[i].first, std::move(sparse_vec));
                     }
 
                     if(!sparse_batch.empty()) {
-                        entry.sparse_storage->store_vectors_batch(sparse_batch);
+                        if(!entry.sparse_storage->store_vectors_batch(sparse_batch)) {
+                            LOG_ERROR(2053,
+                                      index_id,
+                                      "Failed to update sparse storage for batch size "
+                                              << sparse_batch.size());
+                            return false;
+                        }
                     }
                 }
             }
@@ -1329,92 +1344,119 @@ public:
 
     std::optional<std::vector<ndd::VectorResult>>
     searchKNN(const std::string& index_id,
-              const std::vector<float>& query,
-              const std::vector<uint32_t>& sparse_indices,
-              const std::vector<float>& sparse_values,
-              size_t k,
-              const nlohmann::json& filter_array,
-              ndd::FilterParams params = {},
-              bool include_vectors = false,
-              size_t ef = 0) {
+                const std::vector<float>& query,
+                const std::vector<uint32_t>& sparse_indices,
+                const std::vector<float>& sparse_values,
+                size_t k,
+                const nlohmann::json& filter_array,
+                ndd::FilterParams params = {},
+                bool include_vectors = false,
+                size_t ef = 0)
+    {
+        /**
+         * Keep the hybrid weights local for now. The next API step can pass one weight
+         * per ranked list and reuse the same weighted RRF accumulation below.
+         * TODO: to be received from search API.
+         */
+        constexpr float kDenseRrfWeight = 0.5f;
+        constexpr float kSparseRrfWeight = 0.5f;
+        constexpr float kRrfRankConstant = 60.0f;
         try {
             auto& entry = getIndexEntry(index_id);
             entry.searchCount += k;
+
+            const bool run_dense_search = kDenseRrfWeight > 0.0f && !query.empty();
+
+            const bool run_sparse_search =
+                    kSparseRrfWeight > 0.0f && entry.sparse_storage && !sparse_indices.empty();
+
+            // Zero-weight sources cannot influence the final ranking, so skip their retrieval
+            // work entirely.
+            if(!run_dense_search && !run_sparse_search) {
+                return std::vector<ndd::VectorResult>();
+            }
 
             // 0. Compute Filter Bitmap (Shared)
             std::optional<ndd::RoaringBitmap> active_filter_bitmap;
             if (!filter_array.empty()) {
                 active_filter_bitmap = entry.vector_storage->filter_store_->computeFilterBitmap(filter_array);
             }
+            const ndd::RoaringBitmap* filter_ptr =
+                    active_filter_bitmap ? &(*active_filter_bitmap) : nullptr;
 
             // 1. Sparse Search (Async)
             std::future<std::vector<std::pair<ndd::idInt, float>>> sparse_future;
-            if(entry.sparse_storage && !sparse_indices.empty()) {
-                sparse_future = std::async(std::launch::async, [&]() {
+            if(run_sparse_search) {
+                sparse_future = std::async(std::launch::async, [&, filter_ptr]() {
                     ndd::SparseVector sparse_query;
-                    // Sort indices and values together
-                    std::vector<std::pair<uint32_t, float>> pairs;
-                    pairs.reserve(sparse_indices.size());
-                    for(size_t i = 0; i < sparse_indices.size(); ++i) {
-                        pairs.emplace_back(sparse_indices[i], sparse_values[i]);
-                    }
-                    std::sort(pairs.begin(), pairs.end(), [](const auto& a, const auto& b) {
-                        return a.first < b.first;
-                    });
 
-                    sparse_query.indices.reserve(pairs.size());
-                    sparse_query.values.reserve(pairs.size());
-                    for(const auto& p : pairs) {
-                        sparse_query.indices.push_back(p.first);
-                        sparse_query.values.push_back(p.second);
+                    // Reuse the caller's ordering when it is already sorted so we do not copy
+                    // the same sparse payload into an extra temporary representation.
+                    if(std::is_sorted(sparse_indices.begin(), sparse_indices.end())) {
+                        sparse_query.indices = sparse_indices;
+                        sparse_query.values = sparse_values;
+                    } else {
+                        std::vector<std::pair<uint32_t, float>> pairs;
+                        pairs.reserve(sparse_indices.size());
+                        for(size_t i = 0; i < sparse_indices.size(); ++i) {
+                            pairs.emplace_back(sparse_indices[i], sparse_values[i]);
+                        }
+                        std::sort(pairs.begin(), pairs.end(), [](const auto& a, const auto& b) {
+                            return a.first < b.first;
+                        });
+
+                        sparse_query.indices.resize(pairs.size());
+                        sparse_query.values.resize(pairs.size());
+                        for(size_t i = 0; i < pairs.size(); ++i) {
+                            sparse_query.indices[i] = pairs[i].first;
+                            sparse_query.values[i] = pairs[i].second;
+                        }
                     }
 
-                    const ndd::RoaringBitmap* filter_ptr = active_filter_bitmap.has_value() ? &(*active_filter_bitmap) : nullptr;
                     return entry.sparse_storage->search(sparse_query, k, filter_ptr);
                 });
             }
 
             // 2. Dense Search (Main Thread)
             std::vector<std::pair<float, ndd::idInt>> dense_results;
-
-            if(!query.empty()) {
+            if(run_dense_search) {
                 // Convert query to bytes using the wrapper method
                 ndd::quant::QuantizationLevel quant_level = entry.alg->getQuantLevel();
                 auto space = entry.alg->getSpace();
                 std::vector<uint8_t> query_bytes =
                         ndd::quant::get_quantizer_dispatch(quant_level).quantize(query);
 
-                if (!active_filter_bitmap) {
+                if(!filter_ptr) {
                     dense_results = entry.alg->searchKnn(query_bytes.data(), k, ef);
                 } else {
                     // Smart Filter Execution Strategy
-                    auto& bitmap = *active_filter_bitmap;
+                    const auto& bitmap = *filter_ptr;
                     size_t card = bitmap.cardinality();
 
                     if (card == 0) {
                         // No results match filter
                     } else if (card < params.prefilter_threshold) {
                          // Strategy A: Brute Force on Small Subset
-                         std::vector<ndd::idInt> valid_ids;
-                         valid_ids.reserve(card);
-                         bitmap.iterate([](ndd::idInt id, void* ptr){
-                            static_cast<std::vector<ndd::idInt>*>(ptr)->push_back(id);
-                            return true;
-                         }, &valid_ids);
+                        std::vector<ndd::idInt> valid_ids;
+                        valid_ids.reserve(card);
+                        bitmap.iterate([](ndd::idInt id, void* ptr){
+                        static_cast<std::vector<ndd::idInt>*>(ptr)->push_back(id);
+                        return true;
+                        }, &valid_ids);
 
                          // Fetch vectors
-                         auto vector_batch = entry.vector_storage->get_vectors_batch(valid_ids);
-                         
-                         // Prepare subset for bruteforce search
-                         std::vector<std::pair<idInt, std::vector<uint8_t>>> vector_subset;
-                         vector_subset.reserve(vector_batch.size());
-                         for(const auto& [nid, vbytes] : vector_batch) {
-                             vector_subset.emplace_back(nid, vbytes);
-                         }
-                         
-                         dense_results = hnswlib::searchKnnSubset<float>(
-                             query_bytes.data(), vector_subset, k, space);
-                         
+                        auto vector_batch = entry.vector_storage->get_vectors_batch(valid_ids);
+
+                        // Prepare subset for bruteforce search
+                        std::vector<std::pair<idInt, std::vector<uint8_t>>> vector_subset;
+                        vector_subset.reserve(vector_batch.size());
+                        for(auto& [nid, vbytes] : vector_batch) {
+                            vector_subset.emplace_back(nid, std::move(vbytes));
+                        }
+
+                        dense_results = hnswlib::searchKnnSubset<float>(
+                            query_bytes.data(), vector_subset, k, space);
+
                     } else {
                         // Strategy B: Filtered HNSW Search
                         BitMapFilterFunctor functor(bitmap);
@@ -1423,9 +1465,17 @@ public:
                         // Try to use optimized templated search if algorithm matches
                         auto* hnsw_alg = dynamic_cast<hnswlib::HierarchicalNSW<float>*>(entry.alg.get());
                         if (hnsw_alg) {
-                             dense_results = hnsw_alg->searchKnn(query_bytes.data(), k, effective_ef, &functor, params.boost_percentage);
+                            dense_results = hnsw_alg->searchKnn(query_bytes.data(),
+                                                                k,
+                                                                effective_ef,
+                                                                &functor,
+                                                                params.boost_percentage);
                         } else {
-                             dense_results = entry.alg->searchKnn(query_bytes.data(), k, effective_ef, &functor, params.boost_percentage);
+                            dense_results = entry.alg->searchKnn(query_bytes.data(),
+                                                                    k,
+                                                                    effective_ef,
+                                                                    &functor,
+                                                                    params.boost_percentage);
                         }
                     }
                 }
@@ -1437,7 +1487,7 @@ public:
                 sparse_results = sparse_future.get();
             }
 
-            // 3. Combine Results
+            // 4. Combine Results
             std::vector<std::pair<float, ndd::idInt>> final_candidates;
 
             if(dense_results.empty() && sparse_results.empty()) {
@@ -1455,17 +1505,30 @@ public:
                     final_candidates.emplace_back(p.second, p.first);
                 }
             } else {
-                // Hybrid results - RRF
+                // Hybrid results - weighted RRF.
                 std::unordered_map<ndd::idInt, float> combined_scores;
-                const float k_rrf = 60.0f;
+                combined_scores.reserve(dense_results.size() + sparse_results.size());
 
-                for(size_t i = 0; i < dense_results.size(); ++i) {
-                    combined_scores[dense_results[i].second] += 1.0f / (k_rrf + i + 1);
-                }
+                // Reuse the dense and sparse result buffers directly so hybrid fusion does not
+                // build another copied view of the same ranked lists.
+                auto add_weighted_rrf_scores = [&](const auto& ranked_results,
+                                                    float weight,
+                                                    auto extract_id){
+                    if(weight <= 0.0f) {
+                        return;
+                    }
 
-                for(size_t i = 0; i < sparse_results.size(); ++i) {
-                    combined_scores[sparse_results[i].first] += 1.0f / (k_rrf + i + 1);
-                }
+                    for(size_t i = 0; i < ranked_results.size(); ++i) {
+                        const ndd::idInt id = extract_id(ranked_results[i]);
+                        combined_scores[id] +=
+                                weight / (kRrfRankConstant + static_cast<float>(i) + 1.0f);
+                    }
+                };
+
+                add_weighted_rrf_scores(
+                        dense_results, kDenseRrfWeight, [](const auto& result) { return result.second; });
+                add_weighted_rrf_scores(
+                        sparse_results, kSparseRrfWeight, [](const auto& result) { return result.first; });
 
                 final_candidates.reserve(combined_scores.size());
                 for(const auto& [id, score] : combined_scores) {
@@ -1473,8 +1536,8 @@ public:
                 }
 
                 std::sort(final_candidates.begin(),
-                          final_candidates.end(),
-                          [](const auto& a, const auto& b) { return a.first > b.first; });
+                            final_candidates.end(),
+                            [](const auto& a, const auto& b) { return a.first > b.first; });
             }
 
             std::vector<ndd::VectorResult> results;
@@ -1488,7 +1551,7 @@ public:
                 ndd::VectorMeta meta = entry.vector_storage->get_meta(p.second);
 
                 // Apply filter
-                if(active_filter_bitmap && !active_filter_bitmap->contains(p.second)) {
+                if(filter_ptr && !filter_ptr->contains(p.second)) {
                     continue;
                 }
 
@@ -1507,7 +1570,7 @@ public:
                         std::vector<float> float_data =
                                 ndd::quant::get_quantizer_dispatch(quant_level)
                                         .dequantize(vec_bytes.data(), entry.alg->getDimension());
-                        result.vector = {float_data.begin(), float_data.end()};
+                        result.vector = std::move(float_data);
                     }
                 }
 
@@ -1517,106 +1580,6 @@ public:
                 // Early exit when we have enough results
                 if(filtered_count >= k) {
                     break;
-                }
-            }
-
-            // Fallback logic removed
-            if(false) {
-                size_t filter_cardinality =
-                        entry.vector_storage->filter_store_->countIdsMatchingFilter(filter_array);
-                LOG_DEBUG("Post-filter gave poor results ("
-                          << filtered_count << "/" << k
-                          << "), checking pre-filter option. Cardinality: " << filter_cardinality);
-
-                if(filter_cardinality < params.prefilter_threshold) {
-                    LOG_DEBUG("Using pre-filter approach due to poor post-filter results");
-
-                    // Pre-filter: Get filtered IDs and do bruteforce search
-                    auto filtered_ids =
-                            entry.vector_storage->filter_store_->getIdsMatchingFilter(filter_array);
-                    LOG_DEBUG("Pre-filter: got " << filtered_ids.size() << " filtered IDs");
-
-                    if(!filtered_ids.empty()) {
-                        // Convert size_t to size_t for batch retrieval
-                        std::vector<ndd::idInt> numeric_ids(filtered_ids.begin(),
-                                                            filtered_ids.end());
-
-                        // Get vectors for filtered IDs
-                        auto vector_batch = entry.vector_storage->get_vectors_batch(numeric_ids);
-                        LOG_DEBUG("Pre-filter: retrieved " << vector_batch.size() << " vectors");
-
-                        // Prepare subset for bruteforce search
-                        std::vector<std::pair<idInt, std::vector<uint8_t>>> vector_subset;
-                        vector_subset.reserve(vector_batch.size());
-
-                        for(const auto& [numeric_id, vec_bytes] : vector_batch) {
-                            vector_subset.emplace_back(static_cast<idInt>(numeric_id), vec_bytes);
-                        }
-
-                        // Perform bruteforce search on subset using HNSW's space interface
-                        ndd::quant::QuantizationLevel quant_level = entry.alg->getQuantLevel();
-                        auto space = entry.alg->getSpace();
-                        std::vector<uint8_t> query_bytes =
-                                ndd::quant::get_quantizer_dispatch(quant_level).quantize(query);
-                        auto prefilter_results = hnswlib::searchKnnSubset<float>(
-                                query_bytes.data(), vector_subset, k, space);
-
-                        LOG_DEBUG("Pre-filter: bruteforce search returned "
-                                  << prefilter_results.size() << " results");
-
-                        // Convert results to VectorResult format
-                        std::vector<ndd::VectorResult> prefilter_final_results;
-                        prefilter_final_results.reserve(prefilter_results.size());
-
-                        for(const auto& [distance, label] : prefilter_results) {
-                            ndd::idInt numeric_id = static_cast<ndd::idInt>(label);
-                            ndd::VectorMeta meta = entry.vector_storage->get_meta(numeric_id);
-
-                            ndd::VectorResult result;
-                            result.id = meta.id;
-                            result.filter = meta.filter;
-                            result.meta = meta.meta;
-
-                            if(entry.alg->getSpaceType() == hnswlib::COSINE_SPACE
-                               || entry.alg->getSpaceType() == hnswlib::IP_SPACE) {
-                                result.similarity = 1.0f - distance;
-                            } else {
-                                result.similarity = distance;
-                            }
-
-                            result.norm = meta.norm;
-
-                            if(include_vectors) {
-                                // Find the vector bytes from our batch
-                                auto it = std::find_if(vector_batch.begin(),
-                                                       vector_batch.end(),
-                                                       [numeric_id](const auto& pair) {
-                                                           return pair.first == numeric_id;
-                                                       });
-
-                                if(it != vector_batch.end()) {
-                                    const auto& vec_bytes = it->second;
-
-                                    ndd::quant::QuantizationLevel quant_level =
-                                            entry.alg->getQuantLevel();
-                                    std::vector<float> float_data =
-                                            ndd::quant::get_quantizer_dispatch(quant_level)
-                                                    .dequantize(vec_bytes.data(),
-                                                                entry.alg->getDimension());
-                                    result.vector = {float_data.begin(), float_data.end()};
-                                }
-                            }
-
-                            prefilter_final_results.push_back(std::move(result));
-                        }
-
-                        return prefilter_final_results;
-                    }
-                } else {
-                    LOG_DEBUG("Filter cardinality too high for pre-filtering ("
-                              << filter_cardinality
-                              << " >= " << params.prefilter_threshold
-                              << "), returning post-filter results");
                 }
             }
 
@@ -1685,7 +1648,7 @@ public:
         auto& entry = getIndexEntry(index_id);
         IndexInfo indx = {entry.alg->getElementsCount(),
                           entry.alg->getDimension(),
-                          entry.sparse_dim,
+                          entry.sparse_model,
                           entry.alg->getSpaceTypeStr(),
                           entry.alg->getQuantLevel(),
                           entry.alg->getChecksum(),
@@ -1834,7 +1797,8 @@ inline void IndexManager::executeBackupJob(const std::string& index_id, const st
             metadata_json["params"] = {{"M", meta->M},
                            {"ef_construction", meta->ef_con},
                            {"dim", meta->dimension},
-                           {"sparse_dim", meta->sparse_dim},
+                           {"sparse_model",
+                            ndd::sparseScoringModelToString(meta->sparse_model)},
                            {"space_type", meta->space_type_str},
                            {"quant_level", static_cast<int>(meta->quant_level)},
                            {"total_elements", meta->total_elements},
@@ -1984,12 +1948,14 @@ inline std::pair<bool, std::string> IndexManager::restoreBackup(const std::strin
         IndexMetadata new_meta;
         new_meta.name = target_index_name;
         new_meta.dimension = meta_json["params"]["dim"];
-        new_meta.sparse_dim = meta_json["params"].value("sparse_dim", 0ul);
         new_meta.M = meta_json["params"]["M"];
         new_meta.ef_con = meta_json["params"]["ef_construction"];
         new_meta.space_type_str = meta_json["params"]["space_type"];
         new_meta.quant_level = static_cast<ndd::quant::QuantizationLevel>(
                 meta_json["params"]["quant_level"].get<int>());
+        const auto sparse_model = ndd::sparseScoringModelFromString(
+                meta_json["params"]["sparse_model"].get<std::string>());
+        new_meta.sparse_model = *sparse_model;
         new_meta.created_at = std::chrono::system_clock::now();
         new_meta.total_elements = meta_json["params"].value("total_elements", 0ul);
         new_meta.checksum = meta_json["params"].value("checksum", -1);

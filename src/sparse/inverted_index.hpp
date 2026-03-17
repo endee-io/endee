@@ -80,7 +80,11 @@ namespace ndd {
     // and write the block back.
     class InvertedIndex {
     public:
-        InvertedIndex(MDBX_env* env, size_t vocab_size, const std::string& index_id);
+        InvertedIndex(MDBX_env* env,
+                      size_t vocab_size,
+                      const std::string& index_id,
+                      ndd::SparseScoringModel sparse_model =
+                          ndd::SparseScoringModel::DEFAULT);
         ~InvertedIndex() = default;
 
         bool initialize();
@@ -97,6 +101,11 @@ namespace ndd {
                                                         size_t k,
                                                         const ndd::RoaringBitmap* filter = nullptr);
 
+        std::vector<std::pair<ndd::idInt, float>>search(const SparseVector& query,
+                                                        size_t k,
+                                                        size_t total_nr_docs,
+                                                        const ndd::RoaringBitmap* filter = nullptr);
+
     private:
         friend class InvertedIndexTestPeer;
 
@@ -104,6 +113,7 @@ namespace ndd {
         MDBX_dbi blocked_term_postings_dbi_;
         size_t vocab_size_;
         std::string index_id_;
+        ndd::SparseScoringModel sparse_model_;
 
         // Cached per-term max values loaded from posting-list metadata. Search uses this
         // to skip absent terms quickly and to compute pruning bounds.
@@ -318,6 +328,8 @@ namespace ndd {
         static void applyHeaderDelta(PostingListHeader& header,
                                      int64_t total_delta,
                                      int64_t live_delta);
+
+        static float get_IDF(size_t total_nr_docs, size_t nr_live_docs_with_term);
 
         bool loadTermInfo();
 

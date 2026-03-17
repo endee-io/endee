@@ -184,7 +184,7 @@ public:
 
         *stored_id = internal_id;
         memcpy(entry + sizeof(idInt), data, data_size_);
-        slotLife_[index].store(1, std::memory_order_relaxed);
+        slotLife_[index].store(SLOT_LIFE_COLD, std::memory_order_relaxed);
     }
 
     // Atomically invalidate the slot for a given id, forcing a fetch on the next read.

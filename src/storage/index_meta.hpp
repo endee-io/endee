@@ -10,13 +10,14 @@
 #include <unordered_map>
 #include "log.hpp"
 #include "settings.hpp"
+#include "../core/types.hpp"
 #include "mdbx/mdbx.h"
 #include "quant/common.hpp"
 
 struct IndexMetadata {
     std::string name;  // Just the index name, not the full path
     size_t dimension;
-    size_t sparse_dim = 0;  // Added sparse dimension
+    ndd::SparseScoringModel sparse_model = ndd::SparseScoringModel::NONE;
     std::string space_type_str;
     ndd::quant::QuantizationLevel quant_level =
             ndd::quant::QuantizationLevel::INT8;  // Selected quantization level
@@ -29,7 +30,7 @@ struct IndexMetadata {
     nlohmann::json to_json() const {
         return {{"name", name},
                 {"dimension", dimension},
-                {"sparse_dim", sparse_dim},
+                {"sparse_model", ndd::sparseScoringModelToString(sparse_model)},
                 {"space_type_str", space_type_str},
                 {"quant_level", static_cast<uint8_t>(quant_level)},
                 {"checksum", checksum},
@@ -43,11 +44,17 @@ struct IndexMetadata {
         IndexMetadata meta;
         meta.name = j["name"].get<std::string>();
         meta.dimension = j["dimension"].get<size_t>();
-        if(j.contains("sparse_dim")) {
-            meta.sparse_dim = j["sparse_dim"].get<size_t>();
-        } else {
-            meta.sparse_dim = 0;
+        if(!j.contains("sparse_model")) {
+            throw std::runtime_error(
+                    "Incompatible index metadata: missing sparse_model. Recreate the index.");
         }
+        const auto sparse_model =
+                ndd::sparseScoringModelFromString(j["sparse_model"].get<std::string>());
+        if(!sparse_model.has_value()) {
+            throw std::runtime_error(
+                    "Incompatible index metadata: invalid sparse_model. Recreate the index.");
+        }
+        meta.sparse_model = *sparse_model;
         meta.space_type_str = j["space_type_str"].get<std::string>();
         meta.quant_level =
                 static_cast<ndd::quant::QuantizationLevel>(j["quant_level"].get<uint8_t>());

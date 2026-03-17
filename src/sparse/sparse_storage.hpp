@@ -1,7 +1,10 @@
 #pragma once
 
+#include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
+#include <atomic>
 #include <memory>
 #include <optional>
 #include <shared_mutex>
@@ -17,9 +20,13 @@ namespace ndd {
     // inverted index in the same MDBX environment and updates them transactionally.
     class SparseVectorStorage {
     public:
-        SparseVectorStorage(const std::string& db_path, const std::string& index_id) :
+        SparseVectorStorage(const std::string& db_path,
+                            const std::string& index_id,
+                            ndd::SparseScoringModel sparse_model =
+                                ndd::SparseScoringModel::DEFAULT) :
             db_path_(db_path),
             index_id_(index_id),
+            sparse_model_(sparse_model),
             env_(nullptr) {
             sparse_index_ = nullptr;
         }
@@ -32,7 +39,8 @@ namespace ndd {
                 return false;
             }
 
-            sparse_index_ = std::make_unique<InvertedIndex>(env_, 0, index_id_);
+            sparse_index_ =
+                std::make_unique<InvertedIndex>(env_, 0, index_id_, sparse_model_);
             if(!sparse_index_->initialize()) {
                 return false;
             }
@@ -50,7 +58,8 @@ namespace ndd {
             Transaction(SparseVectorStorage* storage, bool read_only = false) :
                 storage_(storage),
                 read_only_(read_only),
-                committed_(false) {
+                committed_(false),
+                vector_count_delta_(0) {
                 int flags = read_only ? MDBX_TXN_RDONLY : MDBX_TXN_READWRITE;
                 int rc = mdbx_txn_begin(
                         storage_->env_, nullptr, static_cast<MDBX_txn_flags_t>(flags), &txn_);
@@ -72,6 +81,7 @@ namespace ndd {
                 }
                 int rc = mdbx_txn_commit(txn_);
                 if(rc == 0) {
+                    storage_->applyVectorCountDelta(vector_count_delta_);
                     committed_ = true;
                     return true;
                 }
@@ -87,25 +97,43 @@ namespace ndd {
 
             MDBX_txn* getTxn() { return txn_; }
 
+            /**
+             * Replace one document's sparse state inside the current transaction.
+             * Used by single-doc writes and batch upserts so missing terms are removed from the
+             * inverted index and empty vectors clear sparse state instead of leaving stale postings.
+             */
             bool store_vector(ndd::idInt doc_id, const SparseVector& vec) {
                 if(read_only_) {
                     return false;
                 }
 
-                // Always write the source-of-truth document payload first, then update the
-                // derived inverted index in the same transaction.
-                if(!storage_->storeVectorInternal(txn_, doc_id, vec)) {
+                const auto existing_vec = storage_->getVectorInternal(txn_, doc_id);
+                const bool had_sparse_terms = existing_vec.has_value() && !existing_vec->empty();
+                const bool has_sparse_terms = !vec.empty();
+
+                // Sparse upserts must behave as replacements: remove the old postings first,
+                // then write and index the new vector if it still has sparse terms.
+                if(had_sparse_terms
+                   && !storage_->sparse_index_->removeDocument(txn_, doc_id, *existing_vec)) {
                     return false;
                 }
 
-                if(!storage_->sparse_index_->addDocumentsBatch(txn_, {{doc_id, vec}})) {
+                if(existing_vec.has_value() && !storage_->deleteVectorInternal(txn_, doc_id)) {
                     return false;
                 }
 
-                // 3. Save Metadata (Handled internally by InvertedIndex per term)
-                // if (!storage_->sparse_index_->saveMetadata(txn_)) return false;
+                if(has_sparse_terms) {
+                    if(!storage_->storeVectorInternal(txn_, doc_id, vec)) {
+                        return false;
+                    }
 
-                storage_->vector_count_++;
+                    if(!storage_->sparse_index_->addDocumentsBatch(txn_, {{doc_id, vec}})) {
+                        return false;
+                    }
+                }
+
+                vector_count_delta_ += static_cast<int64_t>(has_sparse_terms)
+                                     - static_cast<int64_t>(had_sparse_terms);
                 return true;
             }
 
@@ -114,6 +142,12 @@ namespace ndd {
             }
 
 
+            /**
+             * Remove one document's sparse state from both the inverted index and the raw sparse
+             * doc table inside the current transaction.
+             * Used for explicit deletes and when an upsert transitions a document to an empty
+             * sparse vector.
+             */
             bool delete_vector(ndd::idInt doc_id) {
                 if(read_only_) {
                     return false;
@@ -127,7 +161,9 @@ namespace ndd {
                     return false;
                 }
 
-                if(!storage_->sparse_index_->removeDocument(txn_, doc_id, *vec)) {
+                const bool had_sparse_terms = !vec->empty();
+                if(had_sparse_terms
+                   && !storage_->sparse_index_->removeDocument(txn_, doc_id, *vec)) {
                     return false;
                 }
 
@@ -135,10 +171,9 @@ namespace ndd {
                     return false;
                 }
 
-                // 4. Save Metadata (Handled internally)
-                // if (!storage_->sparse_index_->saveMetadata(txn_)) return false;
-
-                storage_->vector_count_--;
+                if(had_sparse_terms) {
+                    vector_count_delta_--;
+                }
                 return true;
             }
 
@@ -147,6 +182,7 @@ namespace ndd {
             MDBX_txn* txn_;
             bool committed_;
             bool read_only_;
+            int64_t vector_count_delta_;
         };
 
         std::unique_ptr<Transaction> begin_transaction(bool read_only = false) {
@@ -164,39 +200,26 @@ namespace ndd {
             return txn->commit();
         }
 
-        // Batch operations
+        /**
+         * Apply a batch of sparse upserts as document replacements inside one MDBX transaction.
+         * The hybrid ingest path uses this so repeated IDs do not accumulate stale postings or
+         * overcount the sparse-doc total used as N for server-side IDF.
+         */
         bool store_vectors_batch(const std::vector<std::pair<ndd::idInt, SparseVector>>& batch) {
             std::unique_lock<std::shared_mutex> lock(mutex_);
             auto txn = begin_transaction(false);
 
             for(const auto& [doc_id, sparse_vec] : batch) {
-                if(!storeVectorInternal(txn->getTxn(), doc_id, sparse_vec)) {
-                    LOG_ERROR(2243, index_id_, "store_vectors_batch failed to store doc_id=" << doc_id);
+                if(!txn->store_vector(doc_id, sparse_vec)) {
+                    LOG_ERROR(2243,
+                              index_id_,
+                              "store_vectors_batch failed to replace doc_id=" << doc_id);
                     txn->abort();
                     return false;
                 }
             }
 
-            if(!sparse_index_->addDocumentsBatch(txn->getTxn(), batch)) {
-                LOG_ERROR(2244,
-                          index_id_,
-                          "store_vectors_batch failed to update the inverted index for batch size "
-                                  << batch.size());
-                txn->abort();
-                return false;
-            }
-
-            // Metadata handled internally
-            // if (!sparse_index_->saveMetadata(txn->getTxn())) {
-            //    txn->abort();
-            //    return false;
-            // }
-
-            if(txn->commit()) {
-                vector_count_ += batch.size();
-                return true;
-            }
-            return false;
+            return txn->commit();
         }
 
         /*NOT BEING USED FOR NOW*/
@@ -218,7 +241,8 @@ namespace ndd {
                                                         size_t k,
                                                         const ndd::RoaringBitmap* filter = nullptr)
         {
-            return sparse_index_->search(query, k, filter);
+            return sparse_index_->search(
+                query, k, vector_count_.load(std::memory_order_relaxed), filter);
         }
 
         // Statistics
@@ -228,6 +252,7 @@ namespace ndd {
     private:
         std::string db_path_;
         std::string index_id_;
+        ndd::SparseScoringModel sparse_model_;
         MDBX_env* env_;
         MDBX_dbi docs_dbi_;
 
@@ -350,15 +375,61 @@ namespace ndd {
             return rc == 0;
         }
 
+        /**
+         * Apply the committed sparse-doc delta to the in-memory count used as N for server-side
+         * IDF. Transaction code accumulates this delta first and only flushes it after commit.
+         */
+        void applyVectorCountDelta(int64_t delta) {
+            if(delta > 0) {
+                vector_count_.fetch_add(static_cast<size_t>(delta), std::memory_order_relaxed);
+            } else if(delta < 0) {
+                vector_count_.fetch_sub(static_cast<size_t>(-delta), std::memory_order_relaxed);
+            }
+        }
+
+        /**
+         * Peek at the packed sparse row to see whether it contains any terms.
+         * Used during startup recounts so only non-empty sparse docs contribute to the
+         * server-side IDF corpus.
+         */
+        static bool packedSparseVectorHasTerms(const MDBX_val& data) {
+            if(data.iov_len < sizeof(uint16_t)) {
+                return false;
+            }
+
+            uint16_t nr_nonzero = 0;
+            std::memcpy(&nr_nonzero, data.iov_base, sizeof(uint16_t));
+            return nr_nonzero > 0;
+        }
+
+        /**
+         * Rebuild the sparse-doc count from disk on startup/reload.
+         * Keeps vector_count_ aligned with persisted state and intentionally ignores empty
+         * sparse rows.
+         */
         void updateVectorCount() {
             MDBX_txn* txn;
-            if(mdbx_txn_begin(env_, nullptr, MDBX_TXN_RDONLY, &txn) == 0) {
-                MDBX_stat stat;
-                if(mdbx_dbi_stat(txn, docs_dbi_, &stat, sizeof(stat)) == 0) {
-                    vector_count_ = stat.ms_entries;
-                }
-                mdbx_txn_abort(txn);
+            if(mdbx_txn_begin(env_, nullptr, MDBX_TXN_RDONLY, &txn) != 0) {
+                return;
             }
+
+            size_t live_sparse_docs = 0;
+            MDBX_cursor* cursor = nullptr;
+            if(mdbx_cursor_open(txn, docs_dbi_, &cursor) == 0) {
+                MDBX_val key{};
+                MDBX_val data{};
+                int rc = mdbx_cursor_get(cursor, &key, &data, MDBX_FIRST);
+                while(rc == MDBX_SUCCESS) {
+                    if(packedSparseVectorHasTerms(data)) {
+                        live_sparse_docs++;
+                    }
+                    rc = mdbx_cursor_get(cursor, &key, &data, MDBX_NEXT);
+                }
+                mdbx_cursor_close(cursor);
+            }
+
+            vector_count_.store(live_sparse_docs, std::memory_order_relaxed);
+            mdbx_txn_abort(txn);
         }
     };
 

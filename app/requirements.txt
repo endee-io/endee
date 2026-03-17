@@ -12,3 +12,4 @@ endee>=0.1.0
 requests>=2.31.0
 streamlit>=1.32.0
 python-multipart>=0.0.9
+tavily-python>=0.3.8

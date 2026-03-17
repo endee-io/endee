@@ -1,21 +1,8 @@
-cat <<EOL > .gitignore
-# Python
+﻿.env
+.env.local
+!.env.example
+.venv/
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
-
-# Virtual environment
-.venv/
-venv/
-
-# IDE
-.vscode/
-.idea/
-
-# OS
-.DS_Store
-
-# Logs
 *.log
-EOL
+.cache/

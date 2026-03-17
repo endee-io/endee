@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python
+#!/usr/bin/env python
 import os
 from typing import List, Optional
 
@@ -9,6 +9,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_google_genai import ChatGoogleGenerativeAI
 from sentence_transformers import SentenceTransformer, CrossEncoder
 from starlette.responses import JSONResponse
+from tavily import TavilyClient
 
 from endee import Endee, Precision
 from endee.schema import VectorItem as EndeeVectorItem
@@ -31,7 +32,9 @@ CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "800"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "120"))
 TOP_K = int(os.getenv("TOP_K", "6"))
 
-app = FastAPI(title="RAG Agentic Backend", version="0.1.0")
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+
+app = FastAPI(title="RAG Agentic Backend", version="0.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -67,10 +70,11 @@ reranker: Optional[CrossEncoder] = None
 llm: Optional[ChatGoogleGenerativeAI] = None
 endee_client: Optional[Endee] = None
 endee_index = None
+tavily_client: Optional[TavilyClient] = None
 
 
 def bootstrap():
-    global embedder, reranker, llm, endee_client, endee_index
+    global embedder, reranker, llm, endee_client, endee_index, tavily_client
     if GEMINI_API_KEY is None:
         raise RuntimeError("GEMINI_API_KEY is required")
 
@@ -84,6 +88,9 @@ def bootstrap():
     endee_client = get_endee_client()
     ensure_index(endee_client, embedder.get_sentence_embedding_dimension())
     endee_index = endee_client.get_index(name=ENDEE_INDEX_NAME)
+
+    if TAVILY_API_KEY:
+        tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
 
 
 bootstrap()
@@ -174,14 +181,35 @@ def retrieve(query: str):
         key=lambda x: x["rerank_score"],
         reverse=True,
     )
-    return reranked
+    return reranked[:4]
+
+
+def web_search(query: str):
+    if not tavily_client:
+        raise HTTPException(status_code=500, detail="TAVILY_API_KEY not configured")
+    res = tavily_client.search(query=query, max_results=5, include_images=False)
+    docs = []
+    for item in res.get("results", []):
+        docs.append(
+            {
+                "id": item.get("url"),
+                "meta": {
+                    "source": item.get("url"),
+                    "text": item.get("content", ""),
+                    "title": item.get("title", "")
+                },
+                "score": item.get("score"),
+            }
+        )
+    return docs
 
 
 def build_context(docs: List[dict]) -> str:
     parts = []
     for doc in docs:
         meta = doc.get("meta", {})
-        parts.append(f"[{meta.get('source')}] {meta.get('text', '')}")
+        src = meta.get("title") or meta.get("source")
+        parts.append(f"[{src}] {meta.get('text', '')}")
     return "\n\n".join(parts)
 
 
@@ -194,7 +222,28 @@ def build_history(history: List[dict]) -> str:
     return "\n\n".join(lines)
 
 
-def answer(question: str, context_docs: List[dict], history: List[dict]) -> dict:
+def route_query(question: str, force_mode: str = "auto") -> str:
+    if force_mode in {"rag", "web", "direct"}:
+        return force_mode
+    # lightweight classification with the main LLM
+    prompt = (
+        "Decide routing for the question. Output only one token: RAG, WEB, or DIRECT.\n"
+        "Use RAG if it likely needs internal docs; WEB if it's about current/general external info; otherwise DIRECT.\n"
+        f"Question: {question}\nAnswer:"
+    )
+    try:
+        resp = llm.invoke(prompt)
+        text = resp.content.strip().upper()
+        if "WEB" in text:
+            return "web"
+        if "RAG" in text:
+            return "rag"
+        return "direct"
+    except Exception:
+        return "direct"
+
+
+def answer(question: str, context_docs: List[dict], history: List[dict], mode: str) -> dict:
     if context_docs:
         context_text = build_context(context_docs)
         prompt = (
@@ -218,12 +267,13 @@ def answer(question: str, context_docs: List[dict], history: List[dict]) -> dict
             {
                 "id": doc.get("id"),
                 "source": doc.get("meta", {}).get("source"),
-                "score": doc.get("rerank_score", doc.get("similarity")),
+                "title": doc.get("meta", {}).get("title"),
+                "score": doc.get("rerank_score", doc.get("similarity", doc.get("score"))),
                 "preview": doc.get("meta", {}).get("text", "")[:200],
             }
             for doc in context_docs
         ],
-        "mode": "rag" if context_docs else "direct",
+        "mode": mode,
     }
 
 
@@ -248,11 +298,19 @@ async def upload(file: UploadFile = File(...)):
 @app.post("/chat")
 async def chat(payload: dict):
     question = payload.get("message") or ""
-    use_rag = payload.get("use_rag", True)
+    force_mode = (payload.get("mode") or "auto").lower()
     history = payload.get("history") or []
     if not question:
         raise HTTPException(status_code=400, detail="message is required")
 
-    docs = retrieve(question) if use_rag else []
-    result = answer(question, docs, history)
+    route = route_query(question, force_mode=force_mode)
+
+    if route == "rag":
+        docs = retrieve(question)
+    elif route == "web":
+        docs = web_search(question)
+    else:
+        docs = []
+
+    result = answer(question, docs, history, mode=route)
     return JSONResponse(result)

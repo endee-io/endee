@@ -1,0 +1,14 @@
+﻿fastapi>=0.110.0
+uvicorn[standard]>=0.27.1
+python-dotenv>=1.0.1
+langchain>=0.1.16
+langchain-community>=0.0.34
+langchain-google-genai>=0.0.12
+langchain-text-splitters>=0.0.1
+sentence-transformers>=2.5.1
+pypdf>=4.2.0
+docx2txt>=0.8
+endee>=0.1.0
+requests>=2.31.0
+streamlit>=1.32.0
+python-multipart>=0.0.9

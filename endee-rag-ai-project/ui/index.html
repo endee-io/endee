@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Workspace - RAG & Recommendations</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Outfit:wght@400;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/ui/style.css">
+</head>
+<body>
+    <div class="app-container">
+        
+        <!-- Sidebar Navigation -->
+        <aside class="sidebar">
+            <div class="logo">
+                <h2>✨ AI<span>Workspace</span></h2>
+            </div>
+            
+            <div class="menu">
+                <h3>KNOWLEDGE BASE</h3>
+                
+                <div class="upload-section glass-panel">
+                    <p>Upload a PDF to context</p>
+                    <input type="file" id="pdf-upload" accept=".pdf" />
+                    <button id="upload-btn" class="btn primary">Upload Document</button>
+                    <div id="upload-status"></div>
+                </div>
+
+                <div class="recommend-section glass-panel mt-4">
+                    <p>Demo Store</p>
+                    <button id="seed-btn" class="btn secondary">Seed Catalog</button>
+                    <div id="seed-status"></div>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Chat Area -->
+        <main class="chat-area">
+            <header class="chat-header">
+                <div>
+                    <h1>Intelligent Assistant</h1>
+                    <p>Try asking questions about your uploaded documents, or ask for product recommendations!</p>
+                </div>
+            </header>
+
+            <div class="messages-container" id="chat-box">
+                <!-- Chat messages will be dynamically injected here -->
+                <div class="message ai-message">
+                    <div class="avatar">AI</div>
+                    <div class="content">Hello! I am your AI assistant powered by Gemini. Upload a PDF and ask me questions about it (RAG), or ask me for a product recommendation!</div>
+                </div>
+            </div>
+
+            <div class="input-area">
+                <form id="chat-form" class="chat-form glass-panel">
+                    <input type="text" id="user-input" placeholder="Ask a question or request a recommendation..." autocomplete="off">
+                    <button type="submit" class="btn send-btn">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
+                    </button>
+                </form>
+            </div>
+        </main>
+    </div>
+
+    <!-- Marked JS for parsing markdown to HTML in the chat -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="/ui/app.js"></script>
+</body>
+</html>

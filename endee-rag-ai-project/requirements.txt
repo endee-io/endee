@@ -1,0 +1,4 @@
+sentence-transformers
+fastapi
+uvicorn
+numpy

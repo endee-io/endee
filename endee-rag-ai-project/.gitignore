@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Project specifics
+chroma_data/
+*.log
+*.pdf
+Vector_store.json
+
+# IDE
+.vscode/

@@ -10,7 +10,7 @@
 #include "log.hpp"
 #include "settings.hpp"
 
-// Enterprise mode: use extended auth system
+// Serverless mode: use extended auth system
 #ifdef NDD_SERVERLESS
     #include "../../serverless/auth_serverless.hpp"
 #else

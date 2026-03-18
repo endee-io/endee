@@ -196,17 +196,6 @@ distro_factory() {
 }
 # ****************************************
 
-add_frontend() {
-    VERSION="v1.2.0"
-    log "Pulling frontend version ${VERSION}"
-    mkdir -p $script_dir/frontend
-    cd $script_dir/frontend
-    curl -fL -o react-dist.zip https://github.com/EndeeLabs/endee-web-ui/releases/download/${VERSION}/dist.zip
-    unzip -o react-dist.zip
-    rm react-dist.zip
-    log "Frontend version ${VERSION} added"
-}
-
 # ****************************************
 # Configure & build (cmake + make)
 # ****************************************
@@ -255,7 +244,7 @@ build_project() {
     esac
 
     # --- Apply Serverless Flag ---
-    if [[ "$ENTERPRISE" == "ON" ]]; then
+    if [[ "$SERVERLESS" == "ON" ]]; then
         log "Serverless: ON"
         cmake_args+=("-DNDD_SERVERLESS=ON")
     fi
@@ -315,7 +304,7 @@ CPU Optimization Options (Select one):
   --sve2          Add -DUSE_SVE2=ON
 
 General Options:
-  --enterprise    Add -DNDD_SERVERLESS=ON
+  --serverless    Add -DNDD_SERVERLESS=ON
   --skip-deps     Skip the dependency installation step
   --help, -h      Show this help message and exit
 
@@ -369,8 +358,8 @@ parse_args() {
                 ;;
 
             # --- General ---
-            --enterprise)
-                ENTERPRISE="ON"
+            --serverless)
+                SERVERLESS="ON"
                 shift
                 ;;
             --skip-deps)
@@ -416,9 +405,6 @@ main() {
     fi
 
     build_project
-
-    add_frontend
-
 
     log ""
     log "Build and installation successful!"

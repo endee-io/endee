@@ -2,8 +2,8 @@
 #include "auth_serverless.hpp"
 #include "../third_party/crow/include/crow.h"
 
-// Enterprise Auth Middleware
-// This middleware authenticates all requests using the enterprise AuthManager
+// Serverless Auth Middleware
+// This middleware authenticates all requests using the serverless AuthManager
 // and provides context with username and user_type for downstream handlers
 struct ServerlessAuthMiddleware : crow::ILocalMiddleware {
     AuthManager& auth_manager;

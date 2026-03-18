@@ -12,7 +12,7 @@ inline crow::response admin_json_error(int code, const std::string& message) {
     return crow::response(code, err_json.dump());
 }
 
-// Register all 18 admin endpoints for enterprise mode
+// Register all 18 admin endpoints for serverless mode
 // Template allows working with any Crow app type
 template <typename App>
 void registerAdminRoutes(App& app,

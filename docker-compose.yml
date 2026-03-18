@@ -1,9 +1,9 @@
 services:
-  endee-enterprise:
-    image: endee-enterprise:latest
-    container_name: endee-enterprise
+  endee-serverless:
+    image: endee-serverless:latest
+    container_name: endee-serverless
     ports:
-      - "8080:8080"
+      - "${APP_PORT:-8080}:${NDD_SERVER_PORT:-8080}"
     ulimits:
       nofile: 100000
 # ----------------------------------------------------
@@ -11,25 +11,56 @@ services:
     logging:
       driver: "json-file" # Explicitly use the default driver
       options:
-        # Set the max size of a single log file to 200 megabytes
+        # Set the max size of a single log file
         # Docker rotates the log file when it hits this limit
-        max-size: "200m"
+        max-size: "${LOG_MAX_SIZE:-200m}"
         # Set the maximum number of log files to keep
+        # Total log space = max-size * max-file
         # (200m * 5 files = 1000m or 1 GB total log space)
-        max-file: "5"
+        max-file: "${LOG_MAX_FILE:-5}"
 # ----------------------------------------------------
     environment:
-      NDD_NUM_THREADS: 0
-      NDD_AUTH_TOKEN: "your_secure_token" # Required: set your auth token
+      # --- Server Identity ---
+      NDD_SERVER_ID: "${NDD_SERVER_ID:-dev}"
+      NDD_SERVER_PORT: ${NDD_SERVER_PORT:-8080}
+      NDD_SERVER_TYPE: "${NDD_SERVER_TYPE:-DEV}"            # Options: OSS, ON-PREM, SERVERLESS, DEV
+
+      # --- Storage ---
+      NDD_DATA_DIR: "${NDD_DATA_DIR:-/data}"
+
+      # --- Cache ---
+      NDD_VECTOR_CACHE_PERCENTAGE: ${NDD_VECTOR_CACHE_PERCENTAGE:-15}
+      NDD_VECTOR_CACHE_MIN_BITS: ${NDD_VECTOR_CACHE_MIN_BITS:-17}
+
+      # --- Parallelism ---
+      NDD_NUM_PARALLEL_INSERTS: ${NDD_NUM_PARALLEL_INSERTS:-4}
+      NDD_NUM_RECOVERY_THREADS: ${NDD_NUM_RECOVERY_THREADS:-16}
+
+      # --- Debugging ---
+      NDD_DEBUG_LOG: "${NDD_DEBUG_LOG:-true}"             # Accepts: "true", "1", "false", "0"
+
+      # --- Authentication ---
+      NDD_AUTH_TOKEN: "${NDD_AUTH_TOKEN}"                # Required in serverless mode; optional in OSS
+
+      # --- Usage API ---
+      NDD_USAGE_STATS_URL: "${NDD_USAGE_STATS_URL:-https://dapp.endee.io/users/api/v1/query-count/}" # Usage stats endpoint (serverless only)
+       
     volumes:
       - nd-data:/data
+    networks:
+      - endee
     restart: unless-stopped
 
 volumes:
   # Modify the 'device' path below to change the host directory used for data persistence
+  # Or set VOLUME_HOST_PATH in your .env file
   nd-data:
     driver: local
     driver_opts:
       type: ext4
       o: bind
-      device: /home/debian/mnt
+      device: ${VOLUME_HOST_PATH:-/home/debian/mnt}
+
+networks:
+  endee:
+    driver: bridge

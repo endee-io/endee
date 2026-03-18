@@ -53,7 +53,7 @@ using ndd::quant::stringToQuantLevel;
 // Note: No longer needed since VNNI INT16 is part of standard AVX512-VNNI
 
 #ifdef NDD_SERVERLESS
-// Enterprise mode: use ServerlessAuthMiddleware
+// Serverless mode: use ServerlessAuthMiddleware
 using AuthMiddleware = ServerlessAuthMiddleware;
 #else
 
@@ -249,9 +249,9 @@ int main(int argc, char** argv) {
     }    
 
 #ifdef NDD_SERVERLESS
-    // Enterprise mode: NDD_AUTH_TOKEN is mandatory
+    // Serverless mode: NDD_AUTH_TOKEN is mandatory
     if(settings::AUTH_TOKEN.empty()) {
-        std::cerr << "FATAL: NDD_AUTH_TOKEN must be set in enterprise mode." << std::endl;
+        std::cerr << "FATAL: NDD_AUTH_TOKEN must be set in serverless mode." << std::endl;
         return 1;
     }
 #endif
@@ -467,7 +467,7 @@ int main(int argc, char** argv) {
                                    checksum};
 
 #ifdef NDD_SERVERLESS
-                // Enterprise mode: enforce tier-based limits
+                // Serverless mode: enforce tier-based limits
 
                 // Enforce index count limit
                 int max_indices = getMaxAllowedIndices(ctx.user_type);
@@ -1257,7 +1257,7 @@ int main(int argc, char** argv) {
 
 #ifdef NDD_SERVERLESS
     // ============================================================
-    // ENTERPRISE ADMIN ENDPOINTS (18 endpoints)
+    // SERVERLESS ADMIN ENDPOINTS (18 endpoints)
     // ============================================================
     registerAdminRoutes(app, auth_manager, index_manager);
 #endif

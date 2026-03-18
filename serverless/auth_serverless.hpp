@@ -343,7 +343,7 @@ public:
         , root_token_(settings::AUTH_TOKEN)
     {
         initMDBX();
-        std::cerr << "Enterprise AuthManager initialized at " << base_dir << "/auth/" << std::endl;
+        std::cerr << "Serverless AuthManager initialized at " << base_dir << "/auth/" << std::endl;
         std::cerr << "Root token configured (first " << std::min(8ul, root_token_.size())
                   << " chars): " << root_token_.substr(0, std::min(8ul, root_token_.size()))
                   << "..." << std::endl;

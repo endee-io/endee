@@ -22,7 +22,7 @@ Client Request
   |
   |  Authorization: <username>:<random_token>
   v
-EnterpriseAuthMiddleware (middleware_enterprise.hpp)
+ServerlessAuthMiddleware (middleware_serverless.hpp)
   |
   |-- 1. Is it root token (NDD_AUTH_TOKEN)?  -->  username = "root", type = Admin
   |
@@ -80,7 +80,7 @@ Two named databases (DBIs):
 | float32 | -- | Yes | Yes | Yes |
 | binary | -- | Yes | Yes | Yes |
 
-**To change allowed precisions**: Edit the vectors in `enterprise/settings_enterprise.hpp` -- no other code changes needed.
+**To change allowed precisions**: Edit the vectors in `serverless/settings_serverless.hpp` -- no other code changes needed.
 
 ### Where Limits are Enforced
 
@@ -187,19 +187,19 @@ POST /api/v1/admin/users/:username/deactivate  (admin only)
 ## File Reference
 
 ```
-enterprise/
-  settings_enterprise.hpp   - All tier limits + allowed precisions (configurable)
-  auth_enterprise.hpp       - AuthManager: MDBX, SHA-256, user/token CRUD, tier helpers
+serverless/
+  settings_serverless.hpp   - All tier limits + allowed precisions (configurable)
+  auth_serverless.hpp       - AuthManager: MDBX, SHA-256, user/token CRUD, tier helpers
   auth_token_cache.hpp      - LRU cache (hashed_token -> username, thread-safe)
-  middleware_enterprise.hpp  - Crow middleware: validates token, sets ctx.username + ctx.user_type
-  admin_routes_enterprise.hpp - 18 HTTP endpoints (admin + self-service)
+  middleware_serverless.hpp  - Crow middleware: validates token, sets ctx.username + ctx.user_type
+  admin_routes_serverless.hpp - 18 HTTP endpoints (admin + self-service)
 ```
 
 ### Conditional Compilation (`#ifdef NDD_SERVERLESS`)
 
 Used in `src/main.cpp` for:
 1. Including serverless headers
-2. Using `EnterpriseAuthMiddleware` instead of OSS `AuthMiddleware`
+2. Using `ServerlessAuthMiddleware` instead of OSS `AuthMiddleware`
 3. Mandatory `NDD_AUTH_TOKEN` check
 4. Tier-based limits on index creation (dimension, count, vectors, precision)
 5. Passing `ctx.user_type` to `createIndex()`

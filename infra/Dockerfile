@@ -38,12 +38,12 @@ ENV NDD_SERVERLESS=${NDD_SERVERLESS}
 RUN chmod +x ./install.sh && \
     if [ -z "$BUILD_ARCH" ]; then echo "ERROR: BUILD_ARCH is required (avx2|avx512|neon|sve2)" && exit 1; fi && \
     if [ -z "$NDD_SERVERLESS" ]; then echo "ERROR: NDD_SERVERLESS=ON is required" && exit 1; fi && \
-    ENTERPRISE_FLAG="" && \
-    if [ "$NDD_SERVERLESS" = "ON" ]; then ENTERPRISE_FLAG="--enterprise"; fi && \
+    SERVERLESS_FLAG="" && \
+    if [ "$NDD_SERVERLESS" = "ON" ]; then SERVERLESS_FLAG="--serverless"; fi && \
     if [ "$DEBUG" = "true" ]; then \
-        ./install.sh --${BUILD_ARCH} --debug_all --skip-deps ${ENTERPRISE_FLAG}; \
+        ./install.sh --${BUILD_ARCH} --debug_all --skip-deps ${SERVERLESS_FLAG}; \
     else \
-        ./install.sh --${BUILD_ARCH} --release --skip-deps ${ENTERPRISE_FLAG}; \
+        ./install.sh --${BUILD_ARCH} --release --skip-deps ${SERVERLESS_FLAG}; \
     fi && \
     cp ./build/ndd-${BUILD_ARCH} ./ndd
 
@@ -75,8 +75,9 @@ RUN groupadd -r -g 1000 endee && \
 COPY --from=builder /build_space/ndd /usr/local/bin/ndd
 RUN chmod +x /usr/local/bin/ndd
 
-# Copy frontend
-COPY --from=builder /build_space/frontend /usr/local/frontend
+# Copy entrypoint script
+COPY ./infra/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 # Switch to non-root user
 USER endee
@@ -94,8 +95,8 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD curl -f http://localhost:8080/api/v1/health || exit 1
 
-LABEL org.opencontainers.image.title="endee-enterprise"
-LABEL org.opencontainers.image.description="Endee Enterprise"
+LABEL org.opencontainers.image.title="endee-serverless"
+LABEL org.opencontainers.image.description="Endee Serverless"
 LABEL org.opencontainers.image.url="https://endee.io/"
 LABEL org.opencontainers.image.documentation="https://docs.endee.io/"
 LABEL org.opencontainers.image.vendor="Endee Labs"
@@ -104,6 +105,6 @@ LABEL org.opencontainers.image.source=""
 
 
 # Set the entrypoint
-ENTRYPOINT ["/usr/local/bin/ndd"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
 CMD []

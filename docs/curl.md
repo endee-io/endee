@@ -45,7 +45,7 @@ These require the `Authorization` header with a root-level token.
 
 ### Create a New User
 
-`user_type` can be: `Starter`, `Pro`, `Enterprise`, or `Admin`.
+`user_type` can be: `Starter`, `Pro`, `Scale`, or `Admin`.
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/admin/users \

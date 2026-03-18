@@ -20,14 +20,14 @@ The bloom filter uses **fixed tier-based sizing** determined by user subscriptio
 // Tier-based configuration (FIXED, no growth)
 constexpr size_t BLOOM_FILTER_BITS_STARTER = 20;       // 1M elements (2^20)
 constexpr size_t BLOOM_FILTER_BITS_PRO = 23;           // 8M elements (2^23)
-constexpr size_t BLOOM_FILTER_BITS_ENTERPRISE = 24;    // 16M elements (2^24)
+constexpr size_t BLOOM_FILTER_BITS_SCALE = 24;    // 16M elements (2^24)
 
 // Get fixed bloom filter bits based on user type
 inline size_t getBloomFilterBits(UserType type) {    
     switch (type) {
         case UserType::Starter: return BLOOM_FILTER_BITS_STARTER;
         case UserType::Pro: return BLOOM_FILTER_BITS_PRO;
-        case UserType::Enterprise: return BLOOM_FILTER_BITS_ENTERPRISE;
+        case UserType::Scale: return BLOOM_FILTER_BITS_SCALE;
         case UserType::Admin: return BLOOM_FILTER_BITS;
         default: return BLOOM_FILTER_BITS_STARTER;
     }
@@ -111,7 +111,7 @@ The bloom filter works seamlessly with the **load-save-reload** architecture:
 ```
 Starter:      1M bits    (2^20)  - Good for small deployments
 Pro:          8M bits    (2^23)  - Mid-market scale
-Enterprise:   16M bits   (2^24)  - Large-scale deployments
+Scale:        16M bits   (2^24)  - Large-scale deployments
 Admin/Custom: Configurable via NDD_BLOOM_FILTER_BITS
 ```
 
@@ -123,7 +123,7 @@ Bloom filter sizing is determined at index creation time:
 # Default behavior: Use tier-based sizing based on user subscription
 # Starter users get 1M (2^20)
 # Pro users get 8M (2^23)
-# Enterprise users get 16M (2^24)
+# Scale users get 16M (2^24)
 
 # Override for special cases (in bits, must be power-of-2)
 export NDD_BLOOM_FILTER_BITS=25  # 32M elements (2^25)
@@ -144,10 +144,10 @@ manager.createIndex(index_id, config, UserType::Pro);  // 8M element bloom filte
 
 ## Sizing Logic
 
-**Fixed Model**: One size per user tier, no dynamic growth  
+**Fixed Model**: One size per user tier, no dynamic growth
 **Starter Tier**: 1M elements (2^20 bits)
-**Pro Tier**: 8M elements (2^23 bits)  
-**Enterprise Tier**: 16M elements (2^24 bits)
+**Pro Tier**: 8M elements (2^23 bits)
+**Scale Tier**: 16M elements (2^24 bits)
 **Custom Override**: Environment variable `NDD_BLOOM_FILTER_BITS` (power-of-2)
 **Rebuild Timing**: During index loadIndex(), always rebuilds for consistency
 **Growth Strategy**: None - fixed size, guaranteed no auto-growth surprises

@@ -36,3 +36,13 @@ scripts/
 scripts/*
 .claude/
 .claude/*
+
+# Environment files - NEVER commit these (may contain secrets)
+.env
+.env.local
+.env.*.local
+
+# Keep template files in version control
+!.env.example
+!.env.dev
+!.env.prod

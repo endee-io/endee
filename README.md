@@ -58,9 +58,8 @@ The server listens on port `8080`. For detailed setup paths, supported operating
 - [Hosted Quick Start Docs](https://docs.endee.io/quick-start)
 
 ## Use Cases
-*   `ndd_data_dir=DIR`: Set the data directory.
-*   `binary_file=FILE`: Set the binary file to run.
-*   `ndd_auth_token=TOKEN`: Set the authentication token (mandatory).
+
+### RAG and AI Retrieval
 
 Use Endee as the retrieval layer for question answering, chat assistants, copilots, and other RAG applications that need fast vector search with metadata-aware filtering.
 
@@ -119,11 +118,9 @@ Current developer entry points:
 
 We welcome contributions from the community to help make vector search faster and more accessible for everyone.
 
-<<<<<<< HEAD
 - Submit pull requests for fixes, features, and improvements
 - Report bugs or performance issues through GitHub issues
 - Propose enhancements for search quality, performance, and deployment workflows
-=======
 
 * **SIMD Selectors (Choose One):**
 * `-DUSE_AVX2=ON`
@@ -214,10 +211,10 @@ You **must** specify the target architecture (`avx2`, `avx512`, `neon`, `sve2`) 
 
 ```bash
 # Production Build (AVX2) (for x86_64 systems)
-docker build --ulimit nofile=100000:100000 --build-arg BUILD_ARCH=avx2 --build-arg NDD_SERVERLESS=ON -t endee-enterprise:latest -f ./infra/Dockerfile .
+docker build --ulimit nofile=100000:100000 --build-arg BUILD_ARCH=avx2 --build-arg NDD_SERVERLESS=ON -t endee-serverless:latest -f ./infra/Dockerfile .
 
 # Debug Build (Neon) (for arm64, mac apple silicon)
-docker build --ulimit nofile=100000:100000 --build-arg BUILD_ARCH=neon --build-arg DEBUG=true --build-arg NDD_SERVERLESS=ON -t endee-enterprise:latest -f ./infra/Dockerfile .
+docker build --ulimit nofile=100000:100000 --build-arg BUILD_ARCH=neon --build-arg DEBUG=true --build-arg NDD_SERVERLESS=ON -t endee-serverless:latest -f ./infra/Dockerfile .
 ```
 
 ### Run the Container
@@ -229,8 +226,8 @@ docker run \
   -p 8080:8080 \
   -v nd-data:/data \
   -e NDD_AUTH_TOKEN="your_secure_token" \
-  --name endee-enterprise \
-  endee-enterprise:latest
+  --name endee-serverless \
+  endee-serverless:latest
 ```
 
 `NDD_AUTH_TOKEN` is **mandatory**. The server will not start without it.
@@ -252,9 +249,9 @@ Inside this directory, create a file named `docker-compose.yml` and copy the fol
 
 ```yaml
 services:
-  endee-enterprise:
-    image: endee-enterprise:latest
-    container_name: endee-enterprise
+  endee-serverless:
+    image: endee-serverless:latest
+    container_name: endee-serverless
     ports:
       - "8080:8080"
     environment:
@@ -300,7 +297,7 @@ Endee supports a serverless mode with multi-user authentication, tier-based acce
 ### Building Serverless
 
 ```bash
-mkdir build_enterprise && cd build_enterprise
+mkdir build_serverless && cd build_serverless
 cmake -DNDD_SERVERLESS=ON -DUSE_NEON=ON ..
 make -j$(nproc)
 ```
@@ -312,7 +309,7 @@ Replace `-DUSE_NEON=ON` with the appropriate SIMD flag for your platform (`-DUSE
 `NDD_AUTH_TOKEN` is **mandatory** in serverless mode. The server will exit with a fatal error if it is not set.
 
 ```bash
-NDD_AUTH_TOKEN=your-root-token NDD_DATA_DIR=./data ./build_enterprise/ndd
+NDD_AUTH_TOKEN=your-root-token NDD_DATA_DIR=./data ./build_serverless/ndd
 ```
 
 The root token has Admin tier access (unlimited). Use it to create users and manage the system.

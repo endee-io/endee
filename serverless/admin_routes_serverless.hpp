@@ -354,7 +354,12 @@ void registerAdminRoutes(App& app,
 
             // Build config from body params
             size_t dim = body.has("dim") ? static_cast<size_t>(body["dim"].i()) : 0;
-            size_t sparse_dim = body.has("sparse_dim") ? static_cast<size_t>(body["sparse_dim"].i()) : 0;
+            const std::string sparse_model_str =
+                body.has("sparse_model") ? std::string(body["sparse_model"].s()) : "None";
+            const auto sparse_model = ndd::sparseScoringModelFromString(sparse_model_str);
+            if(!sparse_model.has_value()) {
+                return admin_json_error(400, "Invalid sparse_model. Must be one of: None, default, endee_bm25");
+            }
             std::string space_type = body.has("space_type") ? std::string(body["space_type"].s()) : "cosine";
             size_t M = body.has("M") ? static_cast<size_t>(body["M"].i()) : 16;
             size_t ef_con = body.has("ef_con") ? static_cast<size_t>(body["ef_con"].i()) : 200;
@@ -369,7 +374,7 @@ void registerAdminRoutes(App& app,
 
             IndexConfig config{
                 dim,
-                sparse_dim,
+                *sparse_model,
                 settings::MAX_ELEMENTS,
                 space_type,
                 M,

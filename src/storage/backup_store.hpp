@@ -219,26 +219,9 @@ public:
 
     // Backup listing
 
-    std::vector<std::string> listBackups(const std::string& username) {
-        std::vector<std::string> backups;
-        std::string backup_dir = getUserBackupDir(username);
-
-        if(!std::filesystem::exists(backup_dir)) {
-            return backups;
-        }
-
-        for(const auto& entry : std::filesystem::directory_iterator(backup_dir)) {
-            if(entry.is_regular_file()) {
-                std::string filename = entry.path().filename().string();
-
-                if(filename.size() > 4 && filename.substr(filename.size() - 4) == ".tar" &&
-                   !filename.starts_with(".tmp_")) {
-                    std::string backup_name = filename.substr(0, filename.size() - 4);
-                    backups.push_back(backup_name);
-                }
-            }
-        }
-        return backups;
+    nlohmann::json listBackups(const std::string& username) {
+        nlohmann::json backup_list_json = readBackupJson(username);
+        return backup_list_json;
     }
 
     // Backup deletion

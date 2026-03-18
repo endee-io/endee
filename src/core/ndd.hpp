@@ -1723,7 +1723,7 @@ public:
                                                 const std::string& username);
 
     // Forwarding methods (no IndexManager internals needed)
-    std::vector<std::string> listBackups(const std::string& username) {
+    nlohmann::json listBackups(const std::string& username) {
         return backup_store_.listBackups(username);
     }
 

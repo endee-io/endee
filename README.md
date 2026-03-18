@@ -23,8 +23,11 @@ Generates responses using contextual data
 🧠 Key Concepts
 
 🔹 RAG (Retrieval-Augmented Generation)
+
 🔹 Semantic Search using Embeddings
+
 🔹 Vector Database Concept (Endee)
+
 🔹 Context-aware AI Responses
 
 🛠️ Tech Stack
@@ -69,11 +72,17 @@ Generate Context-Aware Response
 ✨ Features
 
 ✅ AI chatbot with real-time responses
+
 ✅ Retrieval-based answer generation (RAG)
+
 ✅ Semantic search using embeddings
+
 ✅ Context display (retrieved chunks)
+
 ✅ Clean and modern UI
+
 ✅ Deployed backend (cloud-ready)
+
 ✅ Error handling and fallback responses
 
 📁 Project Structure
@@ -107,8 +116,6 @@ Variable	Description
 GROQ_API_KEY	Groq API key for LLM
 🧪 Example Queries
 
-Try:
-
 What is Retrieval-Augmented Generation?
 
 What is Endee?
@@ -127,9 +134,9 @@ All users share the same knowledge base
 
 🚀 Future Enhancements
 
-Persistent vector database integration (Endee full implementation)
+Persistent vector database integration
 
-User authentication & session-based memory
+User authentication & session memory
 
 Document upload support
 
@@ -149,7 +156,7 @@ ChatGPT for development assistance
 
 📢 Conclusion
 
-This project demonstrates a RAG-based AI system where responses are generated using retrieved context from a knowledge base, showcasing the practical use of vector databases (Endee concept) in modern AI applications.
+This project demonstrates a RAG-based AI system where responses are generated using retrieved context from a knowledge base, showcasing the practical use of vector databases in modern AI applications.
 
 👨‍💻 Author
 

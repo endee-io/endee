@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Endee RAG Chatbot</title>
+    <link rel="stylesheet" href="style.css" />
+</head>
+
+<body>
+    <div class="app-shell">
+        <div class="chat-container">
+
+            <header class="chat-header">
+                <div class="brand">
+                    <div class="brand-icon" aria-hidden="true">🤖</div>
+                    <div class="brand-text">
+                        <h1>Endee RAG Chatbot</h1>
+                        <p>AI assistant powered by semantic retrieval</p>
+                    </div>
+                </div>
+
+                <div class="header-actions">
+                    <div class="status-badge" id="statusBadge">Connecting...</div>
+                    <button class="toggle-btn" id="toggleContextBtn" onclick="toggleContextVisibility()">
+                        Hide Context
+                    </button>
+                    <button class="clear-btn" onclick="clearChat()">Clear Chat</button>
+                </div>
+            </header>
+
+            <section class="chat-intro">
+                <h2>Ask smarter questions</h2>
+                <p>
+                    This assistant uses a modern AI workflow designed for Retrieval-Augmented Generation, semantic search, and vector-based knowledge retrieval.
+                </p>
+            </section>
+
+            <section class="suggestions">
+                <button class="suggestion-chip" onclick="fillPrompt('What is Retrieval-Augmented Generation?')">
+                    What is RAG?
+                </button>
+                <button class="suggestion-chip" onclick="fillPrompt('How does vector search improve chatbot answers?')">
+                    Vector search
+                </button>
+                <button class="suggestion-chip" onclick="fillPrompt('Explain the purpose of Endee in this project')">
+                    Endee usage
+                </button>
+                <button class="suggestion-chip" onclick="fillPrompt('How can I improve chatbot response speed?')">
+                    Improve speed
+                </button>
+            </section>
+
+            <main id="messages" class="chat-messages" aria-live="polite" aria-label="Chat messages"></main>
+
+            <div class="chat-input-wrapper">
+                <div class="chat-input-area">
+                    <input id="input" type="text" placeholder="Ask something about your knowledge base..." autocomplete="off" aria-label="Type your message" />
+                    <button id="sendBtn" onclick="send()" aria-label="Send message">Send</button>
+                </div>
+
+                <p class="input-note">
+                    Tip: Ask about RAG, vector databases, semantic retrieval, or your project content.
+                </p>
+            </div>
+
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+
+</html>

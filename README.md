@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <b>AI Knowledge Assistant built using Endee for RAG, semantic search, and voice-enabled interaction.</b>
+  <b>AI Knowledge Assistant built using Endee for RAG, semantic search, and voice-enabled interaction</b>
 </p>
 
 <p align="center">
@@ -21,22 +21,17 @@
 
 # 🚀 Endee AI Knowledge Assistant (RAG + Voice Enabled)
 
-An advanced AI-powered knowledge assistant built using the **Endee vector database** for semantic search, Retrieval-Augmented Generation (RAG), and voice-based interaction.
-
-This project demonstrates a **production-ready AI/ML system** that retrieves relevant information from documents before generating accurate responses.
+A production-ready AI application built using the **Endee vector database** for semantic search, document understanding, and intelligent question answering using Retrieval-Augmented Generation (RAG).
 
 ---
 
 ## 🧠 Project Overview
 
-This application allows users to:
-
-- 📄 Upload documents (PDF / TXT)
-- 🔍 Perform semantic search using Endee
-- 💬 Ask context-aware questions
-- ⚡ Get accurate AI-generated answers using RAG
-
-Unlike traditional chatbots, this system **retrieves relevant data first**, ensuring better accuracy and reduced hallucinations.
+- 📄 Upload documents (PDF / TXT)  
+- 🔍 Perform semantic search using Endee  
+- 💬 Ask contextual questions  
+- 🎤 Voice input support (speech-to-text)  
+- ⚡ Accurate AI-generated responses using RAG  
 
 ---
 
@@ -44,54 +39,49 @@ Unlike traditional chatbots, this system **retrieves relevant data first**, ensu
 
 ```mermaid
 flowchart TD
-    A --> B[FastAPI Backend]
+    A --> B[React Frontend]
+    B --> C[FastAPI Backend]
 
     C --> D[Document Processing]
-    D --> E[Text Chunking]
-    E --> F[Embedding Model]
+    D --> E[Chunking]
+    E --> F[Embeddings]
 
-    F --> G[Endee Vector Database]
+    F --> G[Endee Vector DB]
 
     C --> H[User Query]
-    H --> I[Similarity Search (Endee)]
+    H --> I[Similarity Search]
     I --> J[Relevant Context]
 
-    J --> K[LLM (Answer Generation)]
-    K --> L[Response to User]
-
+    J --> K[LLM]
+    K --> L[Final Response]
+```
 
 🔥 Key Features
 
-✅ Retrieval-Augmented Generation (RAG)
+✅ RAG (Retrieval-Augmented Generation)
 
-Combines retrieval + generation for accurate answers
+Context-aware responses
 
-Uses document context instead of guessing
+Reduced hallucination
 
-✅ Endee Vector Database Integration
+✅ Endee Integration
 
-Stores embeddings efficiently
+Fast vector search
 
-Performs fast semantic similarity search
-
-Scalable for large datasets
+Scalable retrieval system
 
 
 ✅ Document Processing
 
-Supports PDF and TXT files
+PDF & TXT support
 
-Splits text into chunks
+Smart chunking
 
-Generates embeddings for semantic search
+✅ Premium UI
 
-✅ Premium UI/UX
+Dark modern design
 
-Dark theme + glassmorphism design
-
-Smooth animations
-
-ChatGPT-like experience
+Smooth chat experience
 
 
 🛠️ Tech Stack
@@ -101,7 +91,6 @@ Frontend
 React.js
 
 Axios
-
 
 Backend
 
@@ -113,72 +102,57 @@ AI / ML
 
 Sentence Transformers / OpenAI
 
-RAG Architecture
+RAG Pipeline
 
 Vector Database
 
 Endee
 
-⚙️ Setup Instructions
+⚙️ Setup
 
-1️⃣ Clone the Repository
-
-git clone https://github.com/YOUR_USERNAME/endee.git
+git clone https://github.com/kruthikn7/endee.git
 cd endee
 
 
-2️⃣ Backend Setup
+Backend
 
 cd backend
 python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
-
-Run the backend:
-
 uvicorn app.main:app --reload
 
 
-3️⃣ Frontend Setup
+Frontend
 
 cd frontend
 npm install
 npm start
 
 
-▶️ How to Use
+▶️ Usage
 
-Upload a document (PDF / TXT)
+Upload document
 
-System retrieves relevant data from Endee
+Endee retrieves relevant data
 
-AI generates a contextual response
+AI generates response
 
-
-💡 Why Endee?
-
-Endee enables:
-
-⚡ High-performance vector search
-
-📈 Scalable AI applications
-
-🧠 Efficient semantic retrieval
-
-This project showcases how Endee can be used in real-world AI systems.
+🎥 Demo
 
 
-✅ Mandatory Requirements Completed
+
+✅ Assignment Requirements Completed
 
 ⭐ Starred Endee repository
 
 🍴 Forked Endee repository
 
-🛠️ Built project on top of fork
+🛠️ Built project on fork
 
-🤖 Implemented RAG + AI use case
+🤖 Implemented RAG system
 
 
-🤝 Contribution
 
-This project was developed as part of an AI/ML assignment using Endee.
+
+

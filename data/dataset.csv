@@ -1,0 +1,85 @@
+Animal,Symptoms,Disease,Explanation,Precautions
+Dog,fever vomiting lethargy loss appetite,Parvovirus,Canine parvovirus is a highly contagious viral disease that attacks the intestinal tract and immune system. It is most severe in puppies and can be fatal without treatment.,Isolate immediately, provide fluid therapy, antibiotics for secondary infections, keep warm, seek vet care
+Dog,coughing nasal discharge breathing difficulty,Distemper,Canine distemper is a viral disease affecting the respiratory, gastrointestinal, and nervous systems. It spreads through airborne particles and is often fatal.,Vaccinate puppies,隔离病犬,支持治疗,抗生素预防继发感染
+Dog,excessive thirst urination weight loss,Diabetes,Diabetes mellitus occurs when the pancreas fails to produce enough insulin. Common in older and obese dogs.,Maintain healthy weight, regular vet checkups, insulin therapy as prescribed
+Dog,limping lameness joint swelling,Arthritis,Arthritis is inflammation of joints causing pain and reduced mobility. Common in older dogs.,Weight management, joint supplements, pain medication, physiotherapy
+Dog,skin redness itching hair loss,Allergies,Environmental or food allergies cause skin irritation, itching, and secondary infections.,Identify allergens, antihistamines, special diet, topical treatments
+Dog,vomiting diarrhea blood loss appetite,Parvovirus,Canine parvovirus causes severe gastrointestinal symptoms and can be fatal, especially in puppies.,Immediate vet care, fluid therapy, isolation from other dogs
+Dog,seizures tremors weakness collapse,Epilepsy,Epilepsy is a neurological disorder causing recurrent seizures. Can be genetic or caused by other conditions.,Medication to control seizures, keep safe environment, regular vet monitoring
+Dog,eye discharge redness squinting,Conjunctivitis,Inflammation of the eye membrane caused by bacteria, viruses, or allergies.,Clean eyes with warm water, antibiotic eye drops, identify underlying cause
+Dog,ear odor head shaking scratching ears,Ear Infection,Bacterial or yeast infection in the ear canal causing discomfort and odor.,Clean ears regularly, antibiotic ear drops, identify allergens
+Dog,bad breath gum bleeding drooling,Periodontal Disease,Dental disease caused by plaque buildup affecting gums and teeth.,Regular teeth cleaning, dental chews, vet dental checks
+Cat,fever lethargy swollen lymph nodes,FeLV,Feline leukemia virus weakens the immune system and causes various cancers and anemia.,Test for FeLV, keep infected cats indoors, no vaccination available
+Cat,upper respiratory sneezing nasal discharge,Feline URI,Upper respiratory infection common in cats caused by viruses or bacteria.,Keep cat indoors, vaccination, supportive care, antibiotics
+Cat,vomiting hairball loss appetite,Hairball Obstruction,Hairballs form from grooming and can cause intestinal blockages.,Regular grooming, hairball remedy food, encourage water intake
+Cat,excessive urination thirst weight loss,Feline Diabetes,Similar to canine diabetes, caused by insufficient insulin production.,Diet management, insulin injections, regular vet monitoring
+Cat,scratching ears head shaking,Ear Mites,Parasitic mites in the ear canal causing intense itching.,Ear cleaning, prescription ear drops, treat all pets
+Cow,milk fever weakness collapse,Milk Fever,Metabolic disease in dairy cows caused by low blood calcium after calving.,Calcium supplementation before and after calving, proper nutrition
+Cow,bloody milk fever lameness,Mastitis,Bacterial infection of the udder causing inflammation and milk abnormalities.,Regular milking hygiene, dry cow therapy, treat immediately
+Cow,bloating abdominal pain restlessness,Bloat,Accumulation of gas in the rumen causing life-threatening distension.,Limit grain feeding, slow feed changes, emergency veterinary care
+Cow,lameness foot swelling pain,Foot Rot,Bacterial infection between toes causing severe lameness.,Foot baths, clean dry bedding, trim hooves regularly
+Cow,respiratory cough nasal discharge,Pneumonia,Bacterial or viral infection of the lungs causing respiratory distress.,Ventilation improvements, vaccination, antibiotics
+Horse,coughing nasal discharge fever,Equine Influenza,Viral respiratory infection causing flu-like symptoms.,Vaccination, rest, isolation from other horses
+Horse,colic abdominal pain rolling,Colic,Abdominal pain caused by various digestive issues. Can be life-threatening.,Feed management, regular deworming, know signs of emergency
+Horse,lameness gait change joint swelling,Tendon Injury,Strain or tear in tendons causing lameness and swelling.,Rest, cold therapy, supportive bandaging, rehabilitation
+Horse,skin bumps itching hair loss,Ringworm,Fungal skin infection causing circular lesions.,Isolate infected horse, antifungal treatment, disinfect equipment
+Horse,weight loss poor coat appetite,Parasites,Internal worms affecting nutrient absorption and overall health.,Regular deworming, fecal exams, pasture management
+Chicken,respiratory wheezing coughing,Newcastle Disease,Viral disease affecting respiratory, nervous, and digestive systems.,Vaccination, biosecurity, cull infected birds
+Chicken,diarrhea green droppings lethargy,Avian Influenza,Viral infection causing severe respiratory and systemic illness.,Biosecurity measures, vaccination where allowed, reportable disease
+Chicken,weakness leg paralysis head twist, Marek's Disease,Viral disease causing tumors and nerve paralysis.,Vaccination at day old, good biosecurity
+Chicken,diarrhea blood droppings,Coccidiosis,Parasitic intestinal disease common in young chicks.,Coccidiostats in feed, keep brooder clean, treat with amprolium
+Chicken,swollen face wattles comb,Swollen Head Syndrome,Bacterial infection causing facial swelling and respiratory signs.,Antibiotics, improve ventilation, reduce stress
+Pig,fever skin lesions breathing difficulty,PPR,Peste des Petits Ruminants affects pigs with high mortality.,Vaccination, biosecurity, cull infected animals
+Pig,skin redness itching rubbing,Farrowing Fever,Toxin-related disease in sows causing skin irritation.,Good hygiene, remove toxins, anti-inflammatory medication
+Pig,lameness joint swelling fever,Glass Disease,Bacterial infection causing arthritis and lameness.,Biosecurity, treat with antibiotics, remove infected pigs
+Pig,diarrhea dehydration weight loss,Porcine Epidemic Diarrhea,Viral disease causing severe diarrhea especially in piglets.,Biosecurity, vaccination, electrolyte therapy
+Sheep,respiratory cough nasal discharge,Contagious Agalactia,Bacterial disease affecting sheep and goats causing mastitis and arthritis.,Vaccination, isolate sick animals, antibiotic treatment
+Sheep,lameness foot swelling scabs,Foot Rot,Chronic bacterial infection causing severe lameness.,Regular foot trimming, foot baths, cull chronic carriers
+Sheep,diarrhea weight loss bottle jaw,Fascioliasis,Liver fluke infestation causing anemia and fluid accumulation.,Drain wet pastures, treat with anthelmintics, regular monitoring
+Sheep,skin wool loss itching,Sheep Scab,Highly contagious mite infestation causing intense itching.,Isolate and treat all sheep, dip or inject with ivermectin
+Goat,diarrhea dehydration weakness,Enterotoxemia,Clostridial disease causing sudden death in kids.,Vaccination, ensure colostrum intake, gradual feed changes
+Goat,lameness swelling joints,Caprine Arthritis Encephalitis,Viral disease causing arthritis in adults and neurological signs in kids.,Test and cull carriers, avoid milk from infected does
+Goat,respiratory cough nasal discharge,Mycoplasmosis,Bacterial respiratory disease common in goats.,Good ventilation, treat with antibiotics, reduce crowding
+Duck,nasal discharge watery eyes sneezing,Duck Virus Hepatitis,Viral disease affecting ducklings causing liver damage.,Vaccination, good biosecurity, clean water
+Duck,diarrhea lethargy green droppings,Duck Plague,Viral disease causing high mortality in ducks.,Vaccination, remove infected birds, disinfect ponds
+Turkey,diarrhea weight loss weakness,Histomoniasis,Parasitic disease causing liver and cecal damage.,Medicated feed, good sanitation, treat with antiprotozoals
+Turkey,respiratory distress nasal discharge,Turkey Coryza,Bacterial respiratory disease causing swelling and respiratory signs.,Antibiotics in water, improve ventilation, reduce stress
+Rabbit,sudden death lethargy bleeding,Myxomatosis,Viral disease spread by insects causing skin tumors and death.,Vaccination where available, control insects, keep rabbits indoors
+Rabbit,diarrhea bloating loss appetite,GI Stasis,Digestive slowdown caused by stress or improper diet.,High fiber diet, fresh hay, encourage water intake, massage
+Rabbit,head tilt loss balance rolling,E. Cuniculi,Parasitic infection affecting kidneys and nervous system.,Treat with fenbendazole, good hygiene, quarantine new rabbits
+Fish,weakness floating abnormally flashing,Ich,White spot disease caused by parasitic protozoa.,Raise temperature, add aquarium salt, use ich medication
+Fish,red fins flashing rubbing,Fin Rot,Bacterial infection causing frayed and discolored fins.,Improve water quality, antibiotic treatment, remove fin nippers
+Fish,lethargy floating surface gasping,Gill Disease,Bacterial or parasitic infection of the gills.,Improve water quality, salt baths, treat underlying infection
+Fish,white fuzzy growths on skin,Fungal Infection,Fungal infection usually secondary to other diseases.,Improve water quality, antifungal medication, remove infected fish
+Dog,skin lumps bumps masses,Tumors,Abnormal cell growth that can be benign or malignant.,Veterinary examination, biopsy, surgical removal if needed
+Dog,excessive barking anxiety destruction,Separation Anxiety,Behavioral issue when dogs are left alone.,Training, calming aids, gradual desensitization
+Dog,hearing loss ear tilt head tilt,Ear Infection,Middle ear infection affecting balance and hearing.,Antibiotics, ear drops, keep ears dry
+Dog,yellow skin eyes gums jaundice,Liver Disease,Liver dysfunction causing jaundice and other symptoms.,Diet changes, medication, identify underlying cause
+Dog,weight loss despite good appetite,Hyperthyroidism,Overactive thyroid gland increasing metabolism.,Radioactive iodine treatment, medication, or surgery
+Dog,exercise intolerance fatigue breathing difficulty,Heart Disease,Various cardiac conditions affecting heart function.,Medication, low sodium diet, limited exercise
+Dog,cloudy eyes vision changes,Cataracts,Lens clouding causing vision loss, common in older dogs.,Surgery if severe, monitor for progression
+Dog,bad skin odor greasy hair,Seborrhea,Skin condition causing flaky, oily skin.,Medicated shampoos, fatty acid supplements, treat underlying cause
+Cat,chronic vomiting weight loss,IBD,Inflammatory bowel disease causing chronic digestive upset.,Diet change, medication, identify food triggers
+Cat,kidney failure thirst urination,Chronic Kidney Disease,Progressive kidney dysfunction common in older cats.,Special kidney diet, fluid therapy, regular monitoring
+Cat,hyperthyroidism weight loss appetite,Hyperthyroidism,Overactive thyroid causing increased metabolism.,Radioactive iodine, medication, or surgery
+Cat,difficulty breathing open mouth breathing,Respiratory Distress,Breathing difficulty requiring immediate attention.,Keep calm, reduce stress, emergency vet care
+Cat,constipation straining loss appetite,Constipation,Difficulty passing stool due to various causes.,More water, fiber supplements, laxatives if needed
+Cow,abortion weak calf stillbirth,BVD,Bovine viral diarrhea causing reproductive problems.,Vaccination, test and cull PI animals, biosecurity
+Cow,poor growth rough hair coat,Johnes Disease,Mycobacterial infection causing chronic diarrhea and weight loss.,Test and cull, calf management, avoid cross-contamination
+Cow,eye cloudiness ulceration blindness,IBK,Infectious bovine keratoconjunctivitis spread by flies.,Fly control, antibiotic treatment, isolate affected cattle
+Horse,weight loss poor condition,Equine Protozoal Myelitis,Parasitic disease causing weight loss and weakness.,Treatment with antiprotozoals, rest, supportive care
+Horse,chronic cough poor performance,Heaves,Recurrent airway obstruction similar to asthma in horses.,Dust-free environment, bronchodilators, reduce allergens
+Horse,sudden severe colic abdomen distension,Tympany,Gas bloat requiring emergency intervention.,Nasogastric tube, trocharization, emergency surgery
+Chicken,drop in egg production pale comb,Egg Peritonitis,Infection in the abdominal cavity causing egg-related issues.,Antibiotics, improve nutrition, cull chronic cases
+Pig,skin discoloration blue ears ears,Porcine Reproductive and Respiratory Syndrome,Viral disease causing reproductive failure and respiratory issues.,Biosecurity, vaccination, herd management
+Pig,tremors weakness inability stand,Porcine Epidemic Diarrhea,Viral disease severe in piglets causing neurological signs.,Vaccination, biosecurity, supportive care
+Sheep,lamb weakness inability stand,Nutritional Deficiency,Vitamin or mineral deficiency causing weakness.,Ensure proper supplementation, colostrum for lambs
+Goat,kidney failure weight loss thirst,Caprine Kidney Disease,Various causes leading to kidney dysfunction.,Diet management, fluid therapy, regular monitoring
+Rabbit,runny nose sneezing breathing difficulty,Snuffles,Bacterial respiratory infection common in rabbits.,Antibiotics, improve ventilation, reduce stress
+Fish,popeye bulging eyes dropsy,Dropsy,Bacterial infection causing fluid accumulation and bulging eyes.,Isolate fish, improve water quality, antibiotic treatment
+Dog,bleeding gums bad breath teeth,Periodontitis,Severe dental disease affecting teeth and gums.,Professional dental cleaning, regular tooth brushing
+Dog,chronic ear infections shaking head,Ear Infections,Recurrent ear problems often due to allergies or anatomy.,Regular cleaning, identify underlying cause, possible surgery
+Cat,urine straining blood in urine,FLUTD,Feline lower urinary tract disease causing urinary issues.,Increase water intake, special diet, reduce stress
+Dog,seizures collapse sudden death,Heart Failure,Advanced heart disease causing sudden collapse.,Emergency care, ongoing heart medication
+Cow,reduced milk production fever,Mastitis,Inflammation of udder affecting milk production.,Antibiotic treatment, milking hygiene, supportive care
+Horse,lameness front limbs forging,Navicular Disease,Chronic lameness affecting the navicular bone in horses.,Corrective shoeing, anti-inflammatory medication, rest

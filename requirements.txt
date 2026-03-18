@@ -1,0 +1,6 @@
+flask
+flask-cors
+sentence-transformers
+python-dotenv
+pandas
+numpy

@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Animal Disease Finder 🐾</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <style>
+        :root { --primary: #4CAF50; --primary-dark: #388E3C; }
+        body { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; font-family: 'Segoe UI', system-ui, sans-serif; }
+        .navbar { background: rgba(255,255,255,0.95) !important; box-shadow: 0 2px 20px rgba(0,0,0,0.1); }
+        .main-container { max-width: 800px; margin: 40px auto; padding: 0 15px; }
+        .card { border: none; border-radius: 20px; box-shadow: 0 20px 60px rgba(0,0,0,0.15); overflow: hidden; }
+        .card-header { background: linear-gradient(135deg, var(--primary) 0%, var(--primary-dark) 100%); color: white; padding: 30px; text-align: center; border: none; }
+        .card-body { padding: 30px; }
+        .form-label { font-weight: 600; color: #333; margin-bottom: 8px; }
+        .form-select, .form-control { border-radius: 12px; padding: 14px; border: 2px solid #e0e0e0; transition: all 0.3s; }
+        .form-select:focus, .form-control:focus { border-color: var(--primary); box-shadow: 0 0 0 4px rgba(76,175,80,0.15); }
+        .btn-analyze { background: linear-gradient(135deg, var(--primary) 0%, var(--primary-dark) 100%); color: white; border: none; padding: 16px 40px; font-size: 1.1rem; font-weight: 600; border-radius: 12px; width: 100%; transition: all 0.3s; box-shadow: 0 4px 15px rgba(76,175,80,0.4); }
+        .btn-analyze:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(76,175,80,0.5); }
+        .btn-analyze:disabled { opacity: 0.7; transform: none; }
+        .result-card { background: linear-gradient(135deg, #f8f9fa 0%, #fff 100%); border-radius: 16px; padding: 25px; margin-top: 25px; border-left: 5px solid var(--primary); animation: slideIn 0.4s ease; }
+        @keyframes slideIn { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+        .disease-title { color: var(--primary-dark); font-size: 1.5rem; font-weight: 700; margin-bottom: 15px; }
+        .confidence-badge { display: inline-block; padding: 6px 18px; border-radius: 20px; font-weight: 600; font-size: 0.85rem; margin-bottom: 20px; }
+        .confidence-high { background: linear-gradient(135deg, #4CAF50, #66BB6A); color: white; }
+        .confidence-medium { background: linear-gradient(135deg, #FF9800, #FFB74D); color: white; }
+        .confidence-low { background: linear-gradient(135deg, #f44336, #EF5350); color: white; }
+        .info-section { background: white; border-radius: 12px; padding: 20px; margin-bottom: 15px; }
+        .info-section h5 { color: var(--primary-dark); font-weight: 600; margin-bottom: 12px; }
+        .info-section p { color: #666; line-height: 1.7; margin: 0; }
+        .match-item { background: white; border-radius: 10px; padding: 15px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; transition: all 0.2s; }
+        .match-item:hover { transform: translateX(5px); background: #f8f9fa; }
+        .match-score { background: var(--primary); color: white; padding: 5px 12px; border-radius: 15px; font-weight: 600; font-size: 0.85rem; }
+        .loading-spinner { display: none; text-align: center; padding: 40px; }
+        .spinner-border { width: 3rem; height: 3rem; border-width: 4px; }
+        .error-alert { display: none; margin-top: 20px; }
+        footer { text-align: center; color: white; padding: 20px; opacity: 0.9; }
+        .disclaimer { font-size: 0.85rem; opacity: 0.8; margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-light">
+        <div class="container"><a class="navbar-brand fw-bold" href="#"><i class="fas fa-paw text-success me-2"></i>Animal Disease Finder</a></div>
+    </nav>
+    <div class="main-container">
+        <div class="card">
+            <div class="card-header"><h2><i class="fas fa-stethoscope me-2"></i>AI Animal Disease Finder</h2><p>Smart symptom-based disease detection using ML</p></div>
+            <div class="card-body">
+                <form id="predictForm">
+                    <div class="mb-4">
+                        <label class="form-label"><i class="fas fa-paw text-success me-2"></i>Select Animal</label>
+                        <select class="form-select" id="animal" required>
+                            <option value="">Choose an animal...</option>
+                            <option value="Dog">🐶 Dog</option>
+                            <option value="Cat">🐱 Cat</option>
+                            <option value="Cow">🐄 Cow</option>
+                            <option value="Horse">🐴 Horse</option>
+                            <option value="Chicken">🐔 Chicken</option>
+                            <option value="Pig">🐷 Pig</option>
+                            <option value="Sheep">🐑 Sheep</option>
+                            <option value="Goat">🐐 Goat</option>
+                            <option value="Duck">🦆 Duck</option>
+                            <option value="Turkey">🦃 Turkey</option>
+                            <option value="Rabbit">🐰 Rabbit</option>
+                            <option value="Fish">🐟 Fish</option>
+                        </select>
+                    </div>
+                    <div class="mb-4">
+                        <label class="form-label"><i class="fas fa-notes-medical text-success me-2"></i>Describe Symptoms</label>
+                        <textarea class="form-control" id="symptoms" rows="4" placeholder="e.g., fever, vomiting, loss of appetite..." required></textarea>
+                    </div>
+                    <button type="submit" class="btn btn-analyze" id="analyzeBtn">
+                        <span class="btn-text"><i class="fas fa-search me-2"></i>Analyze Symptoms</span>
+                        <span class="btn-loading" style="display: none;"><span class="spinner-border spinner-border-sm me-2"></span>Analyzing...</span>
+                    </button>
+                </form>
+                <div class="loading-spinner" id="loading"><div class="spinner-border text-success" role="status"></div><p class="mt-3 text-muted">Analyzing symptoms...</p></div>
+                <div class="alert alert-danger error-alert" id="errorAlert" role="alert"><i class="fas fa-exclamation-circle me-2"></i><span id="errorMessage"></span></div>
+                <div id="results" style="display: none;">
+                    <div class="result-card">
+                        <div class="d-flex justify-content-between align-items-start flex-wrap"><h4 class="disease-title" id="diseaseName">Disease Name</h4><span class="confidence-badge" id="confidence">High</span></div>
+                        <div class="info-section"><h5><i class="fas fa-info-circle text-success me-2"></i>Explanation</h5><p id="explanation">...</p></div>
+                        <div class="info-section"><h5><i class="fas fa-exclamation-triangle text-warning me-2"></i>Precautions</h5><p id="precautions">...</p></div>
+                        <div class="mt-3"><h5><i class="fas fa-list-ul text-info me-2"></i>Top Matching Cases</h5><div id="topMatches"></div></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <footer><p>Powered by <strong>Sentence Transformers</strong> + <strong>Flask</strong></p><p class="disclaimer">⚠️ Always consult a veterinarian.</p></footer>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        const API_URL = 'http://localhost:5003';
+        document.getElementById('predictForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            const animal = document.getElementById('animal').value;
+            const symptoms = document.getElementById('symptoms').value;
+            const btn = document.getElementById('analyzeBtn');
+            const btnText = btn.querySelector('.btn-text');
+            const btnLoading = btn.querySelector('.btn-loading');
+            const loading = document.getElementById('loading');
+            const results = document.getElementById('results');
+            const errorAlert = document.getElementById('errorAlert');
+            if (!animal || !symptoms) { showError('Please select an animal and describe the symptoms.'); return; }
+            loading.style.display = 'block'; results.style.display = 'none'; errorAlert.style.display = 'none';
+            btn.disabled = true; btnText.style.display = 'none'; btnLoading.style.display = 'inline';
+            try {
+                const response = await fetch(API_URL + '/predict', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ animal, symptoms }) });
+                if (!response.ok) { const error = await response.json(); throw new Error(error.error || 'Prediction failed'); }
+                const data = await response.json(); displayResults(data);
+            } catch (error) { showError(error.message); }
+            finally { loading.style.display = 'none'; btn.disabled = false; btnText.style.display = 'inline'; btnLoading.style.display = 'none'; }
+        });
+        function displayResults(data) {
+            document.getElementById('diseaseName').textContent = data.disease || 'Unknown';
+            const conf = data.confidence || 'Low';
+            const confEl = document.getElementById('confidence');
+            confEl.textContent = conf; confEl.className = 'confidence-badge confidence-' + conf.toLowerCase();
+            document.getElementById('explanation').textContent = data.explanation || 'No explanation available.';
+            document.getElementById('precautions').textContent = data.precautions || 'Consult a veterinarian.';
+            const matchesDiv = document.getElementById('topMatches');
+            matchesDiv.innerHTML = '';
+            if (data.top_matches && data.top_matches.length > 0) {
+                data.top_matches.forEach((match, i) => { matchesDiv.innerHTML += `<div class="match-item"><div><strong>${i+1}. ${match.disease}</strong><p class="text-muted mb-0 small">${match.symptoms}</p></div><span class="match-score">${(match.score * 100).toFixed(0)}%</span></div>`; });
+            }
+            document.getElementById('results').style.display = 'block';
+            document.getElementById('results').scrollIntoView({ behavior: 'smooth' });
+        }
+        function showError(message) {
+            const errorAlert = document.getElementById('errorAlert');
+            document.getElementById('errorMessage').textContent = message;
+            errorAlert.style.display = 'flex';
+            errorAlert.scrollIntoView({ behavior: 'smooth' });
+        }
+    </script>
+</body>
+</html>

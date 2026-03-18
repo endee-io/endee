@@ -10,7 +10,7 @@ An AI-powered chatbot built using FastAPI, JavaScript, and Groq LLM, demonstrati
 
 This project implements a RAG-based AI chatbot that enhances response accuracy by retrieving relevant information from a knowledge base before generating answers.
 
-Instead of relying solely on the language model, the system:
+Instead of relying only on the language model, the system:
 
 Converts user queries into embeddings
 
@@ -23,11 +23,8 @@ Generates responses using contextual data
 🧠 Key Concepts
 
 🔹 RAG (Retrieval-Augmented Generation)
-
 🔹 Semantic Search using Embeddings
-
 🔹 Vector Database Concept (Endee)
-
 🔹 Context-aware AI Responses
 
 🛠️ Tech Stack
@@ -58,17 +55,17 @@ Backend: Render
 Version Control: GitHub
 
 ⚙️ How It Works
-User Query
-   ↓
-Convert to Embeddings
-   ↓
-Semantic Search (Vector DB / Endee Concept)
-   ↓
-Retrieve Relevant Chunks
-   ↓
-Send Context + Query to LLM
-   ↓
-Generate Context-Aware Response
+User Query  
+   ↓  
+Convert to Embeddings  
+   ↓  
+Semantic Search (Vector DB / Endee Concept)  
+   ↓  
+Retrieve Relevant Chunks  
+   ↓  
+Send Context + Query to LLM  
+   ↓  
+Generate Context-Aware Response  
 ✨ Features
 
 ✅ AI chatbot with real-time responses
@@ -82,36 +79,28 @@ Generate Context-Aware Response
 📁 Project Structure
 project-root/
 │
-├── backend/
-│   ├── main.py
-│   ├── knowledge_base.py
-│   ├── requirements.txt
-│
-├── frontend/
-│   ├── index.html
-│   ├── style.css
-│   ├── script.js
-│
-└── README.md
+├── main.py
+├── knowledge_base.py
+├── index.html
+├── style.css
+├── script.js
+├── README.md
 🚀 Setup Instructions
 1️⃣ Clone Repository
 git clone https://github.com/your-username/your-repo-name.git
 cd your-repo-name
-2️⃣ Backend Setup
-cd backend
+2️⃣ Install Dependencies
 pip install -r requirements.txt
+3️⃣ Create Environment File
 
-Create .env file:
+Create .env file and add:
 
 GROQ_API_KEY=your_api_key_here
-
-Run backend:
-
+4️⃣ Run Backend
 uvicorn main:app --reload
-3️⃣ Frontend Setup
+5️⃣ Run Frontend
 
 Open index.html in browser
-or deploy using Netlify / GitHub Pages
 
 🔑 Environment Variables
 Variable	Description
@@ -128,7 +117,7 @@ How does vector search improve chatbot answers?
 
 ⚠️ Limitations
 
-Knowledge is limited to the predefined dataset
+Knowledge is limited to predefined dataset
 
 Responses depend on retrieval accuracy
 
@@ -160,7 +149,7 @@ ChatGPT for development assistance
 
 📢 Conclusion
 
-This project successfully demonstrates a RAG-based AI system where responses are generated using retrieved context from a knowledge base, showcasing the practical use of vector databases (Endee concept) in modern AI applications.
+This project demonstrates a RAG-based AI system where responses are generated using retrieved context from a knowledge base, showcasing the practical use of vector databases (Endee concept) in modern AI applications.
 
 👨‍💻 Author
 

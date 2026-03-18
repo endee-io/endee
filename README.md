@@ -1,139 +1,168 @@
-<p align="center">
-  <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-dark.svg">
-      <source media="(prefers-color-scheme: light)" srcset="docs/assets/logo-light.svg">
-      <img height="100" alt="Endee" src="docs/assets/logo-dark.svg">
-  </picture>
-</p>
+🚀 Endee RAG Chatbot
 
-<p align="center">
-    <b>High-performance open-source vector database for AI search, RAG, semantic search, and hybrid retrieval.</b>
-</p>
+An AI-powered chatbot built using FastAPI, JavaScript, and Groq LLM, demonstrating a Retrieval-Augmented Generation (RAG) workflow with a vector database concept (Endee).
 
-<p align="center">
-    <a href="./docs/getting-started.md"><img src="https://img.shields.io/badge/Quick_Start-Local_Setup-success?style=flat-square" alt="Quick Start"></a>
-    <a href="https://docs.endee.io/quick-start"><img src="https://img.shields.io/badge/Docs-Quick_Start-success?style=flat-square" alt="Docs"></a>
-    <a href="https://github.com/endee-io/endee/blob/master/LICENSE"><img src="https://img.shields.io/github/license/endee-io/endee?style=flat-square" alt="License"></a>
-    <a href="https://discord.gg/5HFGqDZQE3"><img src="https://img.shields.io/badge/Discord-Join_Chat-5865F2?logo=discord&style=flat-square" alt="Discord"></a>
-    <a href="https://endee.io/"><img src="https://img.shields.io/badge/Website-Endee-111111?style=flat-square" alt="Website"></a>
-    <!-- <a href="https://endee.io/benchmarks"><img src="https://img.shields.io/badge/Benchmarks-Coming_Soon-1F8B4C?style=flat-square" alt="Benchmarks"></a> -->
-    <!-- <a href="https://endee.io/cloud"><img src="https://img.shields.io/badge/Cloud-Coming_Soon-2496ED?style=flat-square" alt="Cloud"></a> -->
-</p>
+🌐 Live Demo
 
-<p align="center">
-<strong><a href="./docs/getting-started.md">Quick Start</a> • <a href="#why-endee">Why Endee</a> • <a href="#use-cases">Use Cases</a> • <a href="#features">Features</a> • <a href="#api-and-clients">API and Clients</a> • <a href="#docs-and-links">Docs</a> • <a href="#community-and-contact">Contact</a></strong>
-</p>
+🔗 https://endee-rag-chatbot-1.onrender.com
 
-# Endee: Open-Source Vector Database for AI Search
+📌 Project Overview
 
-**Endee** is a high-performance open-source vector database built for AI search and retrieval workloads. It is designed for teams building **RAG pipelines**, **semantic search**, **hybrid search**, recommendation systems, and filtered vector retrieval APIs that need production-oriented performance and control.
+This project implements a RAG-based AI chatbot that enhances response accuracy by retrieving relevant information from a knowledge base before generating answers.
 
-Endee combines vector search with filtering, sparse retrieval support, backup workflows, and deployment flexibility across local builds and Docker-based environments. The project is implemented in C++ and optimized for modern CPU targets, including AVX2, AVX512, NEON, and SVE2.
+Instead of relying solely on the language model, the system:
 
-If you want the fastest path to evaluate Endee locally, start with the [Getting Started guide](./docs/getting-started.md) or the hosted docs at [docs.endee.io](https://docs.endee.io/quick-start).
+Converts user queries into embeddings
 
-## Why Endee
+Performs semantic search
 
-- Built as a dedicated vector database for AI applications, search systems, and retrieval-heavy workloads.
-- Supports dense vector retrieval plus sparse search capabilities for hybrid search use cases.
-- Includes payload filtering for metadata-aware retrieval and application-specific query logic.
-- Ships with operational features already documented in this repo, including backup flows and runtime observability.
-- Offers flexible deployment paths: local scripts, manual builds, Docker images, and prebuilt registry images.
+Retrieves relevant knowledge chunks
 
-## Getting Started
+Generates responses using contextual data
 
-The full installation, build, Docker, runtime, and authentication instructions are in [docs/getting-started.md](./docs/getting-started.md).
+🧠 Key Concepts
 
-Fastest local path:
+🔹 RAG (Retrieval-Augmented Generation)
 
-```bash
-chmod +x ./install.sh ./run.sh
-./install.sh --release --avx2
-./run.sh
-```
+🔹 Semantic Search using Embeddings
 
-The server listens on port `8080`. For detailed setup paths, supported operating systems, CPU optimization flags, Docker usage, and authentication examples, use:
+🔹 Vector Database Concept (Endee)
 
-- [Getting Started](./docs/getting-started.md)
-- [Hosted Quick Start Docs](https://docs.endee.io/quick-start)
+🔹 Context-aware AI Responses
 
-## Use Cases
+🛠️ Tech Stack
+🔹 Frontend
 
-### RAG and AI Retrieval
+HTML5
 
-Use Endee as the retrieval layer for question answering, chat assistants, copilots, and other RAG applications that need fast vector search with metadata-aware filtering.
+CSS3 (Modern UI, responsive design)
 
-### Agentic AI and AI Agent Memory
+JavaScript (Fetch API, DOM manipulation)
 
-Use Endee as the long-term memory and context retrieval layer for AI agents built with frameworks like LangChain, CrewAI, AutoGen, and LlamaIndex. Store and retrieve past observations, tool outputs, conversation history, and domain knowledge mid-execution with low-latency filtered vector search, so your autonomous agents get the right context without stalling their reasoning loop.
+🔹 Backend
 
-### Semantic Search
+FastAPI (Python)
 
-Build semantic search experiences for documents, products, support content, and knowledge bases using vector similarity search instead of exact keyword-only matching.
+Uvicorn
 
-### Hybrid Search
+🔹 AI & ML
 
-Combine dense retrieval, sparse vectors, and filtering to improve relevance for search workflows where both semantic understanding and term-level precision matter.
+Groq API (LLM)
 
-### Recommendations and Matching
+Sentence Transformers (Embeddings)
 
-Support recommendation, similarity matching, and nearest-neighbor retrieval workflows across text, embeddings, and other high-dimensional representations.
+🔹 Deployment
 
-## Features
+Backend: Render
 
-- **Vector search** for AI retrieval and semantic similarity workloads.
-- **Hybrid retrieval support** with sparse vector capabilities documented in [docs/sparse.md](./docs/sparse.md).
-- **Payload filtering** for structured retrieval logic documented in [docs/filter.md](./docs/filter.md).
-- **Backup APIs and flows** documented in [docs/backup-system.md](./docs/backup-system.md).
-- **Operational logging and instrumentation** documented in [docs/logs.md](./docs/logs.md) and [docs/mdbx-instrumentation.md](./docs/mdbx-instrumentation.md).
-- **CPU-targeted builds** for AVX2, AVX512, NEON, and SVE2 deployments.
-- **Docker deployment options** for local and server environments.
+Version Control: GitHub
 
-## API and Clients
+⚙️ How It Works
+User Query
+   ↓
+Convert to Embeddings
+   ↓
+Semantic Search (Vector DB / Endee Concept)
+   ↓
+Retrieve Relevant Chunks
+   ↓
+Send Context + Query to LLM
+   ↓
+Generate Context-Aware Response
+✨ Features
 
-Endee exposes an HTTP API for managing indexes and serving retrieval workloads. The current repo documentation and examples focus on running the server directly and calling its API endpoints.
+✅ AI chatbot with real-time responses
+✅ Retrieval-based answer generation (RAG)
+✅ Semantic search using embeddings
+✅ Context display (retrieved chunks)
+✅ Clean and modern UI
+✅ Deployed backend (cloud-ready)
+✅ Error handling and fallback responses
 
-Current developer entry points:
+📁 Project Structure
+project-root/
+│
+├── backend/
+│   ├── main.py
+│   ├── knowledge_base.py
+│   ├── requirements.txt
+│
+├── frontend/
+│   ├── index.html
+│   ├── style.css
+│   ├── script.js
+│
+└── README.md
+🚀 Setup Instructions
+1️⃣ Clone Repository
+git clone https://github.com/your-username/your-repo-name.git
+cd your-repo-name
+2️⃣ Backend Setup
+cd backend
+pip install -r requirements.txt
 
-- [Getting Started](./docs/getting-started.md) for local build and run flows
-- [Hosted Docs](https://docs.endee.io/quick-start) for product documentation
-- [Release Notes 1.0.0](https://github.com/endee-io/endee/releases/tag/1.0.0) for recent platform changes
+Create .env file:
 
-## Docs and Links
+GROQ_API_KEY=your_api_key_here
 
-- [Getting Started](./docs/getting-started.md)
-- [Hosted Documentation](https://docs.endee.io/quick-start)
-- [Release Notes](https://github.com/endee-io/endee/releases/tag/1.0.0)
-- [Sparse Search](./docs/sparse.md)
-- [Filtering](./docs/filter.md)
-- [Backups](./docs/backup-system.md)
+Run backend:
 
-## Community and Contact
+uvicorn main:app --reload
+3️⃣ Frontend Setup
 
-- Join the community on [Discord](https://discord.gg/5HFGqDZQE3)
-- Visit the website at [endee.io](https://endee.io/)
-- For trademark or branding permissions, contact [enterprise@endee.io](mailto:enterprise@endee.io)
+Open index.html in browser
+or deploy using Netlify / GitHub Pages
 
-## Contributing
+🔑 Environment Variables
+Variable	Description
+GROQ_API_KEY	Groq API key for LLM
+🧪 Example Queries
 
-We welcome contributions from the community to help make vector search faster and more accessible for everyone.
+Try:
 
-- Submit pull requests for fixes, features, and improvements
-- Report bugs or performance issues through GitHub issues
-- Propose enhancements for search quality, performance, and deployment workflows
+What is Retrieval-Augmented Generation?
 
-## License
+What is Endee?
 
-Endee is open source software licensed under the **Apache License 2.0**. See the [LICENSE](./LICENSE) file for full terms.
+How does vector search improve chatbot answers?
 
-## Trademark and Branding
+⚠️ Limitations
 
-“Endee” and the Endee logo are trademarks of Endee Labs.
+Knowledge is limited to the predefined dataset
 
-The Apache License 2.0 does not grant permission to use the Endee name, logos, or branding in a way that suggests endorsement or affiliation.
+Responses depend on retrieval accuracy
 
-If you offer a hosted or managed service based on this software, you must use your own branding and avoid implying it is an official Endee service.
+No persistent database (in-memory storage)
 
-## Third-Party Software
+All users share the same knowledge base
 
-This project includes or depends on third-party software components licensed under their respective open-source licenses. Use of those components is governed by their own license terms.
+🚀 Future Enhancements
+
+Persistent vector database integration (Endee full implementation)
+
+User authentication & session-based memory
+
+Document upload support
+
+Real-time streaming responses
+
+Advanced ranking algorithms
+
+🙏 Acknowledgement
+
+Groq API for LLM support
+
+FastAPI for backend framework
+
+Sentence Transformers for embeddings
+
+ChatGPT for development assistance
+
+📢 Conclusion
+
+This project successfully demonstrates a RAG-based AI system where responses are generated using retrieved context from a knowledge base, showcasing the practical use of vector databases (Endee concept) in modern AI applications.
+
+👨‍💻 Author
+
+Belics B
+Full-Stack Developer | AI Enthusiast 🚀

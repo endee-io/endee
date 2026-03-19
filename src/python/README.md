@@ -20,3 +20,4 @@ AI-powered backend to store and search employee activities using vector embeddin
 pip install -r requirements.txt
 python -m uvicorn main:app --reload
 ```
+Run the bat file "run_app.bat"

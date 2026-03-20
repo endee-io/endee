@@ -1,5 +1,10 @@
 #!/bin/bash
 
+# Load environment variables from .env if it exists
+if [ -f "$(dirname "$0")/.env" ]; then
+    export $(grep -v '^#' "$(dirname "$0")/.env" | xargs)
+fi
+
 DIR="${1:-${CLEANUP_DIR:-/home/debian/mnt/deleted}}"
 if [ "$DIR" != "/" ] && [ -d "$DIR" ]; then
     SIZE=$(du -sh "$DIR" 2>/dev/null | cut -f1)

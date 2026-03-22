@@ -1,0 +1,34 @@
+# Python — never commit venvs (torch DLLs etc. exceed GitHub 100MB limit)
+.venv/
+**/.venv/
+venv/
+**/venv/
+backend/.venv/
+backend/data/
+*.db
+__pycache__/
+*.pyc
+.env
+
+# Hugging Face / model caches (can be huge)
+.cache/
+**/.cache/
+**/huggingface/
+
+# Flutter / Android build artifacts (can be huge)
+frontend/hr_assistant/build/
+frontend/hr_assistant/.dart_tool/
+**/android/.gradle/
+**/.gradle/
+**/android/**/build/
+**/ios/Pods/
+**/macos/Flutter/ephemeral/
+**/ios/Flutter/ephemeral/
+
+# Binary blobs that should never be in source control
+*.dll
+*.pdb
+*.lib
+*.exe
+*.so
+*.dylib

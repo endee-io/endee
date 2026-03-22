@@ -1,0 +1,60 @@
+services:
+  endee:
+    image: endeeio/endee-server:latest
+    container_name: endee-server
+    ports:
+      - "8080:8080"
+    ulimits:
+      nofile: 100000
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "200m"
+        max-file: "5"
+    environment:
+      NDD_NUM_THREADS: "0"
+      NDD_AUTH_TOKEN: "${NDD_AUTH_TOKEN:-}"
+    volumes:
+      - endee-data:/data
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama-server
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    restart: unless-stopped
+    profiles:
+      - llm
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: hr-assistant-api
+    ports:
+      - "8000:8000"
+    environment:
+      ENDEE_BASE_URL: http://endee:8080/api/v1
+      ENDEE_AUTH_TOKEN: "${NDD_AUTH_TOKEN:-}"
+      OLLAMA_BASE_URL: http://ollama:11434
+      JWT_SECRET: "${JWT_SECRET:-change-me-in-production}"
+      API_BEARER_TOKEN: "${API_BEARER_TOKEN:-demo-hr-token}"
+      USE_CLOUD_LLM: "${USE_CLOUD_LLM:-0}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      OPENAI_MODEL: "${OPENAI_MODEL:-gpt-4o-mini}"
+      DATABASE_PATH: /data/app.db
+    volumes:
+      - backend-data:/data
+    depends_on:
+      - endee
+    restart: unless-stopped
+    profiles:
+      - full
+
+volumes:
+  endee-data:
+  ollama-data:
+  backend-data:

@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>RAG News Assistant</title>
+    <style>
+        body {
+            font-family: Arial;
+            background: #f5f5f5;
+            text-align: center;
+            margin-top: 100px;
+        }
+        input {
+            padding: 10px;
+            width: 300px;
+            font-size: 16px;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            background: black;
+            color: white;
+            border: none;
+            cursor: pointer;
+        }
+        .result {
+            margin-top: 30px;
+            font-size: 18px;
+            color: #333;
+            white-space: pre-line;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>📰 RAG News Assistant</h1>
+
+    <form method="POST">
+        <input type="text" name="query" placeholder="Ask about news..." required>
+        <button type="submit">Search</button>
+    </form>
+
+    {% if response %}
+        <div class="result">
+            <h3>Results:</h3>
+            <p>{{ response }}</p>
+        </div>
+    {% endif %}
+
+</body>
+</html>

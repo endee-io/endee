@@ -1,0 +1,54 @@
+services:
+  endee:
+    image: endeeio/endee-server:latest
+    container_name: academiq-endee
+    ports:
+      - "8081:8080"
+    ulimits:
+      nofile: 100000
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "200m"
+        max-file: "5"
+    environment:
+      NDD_NUM_THREADS: 0
+      NDD_AUTH_TOKEN: ""        # Leave blank = open mode, no auth needed
+    volumes:
+      - academiq-endee-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: academiq-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - ENDEE_BASE_URL=http://endee:8080/api/v1
+      - ENDEE_AUTH_TOKEN=
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    depends_on:
+      endee:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    image: nginx:alpine
+    container_name: academiq-frontend
+    ports:
+      - "3000:80"
+    volumes:
+      - ./frontend:/usr/share/nginx/html:ro
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  academiq-endee-data:

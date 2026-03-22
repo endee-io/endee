@@ -1,0 +1,13 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.0
+python-multipart==0.0.9
+sentence-transformers==3.0.1
+PyMuPDF==1.24.3
+openai>=1.50.0
+python-dotenv==1.0.1
+pydantic==2.8.0
+pydantic-settings==2.4.0
+transformers==4.44.0
+torch==2.4.0
+endee==0.1.22
+httpx>=0.28.1

@@ -25,11 +25,6 @@ inline UserType userTypeFromString(const std::string& type) {
     return UserType::Admin;
 }
 
-// Get max indices for each user type
-inline int getMaxAllowedIndices(UserType type) {
-    return settings::MAX_ACTIVE_INDICES;
-}
-
 // Get max vectors per index for the single Admin user
 inline size_t getMaxVectorsPerIndex(UserType type) {
     return settings::MAX_VECTORS_ADMIN;  // 1 billion vectors

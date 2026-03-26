@@ -270,8 +270,8 @@ namespace ndd {
                 return false;
             }
 
-            // Set geometry (max 1TB for now, can be configured)
-            rc = mdbx_env_set_geometry(env_, -1, -1, TB, -1, -1, -1);
+            // Set geometry - max size configurable via NDD_SPARSE_MAP_SIZE_MAX_BITS
+            rc = mdbx_env_set_geometry(env_, -1, -1, 1ULL << settings::SPARSE_MAP_SIZE_MAX_BITS, -1, -1, -1);
             if(rc != 0) {
                 LOG_ERROR(2246, index_id_, "mdbx_env_set_geometry failed: " << mdbx_strerror(rc));
                 return false;

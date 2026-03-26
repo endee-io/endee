@@ -106,14 +106,14 @@ namespace ndd {
                 MDBX_txn* txn;
                 int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
                 if(rc != MDBX_SUCCESS) {
-                    throw std::runtime_error("Failed to begin txn for CategoryIndex init");
+                    throw std::runtime_error(std::string("Failed to begin txn for CategoryIndex init: ") + mdbx_strerror(rc));
                 }
 
                 // Open named DB for category/boolean
                 rc = mdbx_dbi_open(txn, "category_idx", MDBX_CREATE, &dbi_);
                 if(rc != MDBX_SUCCESS) {
                     mdbx_txn_abort(txn);
-                    throw std::runtime_error("Failed to open category_idx dbi");
+                    throw std::runtime_error(std::string("Failed to open category_idx dbi: ") + mdbx_strerror(rc));
                 }
 
                 mdbx_txn_commit(txn);

@@ -125,7 +125,7 @@ private:
     void init_environment() {
         int rc = mdbx_env_create(&env_);
         if(rc != 0) {
-            throw std::runtime_error("Failed to create LMDB env for filters");
+            throw std::runtime_error(std::string("Failed to create LMDB env for filters: ") + mdbx_strerror(rc));
         }
         // max DBs to allow multiple databases (main + schema + numeric_forward + numeric_inverted)
         mdbx_env_set_maxdbs(env_, 10);
@@ -140,29 +140,29 @@ private:
                 -1,                                          // shrink threshold (use default)
                 -1);                                         // pagesize (use default)
         if(rc != MDBX_SUCCESS) {
-            throw std::runtime_error("Failed to set geometry for filters");
+            throw std::runtime_error(std::string("Failed to set geometry for filters: ") + mdbx_strerror(rc));
         }
 
         rc = mdbx_env_open(
                 env_, path_.c_str(), MDBX_WRITEMAP | MDBX_MAPASYNC | MDBX_NORDAHEAD, 0664);
         if(rc != 0) {
-            throw std::runtime_error("Failed to open filter environment");
+            throw std::runtime_error(std::string("Failed to open filter environment: ") + mdbx_strerror(rc));
         }
 
         MDBX_txn* txn;
         rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
         if(rc != 0) {
-            throw std::runtime_error("Failed to begin filter transaction");
+            throw std::runtime_error(std::string("Failed to begin filter transaction: ") + mdbx_strerror(rc));
         }
 
         rc = mdbx_dbi_open(txn, nullptr, MDBX_CREATE, &dbi_);
         if(rc != 0) {
             mdbx_txn_abort(txn);
-            throw std::runtime_error("Failed to open filter database");
+            throw std::runtime_error(std::string("Failed to open filter database: ") + mdbx_strerror(rc));
         }
         rc = mdbx_txn_commit(txn);
         if(rc != 0) {
-            throw std::runtime_error("Failed to commit filter transaction");
+            throw std::runtime_error(std::string("Failed to commit filter transaction: ") + mdbx_strerror(rc));
         }
 
         // Initialize Indices

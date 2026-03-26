@@ -227,7 +227,7 @@ jobs:
               --query 'Reservations[0].Instances[0].PublicIpAddress' \
               --output text)
           
-          echo "endee_instance_id=${{ ENDEE_INSTANCE_ID }}" >> $GITHUB_OUTPUT
+          echo "endee_instance_id=$ENDEE_INSTANCE_ID" >> $GITHUB_OUTPUT
           echo "endee_public_ip=$IP" >> $GITHUB_OUTPUT
           echo "Endee Server: $IP"
           
@@ -255,7 +255,7 @@ jobs:
               --query 'Reservations[0].Instances[0].PublicIpAddress' \
               --output text)
           
-          echo "instance_id=${{ BENCHMARKING_INSTANCE_ID }}" >> $GITHUB_OUTPUT
+          echo "instance_id=$BENCHMARKING_INSTANCE_ID" >> $GITHUB_OUTPUT
           echo "correctness_benchmarking_public_ip=$IP" >> $GITHUB_OUTPUT
           echo "Benchmark Server: $IP"
  

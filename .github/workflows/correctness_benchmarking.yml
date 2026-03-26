@@ -200,7 +200,8 @@ jobs:
       
       - name: Server Names
         run: |
-          echo "ENDEE_INSTANCE_NAME=Endee_correctness_${{ needs.validate-command.outputs.head_sha }}" >> $GITHUB_ENV
+          echo "ENDEE_INSTANCE_NAME=Endee_correctness_${{ needs.validate-command.outputs.pr_number }}" >> $GITHUB_ENV
+          echo "CORRECTNESS_BENCHMARKING_INSTANCE_NAME=Correctness_benchmarking_${{ needs.validate-command.outputs.pr_number }}" >> $GITHUB_ENV
  
       - name: Launch Endee Server
         id: start_endee_server
@@ -216,117 +217,127 @@ jobs:
             --query 'Instances[0].InstanceId' \
             --output text)
 
+          aws ec2 wait instance-running \
+            --instance-ids ${{ ENDEE_INSTANCE_ID }}
+
           echo "ENDEE INSTANCE ID: $ENDEE_INSTANCE_ID"
 
-
-
-
           IP=$(aws ec2 describe-instances \
-              --instance-ids ${{ secrets.ENDEE_INSTANCE_ID }} \
+              --instance-ids ${{ ENDEE_INSTANCE_ID }} \
               --query 'Reservations[0].Instances[0].PublicIpAddress' \
               --output text)
           
-          echo "endee_instance_id=${{ secrets.ENDEE_INSTANCE_ID }}" >> $GITHUB_OUTPUT
+          echo "endee_instance_id=${{ ENDEE_INSTANCE_ID }}" >> $GITHUB_OUTPUT
           echo "endee_public_ip=$IP" >> $GITHUB_OUTPUT
           echo "Endee Server: $IP"
           
  
-  #     - name: Launch Benchmark Server
-  #       id: start_benchmark_server
-  #       run: |
-  #         aws ec2 start-instances \
-  #           --instance-ids ${{ secrets.BENCHMARKING_INSTANCE_ID }}
-  #         aws ec2 wait instance-running \
-  #           --instance-ids ${{ secrets.BENCHMARKING_INSTANCE_ID }}
+      - name: Launch Benchmark Server
+        id: start_benchmark_server
+        run: |
+          BENCHMARK_INSTANCE_ID=$(aws ec2 run-instances \
+              --region ${{ vars.AWS_REGION }} \
+              --image-id ${{ vars.AMI_ID }} \
+              --instance-type ${{ vars.BENCHMARKING_SERVER_TYPE }} \
+              --key-name ${{ secrets.BENCHMARKING_PEM }} \
+              --security-group-ids ${{ secrets.VECTORDBBENCH_SERVER_GROUP_ID }} \
+              --subnet-id ${{ secrets.AWS_SUBNET_ID }} \
+              --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$CORRECTNESS_BENCHMARKING_INSTANCE_NAME}]" \
+              --query 'Instances[0].InstanceId' \
+              --output text)
+
+          aws ec2 wait instance-running \
+            --instance-ids ${{ BENCHMARKING_INSTANCE_ID }}
+          echo "ENDEE INSTANCE ID: $ENDEE_INSTANCE_ID"
           
-  #         IP=$(aws ec2 describe-instances \
-  #             --instance-ids ${{ secrets.BENCHMARKING_INSTANCE_ID }} \
-  #             --query 'Reservations[0].Instances[0].PublicIpAddress' \
-  #             --output text)
+          IP=$(aws ec2 describe-instances \
+              --instance-ids ${{ BENCHMARKING_INSTANCE_ID }} \
+              --query 'Reservations[0].Instances[0].PublicIpAddress' \
+              --output text)
           
-  #         echo "instance_id=${{ secrets.BENCHMARKING_INSTANCE_ID }}" >> $GITHUB_OUTPUT
-  #         echo "public_ip=$IP" >> $GITHUB_OUTPUT
-  #         echo "Benchmark Server → ${{ secrets.BENCHMARKING_INSTANCE_ID }} / $IP"
+          echo "instance_id=${{ BENCHMARKING_INSTANCE_ID }}" >> $GITHUB_OUTPUT
+          echo "correctness_benchmarking_public_ip=$IP" >> $GITHUB_OUTPUT
+          echo "Benchmark Server: $IP"
  
-  #     - name: Wait for SSH on both servers
-  #       run: |
+      - name: Wait for SSH on both servers
+        run: |
 
-  #         echo "Creating PEM files for both hosts..." 
-  #         mkdir -p ~/.ssh 
+          echo "Creating PEM files for both hosts..." 
+          mkdir -p ~/.ssh 
 
-  #         echo "${{ secrets.ENDEE_SSH_PRIVATE_KEY }}" > "$HOME/.ssh/${{ secrets.ENDEE_PEM }}"
-  #         chmod 400 "$HOME/.ssh/${{ secrets.ENDEE_PEM }}"
-  #         echo "Endee PEM file Created"
+          echo "${{ secrets.ENDEE_SSH_PRIVATE_KEY }}" > "$HOME/.ssh/${{ secrets.ENDEE_PEM }}"
+          chmod 400 "$HOME/.ssh/${{ secrets.ENDEE_PEM }}"
+          echo "Endee PEM file Created"
 
-  #         echo "${{ secrets.BENCHMARKING_SSH_PRIVATE_KEY }}" > "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}"
-  #         chmod 400 "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}"
-  #         echo "BENCHMARKING PEM file Created"
+          echo "${{ secrets.BENCHMARKING_SSH_PRIVATE_KEY }}" > "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}"
+          chmod 400 "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}"
+          echo "BENCHMARKING PEM file Created"
 
-  #         ENDEE_PEM_FILE="$HOME/.ssh/${{ secrets.ENDEE_PEM }}"
-  #         BENCHMARKING_PEM_FILE="$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}"
-  #         ENDEE_IP="${{ steps.start_endee_server.outputs.public_ip }}"
-  #         BENCHMARKING_IP="${{ steps.start_benchmark_server.outputs.public_ip }}"
+          ENDEE_PEM_FILE="$HOME/.ssh/${{ secrets.ENDEE_PEM }}"
+          BENCHMARKING_PEM_FILE="$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}"
+          ENDEE_IP="${{ steps.start_endee_server.outputs.endee_public_ip }}"
+          CORRECTNESS_BENCHMARKING_IP="${{ steps.start_benchmark_server.outputs.correctness_benchmarking_public_ip }}"
 
-  #         echo "Waiting for SSH on Endee Server..."
-  #         ENDEE_SSH_READY=false
-  #         for i in {1..5}; do
-  #           if ssh -i "$ENDEE_PEM_FILE" -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes ubuntu@"$ENDEE_IP" "echo ok" 2>/dev/null; then
-  #             echo "SSH ready on Endee @ $ENDEE_IP"
-  #             ENDEE_SSH_READY=true
-  #             break
-  #           fi
-  #           echo "Failed $i/5 retrying in 1 second..."
-  #           sleep 1
-  #         done
-  #         if [ "$ENDEE_SSH_READY" = false ]; then
-  #           echo "Failed to SSH to Endee Server"
-  #           exit 1
-  #         fi
+          echo "Waiting for SSH on Endee Server..."
+          ENDEE_SSH_READY=false
+          for i in {1..5}; do
+            if ssh -i "$ENDEE_PEM_FILE" -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes ubuntu@"$ENDEE_IP" "echo ok" 2>/dev/null; then
+              echo "SSH ready on Endee @ $ENDEE_IP"
+              ENDEE_SSH_READY=true
+              break
+            fi
+            echo "Failed $i/5 retrying in 1 second..."
+            sleep 1
+          done
+          if [ "$ENDEE_SSH_READY" = false ]; then
+            echo "Failed to SSH to Endee Server"
+            exit 1
+          fi
 
-  #         echo "Waiting for SSH on Benchmark Server..."
-  #         BENCHMARKING_SSH_READY=false
-  #         for i in {1..5}; do
-  #           if ssh -i "$BENCHMARKING_PEM_FILE" -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes ubuntu@"$BENCHMARKING_IP" "echo ok" 2>/dev/null; then
-  #             echo "SSH ready on Benchmark @ $BENCHMARKING_IP"
-  #             BENCHMARKING_SSH_READY=true
-  #             break
-  #           fi
-  #           echo "Failed $i/5 retrying in 1 second..."
-  #           sleep 1
-  #         done
-  #         if [ "$BENCHMARKING_SSH_READY" = false ]; then
-  #           echo "Failed to SSH to Benchmark Server"
-  #           exit 1
-  #         fi
+          echo "Waiting for SSH on Benchmark Server..."
+          BENCHMARKING_SSH_READY=false
+          for i in {1..5}; do
+            if ssh -i "$BENCHMARKING_PEM_FILE" -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes ubuntu@"$CORRECTNESS_BENCHMARKING_IP" "echo ok" 2>/dev/null; then
+              echo "SSH ready on Benchmark @ $BENCHMARKING_IP"
+              BENCHMARKING_SSH_READY=true
+              break
+            fi
+            echo "Failed $i/5 retrying in 1 second..."
+            sleep 1
+          done
+          if [ "$BENCHMARKING_SSH_READY" = false ]; then
+            echo "Failed to SSH to Benchmark Server"
+            exit 1
+          fi
  
-  #     - name: Update PR → Servers up
-  #       uses: actions/github-script@v7
-  #       with:
-  #         script: |
-  #           const mode      = '${{ needs.validate-command.outputs.mode }}';
-  #           const sha       = '${{ needs.validate-command.outputs.head_sha }}'.slice(0,7);
-  #           const actor     = context.payload.comment.user.login;
-  #           const modeLabel = {dense:'Dense', hybrid:'Hybrid'}[mode];
-  #           const body = [
-  #             `## VectorDB Benchmark — ${modeLabel} — Running`,
-  #             ``,
-  #             `Triggered by @${actor} · Commit \`${sha}\``,
-  #             ``,
-  #             `| Step | Status |`,
-  #             `|------|--------|`,
-  #             `| Provision Servers    | Up         |`,
-  #             `| Deploy Endee Server  | Deploying… |`,
-  #             `| Run Benchmark        | Waiting    |`,
-  #             `| Results              | Waiting    |`,
-  #             `| Teardown             | Waiting    |`,
-  #           ].join('\n');
-  #           const { data: cs } = await github.rest.issues.listComments({
-  #             owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number,
-  #           });
-  #           const sc = cs.find(c => c.body.includes('VectorDB Benchmark —') && c.user.login === 'github-actions[bot]');
-  #           if (sc) await github.rest.issues.updateComment({
-  #             owner: context.repo.owner, repo: context.repo.repo, comment_id: sc.id, body,
-  #           });
+      - name: Update PR → Servers up
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const mode      = '${{ needs.validate-command.outputs.mode }}';
+            const sha       = '${{ needs.validate-command.outputs.head_sha }}'.slice(0,7);
+            const actor     = context.payload.comment.user.login;
+            const modeLabel = {dense:'Dense', hybrid:'Hybrid'}[mode];
+            const body = [
+              `## VectorDB Benchmark — ${modeLabel} — Running`,
+              ``,
+              `Triggered by @${actor} · Commit \`${sha}\``,
+              ``,
+              `| Step | Status |`,
+              `|------|--------|`,
+              `| Provision Servers    | Up         |`,
+              `| Deploy Endee Server  | Deploying… |`,
+              `| Run Benchmark        | Waiting    |`,
+              `| Results              | Waiting    |`,
+              `| Teardown             | Waiting    |`,
+            ].join('\n');
+            const { data: cs } = await github.rest.issues.listComments({
+              owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number,
+            });
+            const sc = cs.find(c => c.body.includes('VectorDB Benchmark —') && c.user.login === 'github-actions[bot]');
+            if (sc) await github.rest.issues.updateComment({
+              owner: context.repo.owner, repo: context.repo.repo, comment_id: sc.id, body,
+            });
  
   # # ──────────────────────────────────────────────────────────
   # # JOB 2: Deploy Endee server on Server A from the PR branch

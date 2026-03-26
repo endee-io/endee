@@ -341,7 +341,7 @@ jobs:
  
   # # ──────────────────────────────────────────────────────────
   # # JOB 2: Deploy Endee server on Server A from the PR branch
-  # # ────────────────────────────────────────────────────────── 
+  # # ──────────────────────────────────────────────────────────
   # deploy-endee:
   #   name: Deploy Endee
   #   needs: [validate-command, provision-servers]

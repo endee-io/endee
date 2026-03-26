@@ -14,15 +14,15 @@ concurrency:
   cancel-in-progress: true
 
 # env:
-  # AWS_REGION: ${{ vars.AWS_REGION }}
-  # ENDEE_SERVER_TYPE: ${{ vars.ENDEE_SERVER_TYPE }}
-  # BENCHMARKING_SERVER_TYPE: ${{ vars.BENCHMARKING_SERVER_TYPE }}
-  # AMI_ID: ${{ vars.AMI_ID }}
-  # ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-  # ENDEE_SERVER_GROUP_ID: ${{ secrets.ENDEE_SERVER_GROUP_ID }}
-  # BENCHMARKING_SERVER_GROUP_ID: ${{ secrets.VECTORDBBENCH_SERVER_GROUP_ID }}
-  # SUBNET_ID: ${{ secrets.AWS_SUBNET_ID }}
-  # ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+#   AWS_REGION: ${{ vars.AWS_REGION }}
+#   ENDEE_SERVER_TYPE: ${{ vars.ENDEE_SERVER_TYPE }}
+#   BENCHMARKING_SERVER_TYPE: ${{ vars.BENCHMARKING_SERVER_TYPE }}
+#   AMI_ID: ${{ vars.AMI_ID }}
+#   ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+#   ENDEE_SERVER_GROUP_ID: ${{ secrets.ENDEE_SERVER_GROUP_ID }}
+#   BENCHMARKING_SERVER_GROUP_ID: ${{ secrets.VECTORDBBENCH_SERVER_GROUP_ID }}
+#   SUBNET_ID: ${{ secrets.AWS_SUBNET_ID }}
+#   ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }} 
 
 jobs:
   # ====== GATE: VALIDATE THE COMMAND BEFORE DOING ANYTHING EXPENSIVE ======
@@ -205,23 +205,28 @@ jobs:
       - name: Launch Endee Server
         id: start_endee_server
         run: |
-          aws ec2 run-instances \
-            --region ${{ vars.AWS_REGION }}
-            --image-id ${{ vars.AMI_ID }}
-            --instance_type ${{ vars.ENDEE_SERVER_TYPE }}
-            --key-name ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-            --security-group-ids ${{ secrets.VECTORDBBENCH_SERVER_GROUP_ID }}
-            --subnet-id ${{ secrets.AWS_SUBNET_ID }}
-            --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$ENDEE_INSTANCE_NAME}]"
+          ENDEE_INSTANCE_ID=$(aws ec2 run-instances \
+            --region ${{ vars.AWS_REGION }} \
+            --image-id ${{ vars.AMI_ID }} \
+            --instance-type ${{ vars.ENDEE_SERVER_TYPE }} \
+            --key-name ${{ secrets.ENDEE_PEM }} \
+            --security-group-ids ${{ secrets.VECTORDBBENCH_SERVER_GROUP_ID }} \
+            --subnet-id ${{ secrets.AWS_SUBNET_ID }} \
+            --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$ENDEE_INSTANCE_NAME}]" \
+            --query 'Instances[0].InstanceId' \
+            --output text)
+
+          echo "ENDEE INSTANCE ID: $ENDEE_INSTANCE_ID"
+
 
 
 
           IP=$(aws ec2 describe-instances \
-              --instance-ids ${{ secrets.ENDEE_SERVER_INSTANCE_ID }} \
+              --instance-ids ${{ secrets.ENDEE_INSTANCE_ID }} \
               --query 'Reservations[0].Instances[0].PublicIpAddress' \
               --output text)
           
-          echo "endee_instance_id=${{ secrets.ENDEE_SERVER_INSTANCE_ID }}" >> $GITHUB_OUTPUT
+          echo "endee_instance_id=${{ secrets.ENDEE_INSTANCE_ID }}" >> $GITHUB_OUTPUT
           echo "endee_public_ip=$IP" >> $GITHUB_OUTPUT
           echo "Endee Server: $IP"
           

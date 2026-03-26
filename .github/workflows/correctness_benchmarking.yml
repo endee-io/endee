@@ -223,7 +223,7 @@ jobs:
           echo "ENDEE INSTANCE ID: $ENDEE_INSTANCE_ID"
 
           IP=$(aws ec2 describe-instances \
-              --instance-ids ${{ ENDEE_INSTANCE_ID }} \
+              --instance-ids $ENDEE_INSTANCE_ID \
               --query 'Reservations[0].Instances[0].PublicIpAddress' \
               --output text)
           
@@ -251,7 +251,7 @@ jobs:
           echo "BENCHMARKING INSTANCE ID: $BENCHMARKING_INSTANCE_ID"
           
           IP=$(aws ec2 describe-instances \
-              --instance-ids ${{ BENCHMARKING_INSTANCE_ID }} \
+              --instance-ids $BENCHMARKING_INSTANCE_ID \
               --query 'Reservations[0].Instances[0].PublicIpAddress' \
               --output text)
           
@@ -339,7 +339,7 @@ jobs:
               owner: context.repo.owner, repo: context.repo.repo, comment_id: sc.id, body,
             });
  
-  # # ──────────────────────────────────────────────────────────
+  # # ────────────────────────────────────────────────────────── 
   # # JOB 2: Deploy Endee server on Server A from the PR branch
   # # ──────────────────────────────────────────────────────────
   # deploy-endee:

@@ -13,16 +13,16 @@ concurrency:
   group: vectordb-benchmark-pr${{ github.event.issue.number }}
   cancel-in-progress: true
 
-env:
-  AWS_REGION: ${{ vars.AWS_REGION }}
-  ENDEE_SERVER_TYPE: ${{ vars.ENDEE_SERVER_TYPE }}
-  BENCHMARKING_SERVER_TYPE: ${{ vars.BENCHMARKING_SERVER_TYPE }}
-  AMI_ID: ${{ vars.AMI_ID }}
-  ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-  ENDEE_SERVER_GROUP_ID: ${{ secrets.ENDEE_SERVER_GROUP_ID }}
-  BENCHMARKING_SERVER_GROUP_ID: ${{ secrets.VECTORDBBENCH_SERVER_GROUP_ID }}
-  SUBNET_ID: ${{ secrets.AWS_SUBNET_ID }}
-  ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+# env:
+  # AWS_REGION: ${{ vars.AWS_REGION }}
+  # ENDEE_SERVER_TYPE: ${{ vars.ENDEE_SERVER_TYPE }}
+  # BENCHMARKING_SERVER_TYPE: ${{ vars.BENCHMARKING_SERVER_TYPE }}
+  # AMI_ID: ${{ vars.AMI_ID }}
+  # ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  # ENDEE_SERVER_GROUP_ID: ${{ secrets.ENDEE_SERVER_GROUP_ID }}
+  # BENCHMARKING_SERVER_GROUP_ID: ${{ secrets.VECTORDBBENCH_SERVER_GROUP_ID }}
+  # SUBNET_ID: ${{ secrets.AWS_SUBNET_ID }}
+  # ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
 
 jobs:
   # ====== GATE: VALIDATE THE COMMAND BEFORE DOING ANYTHING EXPENSIVE ======  
@@ -137,9 +137,9 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id:     ${{ ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ ACCESS_KEY }}
-          aws-region:            ${{ AWS_REGION }}
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ vars.AWS_REGION }}
  
       - name: Post "Starting" status to PR
         uses: actions/github-script@v7

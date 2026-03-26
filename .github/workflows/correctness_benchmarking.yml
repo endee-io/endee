@@ -218,7 +218,7 @@ jobs:
             --output text)
 
           aws ec2 wait instance-running \
-            --instance-ids ${{ ENDEE_INSTANCE_ID }}
+            --instance-ids $ENDEE_INSTANCE_ID
 
           echo "ENDEE INSTANCE ID: $ENDEE_INSTANCE_ID"
 
@@ -247,8 +247,8 @@ jobs:
               --output text)
 
           aws ec2 wait instance-running \
-            --instance-ids ${{ BENCHMARKING_INSTANCE_ID }}
-          echo "ENDEE INSTANCE ID: $ENDEE_INSTANCE_ID"
+            --instance-ids $BENCHMARKING_INSTANCE_ID
+          echo "BENCHMARKING INSTANCE ID: $BENCHMARKING_INSTANCE_ID"
           
           IP=$(aws ec2 describe-instances \
               --instance-ids ${{ BENCHMARKING_INSTANCE_ID }} \

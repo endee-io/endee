@@ -1420,7 +1420,7 @@ public:
     }
 
     // Delete a single vector by string ID - vector data will not be deleted. The meta and filter
-    // will be deleted and the vector will be marked as deleted in HNSW. The id will put in the
+    // will be deleted and the vector will be marked as deleted in HNSW. The id will be put in the
     // deleted_ids in id mapper and will be reused for new vectors
     bool deleteVector(const std::string& index_id, const std::string& str_id) {
         try {

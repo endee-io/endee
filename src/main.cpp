@@ -655,7 +655,7 @@ int main(int argc, char** argv) {
                 }
             });
 
-    // upload Backup
+    // Upload Backup
     CROW_ROUTE(app, "/api/v1/backups/upload")
             .CROW_MIDDLEWARES(app, AuthMiddleware)
             .methods("POST"_method)([&index_manager, &app](const crow::request& req) {

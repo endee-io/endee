@@ -15,10 +15,10 @@ Both layers live in the same MDBX environment and are updated atomically within 
 
 | File | What it does |
 |---|---|
-| [sparse_vector.hpp](src/sparse/sparse_vector.hpp) | `SparseVector` struct: holds `(term_id, weight)` pairs, packs/unpacks them to a compact binary format |
-| [sparse_storage.hpp](src/sparse/sparse_storage.hpp) | `SparseVectorStorage`: public API — open the DB, store/delete/search vectors, manage transactions |
-| [inverted_index.hpp](src/sparse/inverted_index.hpp) | `InvertedIndex` class declaration, on-disk structs (`BlockHeader`, `PostingListHeader`), iterator |
-| [inverted_index.cpp](src/sparse/inverted_index.cpp) | All the logic — search algorithm, block merge/save/load, quantization, SIMD helpers, pruning |
+| [sparse_vector.hpp](../src/sparse/sparse_vector.hpp) | `SparseVector` struct: holds `(term_id, weight)` pairs, packs/unpacks them to a compact binary format |
+| [sparse_storage.hpp](../src/sparse/sparse_storage.hpp) | `SparseVectorStorage`: public API — open the DB, store/delete/search vectors, manage transactions |
+| [inverted_index.hpp](../src/sparse/inverted_index.hpp) | `InvertedIndex` class declaration, on-disk structs (`BlockHeader`, `PostingListHeader`), iterator |
+| [inverted_index.cpp](../src/sparse/inverted_index.cpp) | All the logic — search algorithm, block merge/save/load, quantization, SIMD helpers, pruning |
 
 ## Data types
 

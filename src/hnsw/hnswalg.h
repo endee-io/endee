@@ -60,7 +60,7 @@ namespace hnswlib {
         // Used for loading an existing index
         HierarchicalNSW(const std::string& location, size_t max_elements = 0) :
             linkListLocks_(settings::MAX_LINK_LIST_LOCKS) {
-            // Initilaize label lookup vector. Values will be filled in loadIndex
+            // Initialize label lookup vector. Values will be filled in loadIndex
             loadIndex(location, max_elements);
         }
         // Used for creating a new index

@@ -7,7 +7,7 @@ on:
     branches: [ feature/ci_main ]
 
 
-# ONYLY ONE BENCHMARK RUN AT A TIME PER PR
+# ONYLY ONE BENCHMARK RUN AT A TIME PER PR 
 # IF SAME PR COMMENT UPDATED FROM BENCHMARK/DENSE TO BENCHMARK/HYBRID, CANCEL INPROGRESS RUN AND START UPDATED ONE  
 concurrency:
   group: vectordb-benchmark-pr${{ github.event.issue.number }}

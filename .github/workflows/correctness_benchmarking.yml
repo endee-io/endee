@@ -275,8 +275,8 @@ jobs:
 
           ENDEE_PEM_FILE="$HOME/.ssh/${{ secrets.ENDEE_PEM }}"
           BENCHMARKING_PEM_FILE="$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}"
-          ENDEE_IP="${{ steps.start_endee_server.outputs.endee_public_ip }}"
-          CORRECTNESS_BENCHMARKING_IP="${{ steps.start_benchmark_server.outputs.correctness_benchmarking_public_ip }}"
+          ENDEE_IP="${{ steps.start_endee_server.outputs.public_ip }}"
+          CORRECTNESS_BENCHMARKING_IP="${{ steps.start_benchmark_server.outputs.public_ip }}"
 
           echo "Waiting for SSH on Endee Server..."
           ENDEE_SSH_READY=false
@@ -558,7 +558,7 @@ jobs:
  
     outputs:
       passed: ${{ steps.run.outputs.passed }}
-      report: ${{ steps.run.outputs.report }}f
+      report: ${{ steps.run.outputs.report }}
  
     steps:
       - name: Checkout
@@ -571,7 +571,7 @@ jobs:
         with:
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            ${{ env.AWS_REGION }}
+          aws-region:            ${{ vars.AWS_REGION }}
  
       - name: Setup SSH for Benchmark Server
         run: |
@@ -695,7 +695,7 @@ jobs:
       # - name: Sparse Benchmarking
       #   run: | 
 
-  # ──────────────────────────────────────────────────────────
+  # ──────────────────────────────────────────────────────────  
   # JOB 4: Post final results to PR (always, even on failure)
   # ──────────────────────────────────────────────────────────
   report-results:
@@ -717,7 +717,7 @@ jobs:
         id: fetch_result 
         run: | 
           BENCHMARK_IP="${{ needs.provision-servers.outputs.benchmark_server_ip }}"
-          RESULT_DIR="/opt/benchmark/VectorDBBench/vectordb_bench/results/Endee"
+          RESULT_DIR="~/benchmark/VectorDBBench/vectordb_bench/results/Endee"
 
           # FIND THE LATEST RESULT FILE ON THE SERVER  
           LATEST_RESULT_FILE=$(ssh -i "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}" "${{ secrets.BENCHMARKING_USERNAME }}"@"$BENCHMARK_IP" "ls -t $RESULT_DIR/result_*.json 2>/dev/null | head -1")

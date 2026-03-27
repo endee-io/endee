@@ -12,7 +12,7 @@ inline crow::response admin_json_error(int code, const std::string& message) {
     return crow::response(code, err_json.dump());
 }
 
-// Register all 18 admin endpoints for serverless mode
+// Register all 16 admin endpoints for serverless mode
 // Template allows working with any Crow app type
 template <typename App>
 void registerAdminRoutes(App& app,
@@ -332,90 +332,7 @@ void registerAdminRoutes(App& app,
             return admin_json_error(404, "Token name '" + token_name + "' not found");
         });
 
-    // 13. POST /api/v1/admin/users/<username>/indices/<index_id>/reset - Reset index (admin only)
-    //     Body: {"dim": 1536, "space_type": "cosine", "M": 16, "ef_con": 200, "quant_level": 8, "checksum": -1}
-    CROW_ROUTE(app, "/api/v1/admin/users/<string>/indices/<string>/reset")
-        .CROW_MIDDLEWARES(app, ServerlessAuthMiddleware)
-        .methods("POST"_method)([&index_manager, &auth_manager, &app](
-                const crow::request& req, std::string username, std::string index_id) {
-            auto& ctx = app.template get_context<ServerlessAuthMiddleware>(req);
-
-            if(!auth_manager.isAdmin(ctx.username)) {
-                return admin_json_error(403, "Admin access required");
-            }
-
-            // Construct full index_id (username/index_name format)
-            std::string full_index_id = username + "/" + index_id;
-
-            auto body = crow::json::load(req.body);
-            if(!body) {
-                return admin_json_error(400, "Invalid JSON body");
-            }
-
-            // Build config from body params
-            size_t dim = body.has("dim") ? static_cast<size_t>(body["dim"].i()) : 0;
-            const std::string sparse_model_str =
-                body.has("sparse_model") ? std::string(body["sparse_model"].s()) : "None";
-            const auto sparse_model = ndd::sparseScoringModelFromString(sparse_model_str);
-            if(!sparse_model.has_value()) {
-                return admin_json_error(400, "Invalid sparse_model. Must be one of: None, default, endee_bm25");
-            }
-            std::string space_type = body.has("space_type") ? std::string(body["space_type"].s()) : "cosine";
-            size_t M = body.has("M") ? static_cast<size_t>(body["M"].i()) : 16;
-            size_t ef_con = body.has("ef_con") ? static_cast<size_t>(body["ef_con"].i()) : 200;
-            int quant_level_int = body.has("quant_level") ? static_cast<int>(body["quant_level"].i()) : 8;
-            int checksum = body.has("checksum") ? static_cast<int>(body["checksum"].i()) : -1;
-
-            if(dim == 0) {
-                return admin_json_error(400, "dim is required");
-            }
-
-            auto quant_level = static_cast<ndd::quant::QuantizationLevel>(quant_level_int);
-
-            IndexConfig config{
-                dim,
-                *sparse_model,
-                settings::MAX_ELEMENTS,
-                space_type,
-                M,
-                ef_con,
-                quant_level,
-                checksum
-            };
-
-            if(index_manager.resetIndex(full_index_id, config)) {
-                crow::json::wvalue response;
-                response["message"] = "Index reset successfully";
-                return crow::response(200, response.dump());
-            }
-
-            return admin_json_error(500, "Failed to reset index");
-        });
-
-    // 14. POST /api/v1/admin/users/<username>/indices/<index_id>/recover - Recover index (admin only)
-    CROW_ROUTE(app, "/api/v1/admin/users/<string>/indices/<string>/recover")
-        .CROW_MIDDLEWARES(app, ServerlessAuthMiddleware)
-        .methods("POST"_method)([&index_manager, &auth_manager, &app](
-                const crow::request& req, std::string username, std::string index_id) {
-            auto& ctx = app.template get_context<ServerlessAuthMiddleware>(req);
-
-            if(!auth_manager.isAdmin(ctx.username)) {
-                return admin_json_error(403, "Admin access required");
-            }
-
-            // Construct full index_id (username/index_name format)
-            std::string full_index_id = username + "/" + index_id;
-
-            if(index_manager.recoverIndex(full_index_id)) {
-                crow::json::wvalue response;
-                response["message"] = "Index recovered successfully";
-                return crow::response(200, response.dump());
-            }
-
-            return admin_json_error(404, "Index not found or recovery failed");
-        });
-
-    // ===== SELF-SERVICE ENDPOINTS (15-18) =====
+    // ===== SELF-SERVICE ENDPOINTS (13-16) =====
 
     // 15a. GET /api/v1/users/<username>/info - Get user info (self or admin)
     CROW_ROUTE(app, "/api/v1/users/<string>/info")

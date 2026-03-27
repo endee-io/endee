@@ -406,11 +406,11 @@ jobs:
               -czf /tmp/endee_bundle.tar.gz .
           
           # SSH TO SERVER AND CREATE ENDEE FOLDER IF NOT EXISTS AND CHANGE IT'S OWNER AS WELL
-          ssh -i "$HOME/.ssh/${{ secrets.ENDEE_PEM }}" "${{ secrets.ENDEE_USERNAME }}"@"${{ needs.provision-servers.outputs.endee_server_ip }}" "sudo mkdir -p /opt/endee && sudo chown "${{ secrets.ENDEE_USERNAME }}":"${{ secrets.ENDEE_USERNAME }}" /opt/endee"
+          ssh -i "$HOME/.ssh/${{ secrets.ENDEE_PEM }}" "${{ secrets.ENDEE_USERNAME }}"@"${{ needs.provision-servers.outputs.endee_server_ip }}" "sudo mkdir -p ~/endee && sudo chown "${{ secrets.ENDEE_USERNAME }}":"${{ secrets.ENDEE_USERNAME }}" ~/endee"
 
           # TRANSFER THE BUNDLE TO THE SERVER
           scp -i "$HOME/.ssh/${{ secrets.ENDEE_PEM }}" /tmp/endee_bundle.tar.gz \
-            "${{ secrets.ENDEE_USERNAME }}"@"${{ needs.provision-servers.outputs.endee_server_ip }}":/opt/endee/bundle.tar.gz
+            "${{ secrets.ENDEE_USERNAME }}"@"${{ needs.provision-servers.outputs.endee_server_ip }}":~/endee/bundle.tar.gz
  
       - name: Extract, install, start Endee server
         env:
@@ -454,7 +454,7 @@ jobs:
               # ------------------------------------------------------------------------------------------
               # ===============================================================================================
               
-            cd /opt/endee
+            cd ~/endee
             tar -xzf bundle.tar.gz && rm bundle.tar.gz
 
             # START ENDEE SERVER 
@@ -475,17 +475,17 @@ jobs:
               echo "DOCKER INSTALLED: \$(docker --version)"
             fi
 
-            # RUN WITHOUT SUDO — ADD username TO DOCKER GROUP
-            if groups ${{ secrets.ENDEE_USERNAME }} | grep -q docker; then
-              echo "${{ secrets.ENDEE_USERNAME }} already in docker group"
-            else
-              echo "Adding ${{ secrets.ENDEE_USERNAME }} to docker group..."
-              sudo usermod -aG docker ${{ secrets.ENDEE_USERNAME }}
-              echo "${{ secrets.ENDEE_USERNAME }} added to docker group"
-            fi
+            # # RUN WITHOUT SUDO — ADD username TO DOCKER GROUP
+            # if groups ${{ secrets.ENDEE_USERNAME }} | grep -q docker; then
+            #   echo "${{ secrets.ENDEE_USERNAME }} already in docker group"
+            # else
+            #   echo "Adding ${{ secrets.ENDEE_USERNAME }} to docker group..."
+            #   sudo usermod -aG docker ${{ secrets.ENDEE_USERNAME }}
+            #   echo "${{ secrets.ENDEE_USERNAME }} added to docker group"
+            # fi
 
-            # APPLY GROUP CHANGE WITHOUT LOGOUT
-            sg docker -c "docker ps >  /dev/null 2>&1 && echo 'Docker running without sudo' || echo 'Docker check failed'"
+            # # APPLY GROUP CHANGE WITHOUT LOGOUT
+            # sg docker -c "docker ps >  /dev/null 2>&1 && echo 'Docker running without sudo' || echo 'Docker check failed'"
 
             # GET THE ARCHITECTURE OF THE SERVER
             arc=\$(grep -o 'avx2\|avx512\|neon\|sve2' /proc/cpuinfo | sort -u)
@@ -495,19 +495,19 @@ jobs:
 
             # BUILD ENDEE IMAGE
             echo "BUILDING ENDEE IMAGE"
-            docker build --ulimit nofile=100000:100000 --build-arg BUILD_ARCH="\$arc" --build-arg DEBUG=true -t endee-oss:latest -f ./infra/Dockerfile .
+            sudo docker build --ulimit nofile=100000:100000 --build-arg BUILD_ARCH="\$arc" --build-arg DEBUG=true -t endee-oss:latest -f ./infra/Dockerfile .
 
             # DOWN THE EXISTING CONTAINER IF EXISTS
             echo "DOWNING THE EXISTING CONTAINER IF EXISTS"
-            docker rm -f endee-server 2>/dev/null || true
+            sudo docker rm -f endee-server 2>/dev/null || true
 
             # RUN THE ENDEE CONTAINER
             echo "RUNNING ENDEE CONTAINER"
-            docker run -d -p 8080:8080 -v endee-data:/data -e NDD_AUTH_TOKEN="" --name endee-server endee-oss:latest
+            sudo docker run -d -p 8080:8080 -v endee-data:/data -e NDD_AUTH_TOKEN="" --name endee-server endee-oss:latest
 
             # CHECK IF THE CONTAINER IS RUNNING
             echo "CHECKING IF THE CONTAINER IS RUNNING"
-            if docker ps | grep -q endee-server; then
+            if sudo docker ps | grep -q endee-server; then
               echo "ENDEE CONTAINER IS RUNNING"
             else
               echo "ENDEE CONTAINER IS NOT RUNNING"

@@ -239,7 +239,7 @@ jobs:
               --region ${{ vars.AWS_REGION }} \
               --image-id ${{ vars.AMI_ID }} \
               --instance-type ${{ vars.BENCHMARKING_SERVER_TYPE }} \
-              --key-name ${{ secrets.BENCHMARKING_PEM }} \
+              --key-name ${{ secrets.BENCHMARKING_KEY_PAIR_NAME }} \
               --security-group-ids ${{ secrets.VECTORDBBENCH_SERVER_GROUP_ID }} \
               --subnet-id ${{ secrets.AWS_SUBNET_ID }} \
               --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$CORRECTNESS_BENCHMARKING_INSTANCE_NAME}]" \
@@ -339,7 +339,7 @@ jobs:
               owner: context.repo.owner, repo: context.repo.repo, comment_id: sc.id, body,
             });
  
-  # # ────────────────────────────────────────────────────────── 
+  # # ──────────────────────────────────────────────────────────
   # # JOB 2: Deploy Endee server on Server A from the PR branch
   # # ──────────────────────────────────────────────────────────
   # deploy-endee:

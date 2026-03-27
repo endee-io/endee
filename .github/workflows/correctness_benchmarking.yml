@@ -235,7 +235,7 @@ jobs:
       - name: Launch Benchmark Server
         id: start_benchmark_server
         run: |
-          BENCHMARK_INSTANCE_ID=$(aws ec2 run-instances \
+          BENCHMARKING_INSTANCE_ID=$(aws ec2 run-instances \
               --region ${{ vars.AWS_REGION }} \
               --image-id ${{ vars.AMI_ID }} \
               --instance-type ${{ vars.BENCHMARKING_SERVER_TYPE }} \

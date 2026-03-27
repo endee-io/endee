@@ -30,6 +30,8 @@ namespace settings {
     constexpr size_t DEFAULT_EF_SEARCH = 128;
     constexpr size_t MIN_K = 1;
     constexpr size_t MAX_K = 4096;
+    constexpr float DEFAULT_DENSE_RRF_WEIGHT = 0.5f;
+    constexpr float DEFAULT_RRF_RANK_CONSTANT = 60.0f;
     constexpr size_t RANDOM_SEED = 100;
     constexpr size_t SAVE_EVERY_N_UPDATES = 10'000;
     constexpr size_t RECOVERY_BATCH_SIZE = 20'000;

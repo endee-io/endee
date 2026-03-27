@@ -1475,16 +1475,11 @@ public:
                 const nlohmann::json& filter_array,
                 ndd::FilterParams params = {},
                 bool include_vectors = false,
-                size_t ef = 0)
+                size_t ef = settings::DEFAULT_EF_SEARCH ,
+                float kDenseRrfWeight = settings::DEFAULT_DENSE_RRF_WEIGHT,
+                float kRrfRankConstant = settings::DEFAULT_RRF_RANK_CONSTANT)
     {
-        /**
-         * Keep the hybrid weights local for now. The next API step can pass one weight
-         * per ranked list and reuse the same weighted RRF accumulation below.
-         * TODO: to be received from search API.
-         */
-        constexpr float kDenseRrfWeight = 0.5f;
-        constexpr float kSparseRrfWeight = 0.5f;
-        constexpr float kRrfRankConstant = 60.0f;
+        const float kSparseRrfWeight = 1.0f - kDenseRrfWeight;
         try {
             auto entry_ptr = getIndexEntry(index_id);
             auto& entry = *entry_ptr;
@@ -1497,7 +1492,6 @@ public:
             // std::shared_lock<std::shared_mutex> operation_lock(entry.operation_mutex);
 
             entry.searchCount += k;
-
             const bool run_dense_search = kDenseRrfWeight > 0.0f && !query.empty();
 
             const bool run_sparse_search =

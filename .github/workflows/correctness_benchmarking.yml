@@ -228,7 +228,7 @@ jobs:
               --output text)
           
           aws ec2 authorize-security-group-ingress \
-            --group-id ${{ secrets.VECTORDBBENCH_SERVER_GROUP_ID }}
+            --group-id ${{ secrets.VECTORDBBENCH_SERVER_GROUP_ID }} \
             --protocol tcp \
             --port 8080 \
             --cidr 172.31.0.0/16

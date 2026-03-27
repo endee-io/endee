@@ -111,7 +111,7 @@ jobs:
               content:    'rocket',
             });
 
-  # ──────────────────────────────────────────────────────────
+  # ────────────────────────────────────────────────────────── 
   # JOB 1: Provision both servers in parallel
   # ──────────────────────────────────────────────────────────
   provision-servers:
@@ -233,11 +233,20 @@ jobs:
               --query 'Reservations[0].Instances[0].PrivateIpAddress' \
               --output text)
           
-          aws ec2 authorize-security-group-ingress \
-            --group-id ${{ secrets.VECTORDBBENCH_SERVER_GROUP_ID }} \
-            --protocol tcp \
-            --port 8080 \
-            --cidr 172.31.0.0/16
+          # CHECK IF PORT 8080 IS OPEN FOR VPC NETWORK
+          EXISTS=$(aws ec2 describe-security-groups \
+            --group-ids ${{ secrets.VECTORDBBENCH_SERVER_GROUP_ID }} \
+            --query "SecurityGroups[0].IpPermissions[?FromPort==\`8080\` && ToPort==\`8080\` && IpRanges[?CidrIp=='172.31.0.0/16']]" \
+            --output text)
+          
+          # IF NOT EXIST THEN OPEN PORT 8080 FOR VPC NETWORK
+          if [ ! "$EXIST" ]; then 
+            aws ec2 authorize-security-group-ingress \
+              --group-id ${{ secrets.VECTORDBBENCH_SERVER_GROUP_ID }} \
+              --protocol tcp \
+              --port 8080 \
+              --cidr 172.31.0.0/16
+          fi
           
           echo "OPEN PORT FOR VPC"
           echo "instance_id=$ENDEE_INSTANCE_ID" >> $GITHUB_OUTPUT

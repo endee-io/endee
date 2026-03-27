@@ -239,8 +239,8 @@ jobs:
             --query "SecurityGroups[0].IpPermissions[?FromPort==\`8080\` && ToPort==\`8080\` && IpRanges[?CidrIp=='172.31.0.0/16']]" \
             --output text)
           
-          # IF NOT EXIST THEN OPEN PORT 8080 FOR VPC NETWORK
-          if [ -z "$EXIST" ]; then 
+          # IF NOT EXISTS THEN OPEN PORT 8080 FOR VPC NETWORK
+          if [ -z "$EXISTS" ]; then 
             aws ec2 authorize-security-group-ingress \
               --group-id ${{ secrets.VECTORDBBENCH_SERVER_GROUP_ID }} \
               --protocol tcp \
@@ -362,7 +362,7 @@ jobs:
               owner: context.repo.owner, repo: context.repo.repo, comment_id: sc.id, body,
             });
  
-  # ────────────────────────────────────────────────────────── 
+  # ──────────────────────────────────────────────────────────
   # JOB 2: Deploy Endee server on Server A from the PR branch
   # ──────────────────────────────────────────────────────────
   deploy-endee:

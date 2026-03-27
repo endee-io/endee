@@ -227,7 +227,7 @@ jobs:
               --query 'Reservations[0].Instances[0].PublicIpAddress' \
               --output text)
           
-          aws ec2 authorize-security-group ingress \
+          aws ec2 authorize-security-group-ingress \
             --group-id ${{ secrets.VECTORDBBENCH_SERVER_GROUP_ID }}
             --protocol tcp \
             --port 8080 \

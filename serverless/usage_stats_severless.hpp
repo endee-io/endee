@@ -47,18 +47,18 @@ inline bool sendUsageStatsToServer(const nlohmann::json& usage_data) {
 // Collect usage stats from all indices and send to remote endpoint
 // Called from IndexManager::checkAndSaveIndices() every 5 minutes
 // Only sends if SERVER_TYPE == "SERVERLESS" and searchCount > 0
-inline void collectAndSendUsageStats(std::unordered_map<std::string, CacheEntry>& indices) {
+inline void collectAndSendUsageStats(std::unordered_map<std::string, std::shared_ptr<CacheEntry>>& indices) {
     nlohmann::json usage_array = nlohmann::json::array();
 
     for(auto& [index_id, entry] : indices) {
-        if(entry.searchCount > 0 && entry.alg) {
-            double search_points = (static_cast<double>(entry.searchCount) * entry.alg->getDimension()) / 1'000'000.0;
+        if(entry && entry->searchCount > 0 && entry->alg) {
+            double search_points = (static_cast<double>(entry->searchCount) * entry->alg->getDimension()) / 1'000'000.0;
             usage_array.push_back({
                 {"server_id", settings::SERVER_ID},
                 {"index_id", index_id},
                 {"search_points", search_points}
             });
-            entry.resetSearchCount();
+            entry->resetSearchCount();
         }
     }
 

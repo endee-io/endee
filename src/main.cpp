@@ -260,6 +260,7 @@ int main(int argc, char** argv) {
         std::cerr << "FATAL: NDD_AUTH_TOKEN must be set in serverless mode." << std::endl;
         return 1;
     }
+#endif
 
     LOG_INFO("SERVER_ID: " << settings::SERVER_ID);
     LOG_INFO("SERVER_PORT: " << settings::SERVER_PORT);

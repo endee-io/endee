@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 # env:
-#   AWS_REGION: ${{ vars.AWS_REGION }}
+#   AWS_REGION: ${{ vars.AWS_REGION }} 
 #   ENDEE_SERVER_TYPE: ${{ vars.ENDEE_SERVER_TYPE }}
 #   BENCHMARKING_SERVER_TYPE: ${{ vars.BENCHMARKING_SERVER_TYPE }}
 #   AMI_ID: ${{ vars.AMI_ID }}

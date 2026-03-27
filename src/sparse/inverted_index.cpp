@@ -1523,6 +1523,27 @@ namespace ndd {
 
                 size_t ei = 0;
                 size_t bi = 0;
+
+                /**
+                 * Checks if the incoming block updates have any weights
+                 * that are 0s or negatives.
+                 */
+                for (size_t i = 0; i < block_updates.size(); i++) {
+                    const float update_value = block_updates[i].second;
+                    if (update_value == 0.0f) {
+                        LOG_WARN(2227,
+                                 index_id_,
+                                 "addDocumentsBatch received zero value for term "
+                                         << term_id << "; entry will be treated as deleted");
+                    } else if (update_value < 0.0f) {
+                        LOG_WARN(2228,
+                                 index_id_,
+                                 "addDocumentsBatch received negative value " << update_value
+                                                                              << " for term " << term_id
+                                                                              << "; treating as dead");
+                    }
+                }
+
                 while (ei < existing.size() && bi < block_updates.size()) {
                     ndd::idInt existing_id = existing[ei].doc_id;
                     ndd::idInt update_id = block_updates[bi].first;
@@ -1555,17 +1576,6 @@ namespace ndd {
                     if (e.value > 0.0f) {
                         new_live_in_block++;
                         if (e.value > new_block_max) new_block_max = e.value;
-                    } else if (e.value == 0.0f) {
-                        LOG_WARN(2227,
-                                 index_id_,
-                                 "addDocumentsBatch received zero value for term "
-                                         << term_id << "; entry will be treated as deleted");
-                    } else {
-                        LOG_WARN(2228,
-                                 index_id_,
-                                 "addDocumentsBatch received negative value " << e.value
-                                                                              << " for term " << term_id
-                                                                              << "; treating as dead");
                     }
                 }
 

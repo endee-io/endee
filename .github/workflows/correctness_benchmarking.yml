@@ -240,7 +240,7 @@ jobs:
             --output text)
           
           # IF NOT EXIST THEN OPEN PORT 8080 FOR VPC NETWORK
-          if [ ! "$EXIST" ]; then 
+          if [ -z "$EXIST" ]; then 
             aws ec2 authorize-security-group-ingress \
               --group-id ${{ secrets.VECTORDBBENCH_SERVER_GROUP_ID }} \
               --protocol tcp \

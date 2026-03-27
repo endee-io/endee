@@ -142,7 +142,6 @@ struct PersistenceConfig {
 };
 
 #include "../storage/backup_store.hpp"
-#include "rebuild.hpp"
 
 class IndexManager {
 private:
@@ -162,10 +161,7 @@ private:
     // Write-ahead log for each index
     std::unordered_map<std::string, std::unique_ptr<WriteAheadLog>> wal_logs_;
     BackupStore backup_store_;
-    Rebuild rebuild_;
     void executeBackupJob(const std::string& index_id, const std::string& backup_name);
-    void executeRebuildJob(const std::string& index_id, const std::string& username,
-                           size_t new_M, size_t new_ef_con);
 
     // New methods to handle WAL
     WriteAheadLog* getOrCreateWAL(const std::string& index_id) {
@@ -490,7 +486,6 @@ public:
         backup_store_(data_dir) {
         std::filesystem::create_directories(data_dir);
         metadata_manager_ = std::make_unique<MetadataManager>(data_dir);
-        rebuild_.cleanupTempFiles(data_dir);
         // Start the autosave thread
         autosave_thread_ = std::thread(&IndexManager::autosaveLoop, this);
     }
@@ -1749,54 +1744,6 @@ public:
     std::pair<bool, std::string> validateBackupName(const std::string& backup_name) const {
         return backup_store_.validateBackupName(backup_name);
     }
-
-    // Metadata access
-    std::optional<IndexMetadata> getMetadata(const std::string& index_id) {
-        return metadata_manager_->getMetadata(index_id);
-    }
-
-    // Index stats (safe to call from routes)
-    size_t getElementCount(const std::string& index_id) {
-        auto& entry = getIndexEntry(index_id);
-        return entry.alg->getElementsCount();
-    }
-
-
-    // ========== Rebuild operations ==========
-
-    // Orchestration method (defined below after class)
-    std::pair<bool, std::string> rebuildIndexAsync(const std::string& index_id,
-                                                    size_t new_M,
-                                                    size_t new_ef_con);
-
-    bool hasActiveRebuild(const std::string& username) const {
-        return rebuild_.hasActiveRebuild(username);
-    }
-
-    nlohmann::json getRebuildProgress(const std::string& username,
-                                      const std::string& index_id) const {
-        auto state = rebuild_.getActiveRebuild(username);
-        if (state && state->index_id == index_id) {
-            size_t processed = state->vectors_processed.load();
-            size_t total = state->total_vectors.load();
-            double percent = total > 0 ? (100.0 * processed / total) : 0.0;
-            nlohmann::json result = {
-                {"status", state->status},
-                {"vectors_processed", processed},
-                {"total_vectors", total},
-                {"percent_complete", percent},
-                {"started_at", Rebuild::formatTime(state->started_at)}
-            };
-            if (state->status == "completed" || state->status == "failed") {
-                result["completed_at"] = Rebuild::formatTime(state->completed_at);
-            }
-            if (state->status == "failed" && !state->error_message.empty()) {
-                result["error"] = state->error_message;
-            }
-            return result;
-        }
-        return {{"status", "idle"}};
-    }
 };
 
 // ========== IndexManager backup implementations ==========
@@ -2063,215 +2010,4 @@ inline std::pair<bool, std::string> IndexManager::createBackupAsync(const std::s
     LOG_INFO(2046, index_id, "Backup started: " << backup_name);
 
     return {true, backup_name};
-}
-
-// ========== IndexManager rebuild implementations ==========
-
-inline std::pair<bool, std::string> IndexManager::rebuildIndexAsync(const std::string& index_id,
-                                                                     size_t new_M,
-                                                                     size_t new_ef_con) {
-    // Validate index exists
-    auto meta = metadata_manager_->getMetadata(index_id);
-    if (!meta) {
-        return {false, "Index not found"};
-    }
-
-    // Extract username for backup check
-    std::string username;
-    size_t pos = index_id.find('/');
-    if (pos != std::string::npos) {
-        username = index_id.substr(0, pos);
-    } else {
-        return {false, "Invalid index ID format"};
-    }
-
-    // Check for active backup or rebuild
-    if (backup_store_.hasActiveBackup(username)) {
-        return {false, "Backup already in progress for user: " + username};
-    }
-    if (rebuild_.hasActiveRebuild(username)) {
-        return {false, "Rebuild already in progress for user: " + username};
-    }
-
-    // Load entry to get current element count
-    auto& entry = getIndexEntry(index_id);
-    size_t current_count = entry.alg->getElementsCount();
-
-    // Ensure at least one parameter differs
-    if (new_M == meta->M && new_ef_con == meta->ef_con) {
-        return {false, "No configuration changes specified"};
-    }
-
-    // Set active rebuild state (per-user, one rebuild at a time)
-    rebuild_.setActiveRebuild(username, index_id, current_count);
-
-    // Spawn background thread (same pattern as createBackupAsync)
-    std::thread([this, index_id, username, new_M, new_ef_con]() {
-        executeRebuildJob(index_id, username, new_M, new_ef_con);
-    }).detach();
-
-    LOG_INFO(2050, index_id, "Rebuild started: M=" << new_M
-                              << " ef_con=" << new_ef_con);
-
-    return {true, "Rebuild started"};
-}
-
-inline void IndexManager::executeRebuildJob(const std::string& index_id,
-                                             const std::string& username,
-                                             size_t new_M, size_t new_ef_con) {
-    std::string base_path = data_dir_ + "/" + index_id;
-    std::string temp_path = rebuild_.getTempPath(base_path);
-    std::string timestamped_path = rebuild_.getTimestampedPath(base_path);
-    std::string vector_storage_dir = base_path + "/vectors";
-    std::string index_path = vector_storage_dir + "/" + settings::DEFAULT_SUBINDEX + ".idx";
-
-    try {
-        auto& entry = getIndexEntry(index_id);
-
-        // Hold operation_mutex for entire rebuild — writes timeout, searches continue
-        std::lock_guard<std::mutex> operation_lock(entry.operation_mutex);
-
-        // Phase 1 — Save current state
-        saveIndexInternal(entry);
-
-        // Read current config from the existing HNSW graph
-        auto space_type = entry.alg->getSpaceType();
-        size_t dim = entry.alg->getDimension();
-        auto quant_level = entry.alg->getQuantLevel();
-        int32_t checksum = entry.alg->getChecksum();
-        size_t max_elements = entry.alg->getMaxElements();
-
-        // Phase 2 — Build new HNSW (same max_elements as current index)
-        auto new_alg = std::make_unique<hnswlib::HierarchicalNSW<float>>(
-            max_elements, space_type, dim, new_M, new_ef_con,
-            settings::RANDOM_SEED, quant_level, checksum);
-
-        // Set vector fetcher BEFORE adding vectors — searchBaseLayer during
-        // graph construction needs this to compute distances for base-layer-only
-        // nodes (base layer doesn't store vector data inline)
-        new_alg->setVectorFetcher([vs = entry.vector_storage](ndd::idInt label, uint8_t* buffer) {
-            return vs->get_vector(label, buffer);
-        });
-
-        new_alg->setVectorFetcherBatch([vs = entry.vector_storage](const ndd::idInt* labels,
-                                                                     uint8_t* buffers,
-                                                                     bool* success,
-                                                                     size_t count) -> size_t {
-            return vs->get_vectors_batch_into(labels, buffers, success, count);
-        });
-
-        // Iterate VectorStore and re-insert all vectors
-        auto cursor = entry.vector_storage->getCursor();
-        const size_t batch_size = settings::RECOVERY_BATCH_SIZE;
-        size_t total_processed = 0;
-        size_t batches_since_checkpoint = 0;
-        constexpr size_t CHECKPOINT_INTERVAL = 5;  // Save temp every 5 batches
-
-        while (cursor.hasNext()) {
-            // Collect batch
-            std::vector<std::pair<ndd::idInt, std::vector<uint8_t>>> batch;
-            batch.reserve(batch_size);
-            while (cursor.hasNext() && batch.size() < batch_size) {
-                auto [label, vec_bytes] = cursor.next();
-                if (!vec_bytes.empty()) {
-                    batch.emplace_back(label, std::move(vec_bytes));
-                }
-            }
-
-            if (batch.empty()) {
-                break;
-            }
-
-            // Multi-threaded insert (same pattern as addVectors and recoverIndex)
-            size_t num_threads = std::min(settings::NUM_RECOVERY_THREADS, batch.size());
-            std::atomic<size_t> next{0};
-            std::vector<std::thread> threads;
-
-            for (size_t t = 0; t < num_threads; ++t) {
-                threads.emplace_back([&]() {
-                    size_t i;
-                    while ((i = next.fetch_add(1)) < batch.size()) {
-                        const auto& [label, vec_bytes] = batch[i];
-                        new_alg->addPoint<true>(vec_bytes.data(), label);
-                    }
-                });
-            }
-
-            for (auto& th : threads) {
-                th.join();
-            }
-
-            total_processed += batch.size();
-
-            // Update progress
-            auto state = rebuild_.getActiveRebuild(username);
-            if (state) {
-                state->vectors_processed.store(total_processed);
-            }
-
-            // Periodic checkpoint save
-            batches_since_checkpoint++;
-            if (batches_since_checkpoint >= CHECKPOINT_INTERVAL) {
-                new_alg->saveIndex(temp_path);
-                batches_since_checkpoint = 0;
-            }
-        }
-
-        // Phase 3 — Save final + Copy + Swap
-
-        // Save new graph to timestamped file 
-        new_alg->saveIndex(timestamped_path);
-
-        // Copy to canonical name (overwrites old default.idx on disk)
-        std::filesystem::copy_file(timestamped_path, index_path,
-            std::filesystem::copy_options::overwrite_existing);
-
-        // Load fresh from disk + swap pointer (reloadIndex pattern)
-        auto fresh_alg = std::make_unique<hnswlib::HierarchicalNSW<float>>(index_path, 0);
-
-        fresh_alg->setVectorFetcher([vs = entry.vector_storage](ndd::idInt label, uint8_t* buffer) {
-            return vs->get_vector(label, buffer);
-        });
-
-        fresh_alg->setVectorFetcherBatch([vs = entry.vector_storage](const ndd::idInt* labels,
-                                                                       uint8_t* buffers,
-                                                                       bool* success,
-                                                                       size_t count) -> size_t {
-            return vs->get_vectors_batch_into(labels, buffers, success, count);
-        });
-
-        entry.alg = std::move(fresh_alg);
-
-        // Delete temp checkpoint and timestamped file
-        if (std::filesystem::exists(temp_path)) {
-            std::filesystem::remove(temp_path);
-        }
-        if (std::filesystem::exists(timestamped_path)) {
-            std::filesystem::remove(timestamped_path);
-        }
-
-        // Update metadata with new config
-        auto meta = metadata_manager_->getMetadata(index_id);
-        if (meta) {
-            meta->M = new_M;
-            meta->ef_con = new_ef_con;
-            meta->total_elements = entry.alg->getElementsCount();
-            metadata_manager_->storeMetadata(index_id, *meta);
-        }
-
-        entry.markUpdated();
-        entry.updated = false;  // We just saved the new graph
-
-        LOG_INFO(2051, index_id, "Rebuild completed: " << total_processed << " vectors rebuilt");
-        rebuild_.completeActiveRebuild(username);
-
-    } catch (const std::exception& e) {
-        LOG_ERROR(2052, index_id, "Rebuild failed: " << e.what());
-
-        // Cleanup temp file on error
-        if (std::filesystem::exists(temp_path)) {
-            std::filesystem::remove(temp_path);
-        }
-        rebuild_.failActiveRebuild(username, e.what());
-    }
 }

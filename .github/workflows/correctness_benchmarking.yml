@@ -227,8 +227,8 @@ jobs:
               --query 'Reservations[0].Instances[0].PublicIpAddress' \
               --output text)
           
-          echo "endee_instance_id=$ENDEE_INSTANCE_ID" >> $GITHUB_OUTPUT
-          echo "endee_public_ip=$IP" >> $GITHUB_OUTPUT
+          echo "instance_id=$ENDEE_INSTANCE_ID" >> $GITHUB_OUTPUT
+          echo "public_ip=$IP" >> $GITHUB_OUTPUT
           echo "Endee Server: $IP"
           
  
@@ -256,7 +256,7 @@ jobs:
               --output text)
           
           echo "instance_id=$BENCHMARKING_INSTANCE_ID" >> $GITHUB_OUTPUT
-          echo "correctness_benchmarking_public_ip=$IP" >> $GITHUB_OUTPUT
+          echo "public_ip=$IP" >> $GITHUB_OUTPUT
           echo "Benchmark Server: $IP"
  
       - name: Wait for SSH on both servers
@@ -339,546 +339,546 @@ jobs:
               owner: context.repo.owner, repo: context.repo.repo, comment_id: sc.id, body,
             });
  
-  # # ──────────────────────────────────────────────────────────
-  # # JOB 2: Deploy Endee server on Server A from the PR branch
-  # # ──────────────────────────────────────────────────────────
-  # deploy-endee:
-  #   name: Deploy Endee
-  #   needs: [validate-command, provision-servers]
-  #   runs-on: ubuntu-latest
+  # ──────────────────────────────────────────────────────────
+  # JOB 2: Deploy Endee server on Server A from the PR branch
+  # ──────────────────────────────────────────────────────────
+  deploy-endee:
+    name: Deploy Endee
+    needs: [validate-command, provision-servers]
+    runs-on: ubuntu-latest
  
-  #   steps:
-  #     - name: Checkout PR commit
-  #       uses: actions/checkout@v4
-  #       with:
-  #         ref: ${{ needs.validate-command.outputs.head_sha }}
+    steps:
+      - name: Checkout PR commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate-command.outputs.head_sha }}
  
-  #     - name: Setup SSH for Endee Server
-  #       run: |
-  #         mkdir -p ~/.ssh
-  #         echo "${{ secrets.ENDEE_SSH_PRIVATE_KEY }}" > "$HOME/.ssh/${{ secrets.ENDEE_PEM }}"
-  #         chmod 400 "$HOME/.ssh/${{ secrets.ENDEE_PEM }}"
-  #         ssh-keyscan -H ${{ needs.provision-servers.outputs.endee_server_ip }} >> ~/.ssh/known_hosts
+      - name: Setup SSH for Endee Server
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.ENDEE_SSH_PRIVATE_KEY }}" > "$HOME/.ssh/${{ secrets.ENDEE_PEM }}"
+          chmod 400 "$HOME/.ssh/${{ secrets.ENDEE_PEM }}"
+          ssh-keyscan -H ${{ needs.provision-servers.outputs.endee_server_ip }} >> ~/.ssh/known_hosts
 
-  #         # ===============================================================================================
-  #         # WHY SSH-KEYSCAN?
-  #           # KNOWN-HOSTS FILE: It's a file on your machine that stores fingerprints of servers you've already trusted. IT IS @ ~/.ssh/known_hosts
-  #             # EXAMPLE:
-  #               # ~/.ssh/known_hosts
-  #               # 13.219.45.27 ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTI...
-  #               # github.com   ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAQEAq2A...
-  #             # Once a server's fingerprint is in this file, SSH connects without asking.
-  #           # WHAT SSH-KEYSCAN DOES: It connects to the server, fetches its public key fingerprint, and prints it — without actually logging in
-  #             # EXAMPLE:
-  #             # ssh-keyscan -H 13.219.45.67
-  #             # 13.199.30.67 ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTI...
-  #           # ssh-keyscan -H ${{ needs.provision-servers.outputs.endee_server_ip }} >> ~/.ssh/known_hosts
-  #               # ```
+          # ===============================================================================================
+          # WHY SSH-KEYSCAN?
+            # KNOWN-HOSTS FILE: It's a file on your machine that stores fingerprints of servers you've already trusted. IT IS @ ~/.ssh/known_hosts
+              # EXAMPLE:
+                # ~/.ssh/known_hosts
+                # 13.219.45.27 ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTI...
+                # github.com   ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAQEAq2A...
+              # Once a server's fingerprint is in this file, SSH connects without asking.
+            # WHAT SSH-KEYSCAN DOES: It connects to the server, fetches its public key fingerprint, and prints it — without actually logging in
+              # EXAMPLE:
+              # ssh-keyscan -H 13.219.45.67
+              # 13.199.30.67 ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTI...
+            # ssh-keyscan -H ${{ needs.provision-servers.outputs.endee_server_ip }} >> ~/.ssh/known_hosts
+                # ```
 
-  #               # Step by step:
-  #               # ```
-  #               # 1. EC2 instance starts → has an IP
-  #               # 2. ssh-keyscan connects to that IP → fetches its fingerprint
-  #               # 3. >> appends that fingerprint to known_hosts
-  #               # 4. Now when scp/ssh connects → fingerprint already trusted → no prompt
-  #             # -H : IT HASHED THE IP OF SERVER WE CONNECTED TO
+                # Step by step:
+                # ```
+                # 1. EC2 instance starts → has an IP
+                # 2. ssh-keyscan connects to that IP → fetches its fingerprint
+                # 3. >> appends that fingerprint to known_hosts
+                # 4. Now when scp/ssh connects → fingerprint already trusted → no prompt
+              # -H : IT HASHED THE IP OF SERVER WE CONNECTED TO
 
-  #         # ===============================================================================================
+          # ===============================================================================================
   
-  #     - name: Bundle and transfer branch code → Endee Server
-  #       run: |
-  #         # # WHY TAR+SCP?
-  #         #   GitHub Actions runner already has the code  ← actions/checkout fetched it
-  #         #         ↓
-  #         #   tar it up
-  #         #         ↓
-  #         #   scp to EC2 using SSH key we already have
-  #         #         ↓
-  #         #   EC2 extracts and runs it
+      - name: Bundle and transfer branch code → Endee Server
+        run: |
+          # # WHY TAR+SCP?
+          #   GitHub Actions runner already has the code  ← actions/checkout fetched it
+          #         ↓
+          #   tar it up
+          #         ↓
+          #   scp to EC2 using SSH key we already have
+          #         ↓
+          #   EC2 extracts and runs it
 
-  #         # GITHUB RUNNER HAS ACCESS TO CODE AND LATEST COMMIT OF SOURCE BRANCH
-  #         # BUNDLE THE CODE INTO A TAR FILE AND TRANSFER IT TO THE SERVER
+          # GITHUB RUNNER HAS ACCESS TO CODE AND LATEST COMMIT OF SOURCE BRANCH
+          # BUNDLE THE CODE INTO A TAR FILE AND TRANSFER IT TO THE SERVER
 
-  #         tar --exclude='.git' \
-  #             --exclude='node_modules' \
-  #             --exclude='__pycache__' \
-  #             --exclude='.venv' \
-  #             -czf /tmp/endee_bundle.tar.gz .
+          tar --exclude='.git' \
+              --exclude='node_modules' \
+              --exclude='__pycache__' \
+              --exclude='.venv' \
+              -czf /tmp/endee_bundle.tar.gz .
           
-  #         # SSH TO SERVER AND CREATE ENDEE FOLDER IF NOT EXISTS AND CHANGE IT'S OWNER AS WELL
-  #         ssh -i "$HOME/.ssh/${{ secrets.ENDEE_PEM }}" "${{ secrets.ENDEE_USERNAME }}"@"${{ needs.provision-servers.outputs.endee_server_ip }}" "sudo mkdir -p /opt/endee && sudo chown "${{ secrets.ENDEE_USERNAME }}":"${{ secrets.ENDEE_USERNAME }}" /opt/endee"
+          # SSH TO SERVER AND CREATE ENDEE FOLDER IF NOT EXISTS AND CHANGE IT'S OWNER AS WELL
+          ssh -i "$HOME/.ssh/${{ secrets.ENDEE_PEM }}" "${{ secrets.ENDEE_USERNAME }}"@"${{ needs.provision-servers.outputs.endee_server_ip }}" "sudo mkdir -p /opt/endee && sudo chown "${{ secrets.ENDEE_USERNAME }}":"${{ secrets.ENDEE_USERNAME }}" /opt/endee"
 
-  #         # TRANSFER THE BUNDLE TO THE SERVER
-  #         scp -i "$HOME/.ssh/${{ secrets.ENDEE_PEM }}" /tmp/endee_bundle.tar.gz \
-  #           "${{ secrets.ENDEE_USERNAME }}"@"${{ needs.provision-servers.outputs.endee_server_ip }}":/opt/endee/bundle.tar.gz
+          # TRANSFER THE BUNDLE TO THE SERVER
+          scp -i "$HOME/.ssh/${{ secrets.ENDEE_PEM }}" /tmp/endee_bundle.tar.gz \
+            "${{ secrets.ENDEE_USERNAME }}"@"${{ needs.provision-servers.outputs.endee_server_ip }}":/opt/endee/bundle.tar.gz
  
-  #     - name: Extract, install, start Endee server
-  #       env:
-  #         ENDEE_SERVER_IP: ${{ needs.provision-servers.outputs.endee_server_ip }}
-  #         MODE:        ${{ needs.validate-command.outputs.mode }}
-  #         REPO_NAME: ${{ github.event.repository.name }}
-  #       run: |
-  #         echo "SSH TO ENDEE SERVER"
-  #         ssh -i "$HOME/.ssh/${{ secrets.ENDEE_PEM }}" "${{ secrets.ENDEE_USERNAME }}"@"$ENDEE_SERVER_IP" << ENDSSH
-  #           echo
-  #           set -euo pipefail
-  #             # ===============================================================================================
-  #             # -e: exit immediately on error
-  #               # examples: 
-  #                 # without -e
-  #                   # rm /nonexistent/file    # fails silently
-  #                   # echo "still running"    # keeps going ← dangerous
+      - name: Extract, install, start Endee server
+        env:
+          ENDEE_SERVER_IP: ${{ needs.provision-servers.outputs.endee_server_ip }}
+          MODE:        ${{ needs.validate-command.outputs.mode }}
+          REPO_NAME: ${{ github.event.repository.name }}
+        run: |
+          echo "SSH TO ENDEE SERVER"
+          ssh -i "$HOME/.ssh/${{ secrets.ENDEE_PEM }}" "${{ secrets.ENDEE_USERNAME }}"@"$ENDEE_SERVER_IP" << ENDSSH
+            echo
+            set -euo pipefail
+              # ===============================================================================================
+              # -e: exit immediately on error
+                # examples: 
+                  # without -e
+                    # rm /nonexistent/file    # fails silently
+                    # echo "still running"    # keeps going ← dangerous
 
-  #                   # # with -e
-  #                   # rm /nonexistent/file    # fails
-  #                   # echo "still running"    # NEVER REACHES HERE — script stops
-  #             # ------------------------------------------------------------------------------------------
-  #             # -u: treat unset variables as an error and exit immediately
-  #               # examples: 
-  #                   # # without -u
-  #                   # echo $TYPO_VAR    # prints empty string silently ← dangerous
+                    # # with -e
+                    # rm /nonexistent/file    # fails
+                    # echo "still running"    # NEVER REACHES HERE — script stops
+              # ------------------------------------------------------------------------------------------
+              # -u: treat unset variables as an error and exit immediately
+                # examples: 
+                    # # without -u
+                    # echo $TYPO_VAR    # prints empty string silently ← dangerous
 
-  #                   # # with -u
-  #                   # echo $TYPO_VAR    # ERROR: TYPO_VAR: unbound variable — script stops
+                    # # with -u
+                    # echo $TYPO_VAR    # ERROR: TYPO_VAR: unbound variable — script stops
 
-  #             # ------------------------------------------------------------------------------------------
-  #             # -o pipefail: return the exit status of the last command in a pipeline
-  #               # examples:
-  #                   # without pipefail
-  #                   # cat nonexistent_file | grep "something"
-  #                   # echo $?    # prints 0 (success) ← because grep succeeded even though cat failed
+              # ------------------------------------------------------------------------------------------
+              # -o pipefail: return the exit status of the last command in a pipeline
+                # examples:
+                    # without pipefail
+                    # cat nonexistent_file | grep "something"
+                    # echo $?    # prints 0 (success) ← because grep succeeded even though cat failed
 
-  #                   # # with pipefail
-  #                   # cat nonexistent_file | grep "something"
-  #                   # echo $?    # prints 1 (failure) ← because cat failed 
-  #             # ------------------------------------------------------------------------------------------
-  #             # ===============================================================================================
+                    # # with pipefail
+                    # cat nonexistent_file | grep "something"
+                    # echo $?    # prints 1 (failure) ← because cat failed 
+              # ------------------------------------------------------------------------------------------
+              # ===============================================================================================
               
-  #           cd /opt/endee
-  #           tar -xzf bundle.tar.gz && rm bundle.tar.gz
+            cd /opt/endee
+            tar -xzf bundle.tar.gz && rm bundle.tar.gz
 
-  #           # START ENDEE SERVER 
-  #           # CHECK IF DOCKER INSTALLED ON SERVER OR NOT IF NOT INSTALL THE DOCKER SERVER TO RUN WITHOUT SUDO 
-  #           # CHECK USING DOCKER BINARY FILES 
-  #           if command -v docker &>/dev/null; then
-  #             echo "Docker is already installed"
-  #           else
-  #             echo "Docker is not installed"
-  #             # INSTALL DOCKER 
-  #             sudo apt-get update -y 
-  #             sudo apt-get install -y docker.io
+            # START ENDEE SERVER 
+            # CHECK IF DOCKER INSTALLED ON SERVER OR NOT IF NOT INSTALL THE DOCKER SERVER TO RUN WITHOUT SUDO 
+            # CHECK USING DOCKER BINARY FILES 
+            if command -v docker &>/dev/null; then
+              echo "Docker is already installed"
+            else
+              echo "Docker is not installed"
+              # INSTALL DOCKER 
+              sudo apt-get update -y 
+              sudo apt-get install -y docker.io
 
-  #             # START DOCKER SERVICE 
-  #             sudo systemctl start docker  
-  #             sudo systemctl enable docker 
+              # START DOCKER SERVICE 
+              sudo systemctl start docker  
+              sudo systemctl enable docker 
 
-  #             echo "DOCKER INSTALLED: \$(docker --version)"
-  #           fi
+              echo "DOCKER INSTALLED: \$(docker --version)"
+            fi
 
-  #           # RUN WITHOUT SUDO — ADD username TO DOCKER GROUP
-  #           if groups ${{ secrets.ENDEE_USERNAME }} | grep -q docker; then
-  #             echo "${{ secrets.ENDEE_USERNAME }} already in docker group"
-  #           else
-  #             echo "Adding ${{ secrets.ENDEE_USERNAME }} to docker group..."
-  #             sudo usermod -aG docker ${{ secrets.ENDEE_USERNAME }}
-  #             echo "${{ secrets.ENDEE_USERNAME }} added to docker group"
-  #           fi
+            # RUN WITHOUT SUDO — ADD username TO DOCKER GROUP
+            if groups ${{ secrets.ENDEE_USERNAME }} | grep -q docker; then
+              echo "${{ secrets.ENDEE_USERNAME }} already in docker group"
+            else
+              echo "Adding ${{ secrets.ENDEE_USERNAME }} to docker group..."
+              sudo usermod -aG docker ${{ secrets.ENDEE_USERNAME }}
+              echo "${{ secrets.ENDEE_USERNAME }} added to docker group"
+            fi
 
-  #           # APPLY GROUP CHANGE WITHOUT LOGOUT
-  #           sg docker -c "docker ps >  /dev/null 2>&1 && echo 'Docker running without sudo' || echo 'Docker check failed'"
+            # APPLY GROUP CHANGE WITHOUT LOGOUT
+            sg docker -c "docker ps >  /dev/null 2>&1 && echo 'Docker running without sudo' || echo 'Docker check failed'"
 
-  #           # GET THE ARCHITECTURE OF THE SERVER
-  #           arc=\$(grep -o 'avx2\|avx512\|neon\|sve2' /proc/cpuinfo | sort -u)
-  #           echo "ARCHITECTURE: \$arc"
-
-            
-
-  #           # BUILD ENDEE IMAGE
-  #           echo "BUILDING ENDEE IMAGE"
-  #           docker build --ulimit nofile=100000:100000 --build-arg BUILD_ARCH="\$arc" --build-arg DEBUG=true -t endee-oss:latest -f ./infra/Dockerfile .
-
-  #           # DOWN THE EXISTING CONTAINER IF EXISTS
-  #           echo "DOWNING THE EXISTING CONTAINER IF EXISTS"
-  #           docker rm -f endee-server 2>/dev/null || true
-
-  #           # RUN THE ENDEE CONTAINER
-  #           echo "RUNNING ENDEE CONTAINER"
-  #           docker run -d -p 8080:8080 -v endee-data:/data -e NDD_AUTH_TOKEN="" --name endee-server endee-oss:latest
-
-  #           # CHECK IF THE CONTAINER IS RUNNING
-  #           echo "CHECKING IF THE CONTAINER IS RUNNING"
-  #           if docker ps | grep -q endee-server; then
-  #             echo "ENDEE CONTAINER IS RUNNING"
-  #           else
-  #             echo "ENDEE CONTAINER IS NOT RUNNING"
-  #             exit 1
-  #           fi
-
-
+            # GET THE ARCHITECTURE OF THE SERVER
+            arc=\$(grep -o 'avx2\|avx512\|neon\|sve2' /proc/cpuinfo | sort -u)
+            echo "ARCHITECTURE: \$arc"
 
             
-  #         ENDSSH
- 
-  #     - name: Update PR Comment → Endee running
-  #       uses: actions/github-script@v7
-  #       with:
-  #         script: |
-  #           const mode      = '${{ needs.validate-command.outputs.mode }}';
-  #           const sha       = '${{ needs.validate-command.outputs.head_sha }}'.slice(0,7);
-  #           const actor     = context.payload.comment.user.login;
-  #           const modeLabel = {dense:'Dense', hybrid:'Hybrid'}[mode];
-  #           const body = [
-  #             `## VectorDB Benchmark — ${modeLabel} — Running`,
-  #             ``,
-  #             `Triggered by @${actor} · Commit \`${sha}\``,
-  #             ``,
-  #             `| Step | Status |`,
-  #             `|------|--------|`,
-  #             `| Provision Servers    | Up         |`,
-  #             `| Deploy Endee Server  | Running    |`,
-  #             `| Run Benchmark        | In progress… |`,
-  #             `| Results              | Waiting    |`,
-  #             `| Teardown             | Waiting    |`,
-  #           ].join('\n');
-  #           const { data: cs } = await github.rest.issues.listComments({
-  #             owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number,
-  #           });
-  #           const sc = cs.find(c => c.body.includes('VectorDB Benchmark —') && c.user.login === 'github-actions[bot]');
-  #           if (sc) await github.rest.issues.updateComment({
-  #             owner: context.repo.owner, repo: context.repo.repo, comment_id: sc.id, body,
-  #           });
- 
-  # # ──────────────────────────────────────────────────────────
-  # # JOB 3: Run benchmark on Benchmark server with the chosen mode 
-  # # ──────────────────────────────────────────────────────────
-  # run-benchmark:
-  #   name: Run Benchmark
-  #   needs: [validate-command, provision-servers, deploy-endee]
-  #   runs-on: ubuntu-latest
- 
-  #   outputs:
-  #     passed: ${{ steps.run.outputs.passed }}
-  #     report: ${{ steps.run.outputs.report }}f
- 
-  #   steps:
-  #     - name: Checkout
-  #       uses: actions/checkout@v4
-  #       with:
-  #         ref: ${{ needs.validate-command.outputs.head_sha }}
- 
-  #     - name: Configure AWS credentials
-  #       uses: aws-actions/configure-aws-credentials@v4
-  #       with:
-  #         aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
-  #         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-  #         aws-region:            ${{ env.AWS_REGION }}
- 
-  #     - name: Setup SSH for Benchmark Server
-  #       run: |
-  #         mkdir -p ~/.ssh
-  #         echo "${{ secrets.BENCHMARKING_SSH_PRIVATE_KEY }}" > "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}"
-  #         chmod 400 "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}"
-  #         ssh-keyscan -H ${{ needs.provision-servers.outputs.benchmark_server_ip }} >> "$HOME/.ssh/known_hosts"
 
-  #         # ADD KEEPALIVE TO PREVENT SSH TIMEOUT DURING LONG OPERATIONS
-  #         cat >> "$HOME/.ssh/config" << EOF 
-  #         Host *
-  #           ServerAliveInterval 60
-  #           ServerAliveCountMax 60
-  #         EOF
- 
-  #     - name: Basic Benchmark Server Setup and Validation
-  #       run: |
-  #         ENDEE_IP="${{ needs.provision-servers.outputs.endee_server_ip }}"
-  #         BENCHMARK_SERVER_IP="${{ needs.provision-servers.outputs.benchmark_server_ip }}"
+            # BUILD ENDEE IMAGE
+            echo "BUILDING ENDEE IMAGE"
+            docker build --ulimit nofile=100000:100000 --build-arg BUILD_ARCH="\$arc" --build-arg DEBUG=true -t endee-oss:latest -f ./infra/Dockerfile .
 
-  #         # CREATE BENCHMARK DIRECTORY IN HOME
-  #         ssh -i "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}" \
-  #           "${{ secrets.BENCHMARKING_USERNAME }}"@"$BENCHMARK_SERVER_IP" \
-  #           "mkdir -p \$HOME/benchmark"
+            # DOWN THE EXISTING CONTAINER IF EXISTS
+            echo "DOWNING THE EXISTING CONTAINER IF EXISTS"
+            docker rm -f endee-server 2>/dev/null || true
 
-  #         ssh -i "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}" \
-  #           "${{ secrets.BENCHMARKING_USERNAME }}"@"$BENCHMARK_SERVER_IP" << ENDSSH
+            # RUN THE ENDEE CONTAINER
+            echo "RUNNING ENDEE CONTAINER"
+            docker run -d -p 8080:8080 -v endee-data:/data -e NDD_AUTH_TOKEN="" --name endee-server endee-oss:latest
 
-  #           # CHECK IF BENCHMARK SERVER CAN REACH ENDEE SERVER ON PORT 8080
-  #           echo "CHECKING CONNECTIVITY TO ENDEE SERVER: $ENDEE_IP:8080"
-  #           if ! nc -zv -w 5 $ENDEE_IP 8080 2>&1; then
-  #             echo "ENDEE SERVER PORT 8080 NOT REACHABLE"
-  #             exit 1
-  #           fi
-  #           echo "ENDEE SERVER IS REACHABLE ON PORT 8080"
-
-  #           cd "\$HOME/benchmark"
-
-  #           # INSTALL GIT
-  #           sudo apt-get update -y
-  #           sudo apt-get install -y git-all
-
-  #         ENDSSH
+            # CHECK IF THE CONTAINER IS RUNNING
+            echo "CHECKING IF THE CONTAINER IS RUNNING"
+            if docker ps | grep -q endee-server; then
+              echo "ENDEE CONTAINER IS RUNNING"
+            else
+              echo "ENDEE CONTAINER IS NOT RUNNING"
+              exit 1
+            fi
 
 
-  #     - name: Dense Benchmarking
-  #       if: needs.validate-command.outputs.mode == 'dense'
-  #       run: |
-  #         # ── DEFINE VARIABLES ───────────────────────────────────  
-  #         BENCHMARK_SERVER_IP="${{ needs.provision-servers.outputs.benchmark_server_ip }}"
-  #         ENDEE_IP="${{ needs.provision-servers.outputs.endee_server_ip }}"
 
-  #         # TRANSFER THE SETUP PYTHON FILE TO THE BENCHMARK SERVER
-  #         scp -i "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}" \
-  #           ".github/workflows/benchmark_dense_setup.py" \
-  #           "${{ secrets.BENCHMARKING_USERNAME }}"@"$BENCHMARK_SERVER_IP":"~/benchmark/benchmark_dense_setup.py"
-
-  #         # SSH TO BENCHMARK SERVER
-  #         ssh -i "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}" \
-  #           "${{ secrets.BENCHMARKING_USERNAME }}"@"$BENCHMARK_SERVER_IP" << ENDSSH
-
-  #           set -euo pipefail
-
-  #           # RUN THE SETUP SCRIPT
-  #           python3 "\$HOME/benchmark/benchmark_dense_setup.py"
-
-  #           # RUN BENCHMARK
-  #           echo "RUNNING DENSE BENCHMARK"
-  #           nohup bash -c '
-  #             source "\$HOME/VectorDBBench/venv/bin/activate"
-  #             NUM_PER_BATCH=1000 DATASET_LOCAL_DIR="\$HOME/benchmark/parquet_files_holder" \
-  #             vectordbbench endee \
-  #               --token "BENCHMARKING" \
-  #               --region location \
-  #               --base-url "http://$ENDEE_IP:8080/api/v1" \
-  #               --index-name index1 \
-  #               --task-label "index1" \
-  #               --m 16 \
-  #               --ef-con 128 \
-  #               --ef-search 128 \
-  #               --precision float32 \
-  #               --version 1 \
-  #               --case-type Performance1536D50K \
-  #               --k 30 \
-  #               --num-concurrency "1" \
-  #               --concurrency-duration 30 \
-  #               --concurrency-timeout 3600 \
-  #               --drop-old \
-  #               --load \
-  #               --search-concurrent \
-  #               --search-serial
-  #           ' > \$HOME/benchmark/benchmark.log 2>&1 &
-
-  #           BENCHMARK_PID=\$!
-  #           echo "BENCHMARK STARTED WITH PID: \$BENCHMARK_PID"
-  #           echo \$BENCHMARK_PID > \$HOME/benchmark/benchmark.pid
-
-  #           echo "WAITING FOR BENCHMARK TO COMPLETE..."
-  #           while kill -0 \$BENCHMARK_PID 2>/dev/null; do
-  #             echo "BENCHMARK STILL RUNNING... (PID: \$BENCHMARK_PID)"
-  #             tail -3 \$HOME/benchmark/benchmark.log 2>/dev/null || true
-  #             sleep 30
-  #           done
-
-  #           echo "===== BENCHMARK LOGS ====="
-  #           cat \$HOME/benchmark/benchmark.log
-
-  #           if grep -q "BENCHMARK COMPLETED\|Finished\|success" \$HOME/benchmark/benchmark.log; then
-  #             echo "DENSE BENCHMARK COMPLETED SUCCESSFULLY"
-  #           else
-  #             echo "DENSE BENCHMARK MAY HAVE FAILED — CHECK LOGS ABOVE"
-  #             exit 1
-  #           fi
-
-  #         ENDSSH
-
-  #           # ============================================ ENDEE HYBRID TESTING SETUP ============================================ 
-  #     # - name: Hybrid Benchmarking
-  #     #   run: |
-
-  #     # - name: Sparse Benchmarking
-  #     #   run: | 
-
-  # # ──────────────────────────────────────────────────────────
-  # # JOB 4: Post final results to PR (always, even on failure)
-  # # ──────────────────────────────────────────────────────────
-  # report-results:
-  #   name: Post Results 
-  #   needs: [ validate-command, provision-servers, run-benchmark]
-  #   runs-on: ubuntu-latest 
-  #   if: always() # THIS JOB WILL ALWAYS RUN, SUCCESS OR FAILURE
-
-  #   steps:
-  #     # ─── SETUP SSH ───────────────────────────────────────────────────
-  #     - name: Capture Benchmark Results
-  #       run: |
-  #         mkdir -p ~/.ssh 
-  #         echo "${{ secrets.BENCHMARKING_SSH_PRIVATE_KEY }}" > "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}"
-  #         chmod 400 "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}"
-  #         ssh-keyscan -H ${{ needs.provision-servers.outputs.benchmark_server_ip }} >> "$HOME/.ssh/known_hosts"
-
-  #     - name: Fetch Latest Result JSON from Benchmark Server 
-  #       id: fetch_result 
-  #       run: | 
-  #         BENCHMARK_IP="${{ needs.provision-servers.outputs.benchmark_server_ip }}"
-  #         RESULT_DIR="/opt/benchmark/VectorDBBench/vectordb_bench/results/Endee"
-
-  #         # FIND THE LATEST RESULT FILE ON THE SERVER  
-  #         LATEST_RESULT_FILE=$(ssh -i "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}" "${{ secrets.BENCHMARKING_USERNAME }}"@"$BENCHMARK_IP" "ls -t $RESULT_DIR/result_*.json 2>/dev/null | head -1")
-
-  #         # ECHO LATEST RESULT 
-  #         echo "LATEST_RESULT_FILE=$LATEST_RESULT_FILE" >> $GITHUB_OUTPUT 
-
-  #         if [ -z "$LATEST_RESULT_FILE" ]; then
-  #           echo "NO RESULT FILE FOUND"
-  #           echo "found=false" >> $GITHUB_OUTPUT
-  #         else
-  #           # SCP THE FILE BACK TO RUNNER
-  #           mkdir -p /tmp/benchmark_results
-  #           scp -i "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}" \
-  #             "${{ secrets.BENCHMARKING_USERNAME }}"@"$BENCHMARK_IP":"$LATEST_RESULT_FILE" \
-  #             /tmp/benchmark_results/result.json
             
-  #           echo "File fetched successfully"
-  #           echo "found=true" >> $GITHUB_OUTPUT
-  #         fi
+          ENDSSH
+ 
+      - name: Update PR Comment → Endee running
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const mode      = '${{ needs.validate-command.outputs.mode }}';
+            const sha       = '${{ needs.validate-command.outputs.head_sha }}'.slice(0,7);
+            const actor     = context.payload.comment.user.login;
+            const modeLabel = {dense:'Dense', hybrid:'Hybrid'}[mode];
+            const body = [
+              `## VectorDB Benchmark — ${modeLabel} — Running`,
+              ``,
+              `Triggered by @${actor} · Commit \`${sha}\``,
+              ``,
+              `| Step | Status |`,
+              `|------|--------|`,
+              `| Provision Servers    | Up         |`,
+              `| Deploy Endee Server  | Running    |`,
+              `| Run Benchmark        | In progress… |`,
+              `| Results              | Waiting    |`,
+              `| Teardown             | Waiting    |`,
+            ].join('\n');
+            const { data: cs } = await github.rest.issues.listComments({
+              owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number,
+            });
+            const sc = cs.find(c => c.body.includes('VectorDB Benchmark —') && c.user.login === 'github-actions[bot]');
+            if (sc) await github.rest.issues.updateComment({
+              owner: context.repo.owner, repo: context.repo.repo, comment_id: sc.id, body,
+            });
+ 
+  # ──────────────────────────────────────────────────────────
+  # JOB 3: Run benchmark on Benchmark server with the chosen mode 
+  # ──────────────────────────────────────────────────────────
+  run-benchmark:
+    name: Run Benchmark
+    needs: [validate-command, provision-servers, deploy-endee]
+    runs-on: ubuntu-latest
+ 
+    outputs:
+      passed: ${{ steps.run.outputs.passed }}
+      report: ${{ steps.run.outputs.report }}f
+ 
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate-command.outputs.head_sha }}
+ 
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+ 
+      - name: Setup SSH for Benchmark Server
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.BENCHMARKING_SSH_PRIVATE_KEY }}" > "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}"
+          chmod 400 "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}"
+          ssh-keyscan -H ${{ needs.provision-servers.outputs.benchmark_server_ip }} >> "$HOME/.ssh/known_hosts"
 
-  #     # ─── PARSE METRICS + DETERMINE PASS/FAIL + POST TO PR ────────────
-  #     - name: Parse results and post PR comment
-  #       if: always()
-  #       uses: actions/github-script@v7
-  #       with:
-  #         script: |
+          # ADD KEEPALIVE TO PREVENT SSH TIMEOUT DURING LONG OPERATIONS
+          cat >> "$HOME/.ssh/config" << EOF 
+          Host *
+            ServerAliveInterval 60
+            ServerAliveCountMax 60
+          EOF
+ 
+      - name: Basic Benchmark Server Setup and Validation
+        run: |
+          ENDEE_IP="${{ needs.provision-servers.outputs.endee_server_ip }}"
+          BENCHMARK_SERVER_IP="${{ needs.provision-servers.outputs.benchmark_server_ip }}"
 
-  #           // ── 1. READ THE RESULT FILE ──────────────────────────────
-  #           const fs    = require('fs');
-  #           const found = '${{ steps.fetch_result.outputs.found }}' === 'true';
+          # CREATE BENCHMARK DIRECTORY IN HOME
+          ssh -i "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}" \
+            "${{ secrets.BENCHMARKING_USERNAME }}"@"$BENCHMARK_SERVER_IP" \
+            "mkdir -p \$HOME/benchmark"
 
-  #           const mode  = '${{ needs.validate-command.outputs.mode }}';
-  #           const sha   = '${{ needs.validate-command.outputs.head_sha }}'.slice(0, 7);
-  #           const actor = context.payload.comment.user.login;
+          ssh -i "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}" \
+            "${{ secrets.BENCHMARKING_USERNAME }}"@"$BENCHMARK_SERVER_IP" << ENDSSH
 
-  #           // job-level result from GitHub (always reliable — even if benchmark crashed)
-  #           const jobResult    = '${{ needs.run-benchmark.result }}';   // 'success' | 'failure' | 'cancelled'
-  #           const jobSucceeded = jobResult === 'success';
+            # CHECK IF BENCHMARK SERVER CAN REACH ENDEE SERVER ON PORT 8080
+            echo "CHECKING CONNECTIVITY TO ENDEE SERVER: $ENDEE_IP:8080"
+            if ! nc -zv -w 5 $ENDEE_IP 8080 2>&1; then
+              echo "ENDEE SERVER PORT 8080 NOT REACHABLE"
+              exit 1
+            fi
+            echo "ENDEE SERVER IS REACHABLE ON PORT 8080"
 
-  #           let metrics        = null;
-  #           let metricsAllZero = true;
-  #           let parseError     = null;
+            cd "\$HOME/benchmark"
 
-  #           if (found) {
-  #             try {
-  #               const raw  = fs.readFileSync('/tmp/benchmark_results/result.json', 'utf8');
-  #               const json = JSON.parse(raw);
+            # INSTALL GIT
+            sudo apt-get update -y
+            sudo apt-get install -y git-all
 
-  #               // result JSON structure: { results: [ { metrics: {...} } ] }
-  #               metrics = json.results?.[0]?.metrics;
+          ENDSSH
 
-  #               // ── 2. DETERMINE PASS/FAIL FROM METRIC VALUES ────────
-  #               // if ALL these are zero → benchmark didn't actually run → FAIL
-  #               const KEY_METRICS = [
-  #                 'insert_duration',
-  #                 'optimize_duration', 
-  #                 'load_duration',
-  #                 'qps',
-  #                 'serial_latency_p99',
-  #                 'serial_latency_p95',
-  #                 'recall',
-  #                 ];
 
-  #               metricsAllZero = KEY_METRICS.every(k => (metrics?.[k] ?? 0) === 0);
+      - name: Dense Benchmarking
+        if: needs.validate-command.outputs.mode == 'dense'
+        run: |
+          # ── DEFINE VARIABLES ───────────────────────────────────  
+          BENCHMARK_SERVER_IP="${{ needs.provision-servers.outputs.benchmark_server_ip }}"
+          ENDEE_IP="${{ needs.provision-servers.outputs.endee_server_ip }}"
 
-  #             } catch (e) {
-  #               parseError = e.message;
-  #             }
-  #           }
+          # TRANSFER THE SETUP PYTHON FILE TO THE BENCHMARK SERVER
+          scp -i "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}" \
+            ".github/workflows/benchmark_dense_setup.py" \
+            "${{ secrets.BENCHMARKING_USERNAME }}"@"$BENCHMARK_SERVER_IP":"~/benchmark/benchmark_dense_setup.py"
 
-  #           // ── 3. FINAL PASS/FAIL DECISION ──────────────────────────
-  #           // FAIL if: job itself failed OR no file found OR all metrics are zero
-  #           const passed = jobSucceeded && found && !metricsAllZero && !parseError;
-  #           const statusEmoji = passed ? '' : '';
-  #           const statusLabel = passed ? 'Passed' : 'Failed';
+          # SSH TO BENCHMARK SERVER
+          ssh -i "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}" \
+            "${{ secrets.BENCHMARKING_USERNAME }}"@"$BENCHMARK_SERVER_IP" << ENDSSH
 
-  #           // ── 4. BUILD METRICS TABLE ────────────────────────────────
-  #           let metricsTable = '';
+            set -euo pipefail
 
-  #           if (metrics && !metricsAllZero) {
-  #             // format a number to 4 decimal places, or '—' if zero/null
-  #             const fmt = (v) => (v && v !== 0) ? Number(v).toFixed(4) : '—';
+            # RUN THE SETUP SCRIPT
+            python3 "\$HOME/benchmark/benchmark_dense_setup.py"
 
-  #             metricsTable = [
-  #               ``,
-  #               `### Benchmark Metrics`,
-  #               ``,
-  #               `| Metric | Value |`,
-  #               `|--------|-------|`,
-  #               `| QPS                  | ${fmt(metrics.qps)}                  |`,
-  #               `| Recall               | ${fmt(metrics.recall)}               |`,
-  #               `| NDCG                 | ${fmt(metrics.ndcg)}                 |`,
-  #               `| Insert Duration (s)  | ${fmt(metrics.insert_duration)}      |`,
-  #               `| Load Duration (s)    | ${fmt(metrics.load_duration)}        |`,
-  #               `| Optimize Duration (s)| ${fmt(metrics.optimize_duration)}    |`,
-  #               `| Serial Latency P99   | ${fmt(metrics.serial_latency_p99)}   |`,
-  #               `| Serial Latency P95   | ${fmt(metrics.serial_latency_p95)}   |`,
-  #             ].join('\n');
-  #           }
+            # RUN BENCHMARK
+            echo "RUNNING DENSE BENCHMARK"
+            nohup bash -c '
+              source "\$HOME/VectorDBBench/venv/bin/activate"
+              NUM_PER_BATCH=1000 DATASET_LOCAL_DIR="\$HOME/benchmark/parquet_files_holder" \
+              vectordbbench endee \
+                --token "BENCHMARKING" \
+                --region location \
+                --base-url "http://$ENDEE_IP:8080/api/v1" \
+                --index-name index1 \
+                --task-label "index1" \
+                --m 16 \
+                --ef-con 128 \
+                --ef-search 128 \
+                --precision float32 \
+                --version 1 \
+                --case-type Performance1536D50K \
+                --k 30 \
+                --num-concurrency "1" \
+                --concurrency-duration 30 \
+                --concurrency-timeout 3600 \
+                --drop-old \
+                --load \
+                --search-concurrent \
+                --search-serial
+            ' > \$HOME/benchmark/benchmark.log 2>&1 &
 
-  #           // ── 5. FAILURE REASON ────────────────────────────────────
-  #           let failReason = '';
-  #           if (!passed) {
-  #             if (!jobSucceeded)    failReason = `> Benchmark job status: \`${jobResult}\``;
-  #             else if (!found)      failReason = `> No result file found on benchmark server.`;
-  #             else if (parseError)  failReason = `> Failed to parse result file: ${parseError}`;
-  #             else if (metricsAllZero) failReason = `> All metrics are zero — benchmark may not have run correctly.`;
-  #           }
+            BENCHMARK_PID=\$!
+            echo "BENCHMARK STARTED WITH PID: \$BENCHMARK_PID"
+            echo \$BENCHMARK_PID > \$HOME/benchmark/benchmark.pid
 
-  #           // ── 6. BUILD FINAL COMMENT ───────────────────────────────
-  #           const body = [
-  #             `## VectorDB Benchmark — ${mode} —  ${statusLabel}`,
-  #             ``,
-  #             `Triggered by @${actor} · Commit \`${sha}\``,
-  #             ``,
-  #             `| Step                | Status |`,
-  #             `|---------------------|--------|`,
-  #             `| Provision Servers   | Up      |`,
-  #             `| Deploy Endee Server | Running |`,
-  #             `| Run Benchmark       | ${statusLabel} |`,
-  #             `| Results             | ${passed ? 'Below' : 'See reason below'} |`,
-  #             failReason,
-  #             metricsTable,
-  #           ].filter(Boolean).join('\n');
+            echo "WAITING FOR BENCHMARK TO COMPLETE..."
+            while kill -0 \$BENCHMARK_PID 2>/dev/null; do
+              echo "BENCHMARK STILL RUNNING... (PID: \$BENCHMARK_PID)"
+              tail -3 \$HOME/benchmark/benchmark.log 2>/dev/null || true
+              sleep 30
+            done
 
-  #           // ── 7. UPDATE EXISTING BOT COMMENT ON PR ─────────────────
-  #           const { data: comments } = await github.rest.issues.listComments({
-  #             owner: context.repo.owner,
-  #             repo:  context.repo.repo,
-  #             issue_number: context.issue.number,
-  #           });
+            echo "===== BENCHMARK LOGS ====="
+            cat \$HOME/benchmark/benchmark.log
 
-  #           const existing = comments.find(c =>
-  #             c.body.includes('VectorDB Benchmark —') &&
-  #             c.user.login === 'github-actions[bot]'
-  #           );
+            if grep -q "BENCHMARK COMPLETED\|Finished\|success" \$HOME/benchmark/benchmark.log; then
+              echo "DENSE BENCHMARK COMPLETED SUCCESSFULLY"
+            else
+              echo "DENSE BENCHMARK MAY HAVE FAILED — CHECK LOGS ABOVE"
+              exit 1
+            fi
 
-  #           if (existing) {
-  #             await github.rest.issues.updateComment({
-  #               owner:      context.repo.owner,
-  #               repo:       context.repo.repo,
-  #               comment_id: existing.id,
-  #               body,
-  #             });
-  #           } else {
-  #             await github.rest.issues.createComment({
-  #               owner:        context.repo.owner,
-  #               repo:         context.repo.repo,
-  #               issue_number: context.issue.number,
-  #               body,
-  #             });
-  #           }
+          ENDSSH
 
-  #           // ── 8. SET FINAL COMMIT STATUS ───────────────────────────
-  #           await github.rest.repos.createCommitStatus({
-  #             owner:       context.repo.owner,
-  #             repo:        context.repo.repo,
-  #             sha:         '${{ needs.validate-command.outputs.head_sha }}',
-  #             state:       passed ? 'success' : 'failure',
-  #             description: passed ? 'Benchmark passed' : 'Benchmark failed',
-  #             context:     'ci/vectordb-benchmark',
-  #             target_url:  `https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}`,
-  #           });
+            # ============================================ ENDEE HYBRID TESTING SETUP ============================================ 
+      # - name: Hybrid Benchmarking
+      #   run: |
+
+      # - name: Sparse Benchmarking
+      #   run: | 
+
+  # ──────────────────────────────────────────────────────────
+  # JOB 4: Post final results to PR (always, even on failure)
+  # ──────────────────────────────────────────────────────────
+  report-results:
+    name: Post Results 
+    needs: [ validate-command, provision-servers, run-benchmark]
+    runs-on: ubuntu-latest 
+    if: always() # THIS JOB WILL ALWAYS RUN, SUCCESS OR FAILURE
+
+    steps:
+      # ─── SETUP SSH ───────────────────────────────────────────────────
+      - name: Capture Benchmark Results
+        run: |
+          mkdir -p ~/.ssh 
+          echo "${{ secrets.BENCHMARKING_SSH_PRIVATE_KEY }}" > "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}"
+          chmod 400 "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}"
+          ssh-keyscan -H ${{ needs.provision-servers.outputs.benchmark_server_ip }} >> "$HOME/.ssh/known_hosts"
+
+      - name: Fetch Latest Result JSON from Benchmark Server 
+        id: fetch_result 
+        run: | 
+          BENCHMARK_IP="${{ needs.provision-servers.outputs.benchmark_server_ip }}"
+          RESULT_DIR="/opt/benchmark/VectorDBBench/vectordb_bench/results/Endee"
+
+          # FIND THE LATEST RESULT FILE ON THE SERVER  
+          LATEST_RESULT_FILE=$(ssh -i "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}" "${{ secrets.BENCHMARKING_USERNAME }}"@"$BENCHMARK_IP" "ls -t $RESULT_DIR/result_*.json 2>/dev/null | head -1")
+
+          # ECHO LATEST RESULT 
+          echo "LATEST_RESULT_FILE=$LATEST_RESULT_FILE" >> $GITHUB_OUTPUT 
+
+          if [ -z "$LATEST_RESULT_FILE" ]; then
+            echo "NO RESULT FILE FOUND"
+            echo "found=false" >> $GITHUB_OUTPUT
+          else
+            # SCP THE FILE BACK TO RUNNER
+            mkdir -p /tmp/benchmark_results
+            scp -i "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}" \
+              "${{ secrets.BENCHMARKING_USERNAME }}"@"$BENCHMARK_IP":"$LATEST_RESULT_FILE" \
+              /tmp/benchmark_results/result.json
+            
+            echo "File fetched successfully"
+            echo "found=true" >> $GITHUB_OUTPUT
+          fi
+
+      # ─── PARSE METRICS + DETERMINE PASS/FAIL + POST TO PR ────────────
+      - name: Parse results and post PR comment
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+
+            // ── 1. READ THE RESULT FILE ──────────────────────────────
+            const fs    = require('fs');
+            const found = '${{ steps.fetch_result.outputs.found }}' === 'true';
+
+            const mode  = '${{ needs.validate-command.outputs.mode }}';
+            const sha   = '${{ needs.validate-command.outputs.head_sha }}'.slice(0, 7);
+            const actor = context.payload.comment.user.login;
+
+            // job-level result from GitHub (always reliable — even if benchmark crashed)
+            const jobResult    = '${{ needs.run-benchmark.result }}';   // 'success' | 'failure' | 'cancelled'
+            const jobSucceeded = jobResult === 'success';
+
+            let metrics        = null;
+            let metricsAllZero = true;
+            let parseError     = null;
+
+            if (found) {
+              try {
+                const raw  = fs.readFileSync('/tmp/benchmark_results/result.json', 'utf8');
+                const json = JSON.parse(raw);
+
+                // result JSON structure: { results: [ { metrics: {...} } ] }
+                metrics = json.results?.[0]?.metrics;
+
+                // ── 2. DETERMINE PASS/FAIL FROM METRIC VALUES ────────
+                // if ALL these are zero → benchmark didn't actually run → FAIL
+                const KEY_METRICS = [
+                  'insert_duration',
+                  'optimize_duration', 
+                  'load_duration',
+                  'qps',
+                  'serial_latency_p99',
+                  'serial_latency_p95',
+                  'recall',
+                  ];
+
+                metricsAllZero = KEY_METRICS.every(k => (metrics?.[k] ?? 0) === 0);
+
+              } catch (e) {
+                parseError = e.message;
+              }
+            }
+
+            // ── 3. FINAL PASS/FAIL DECISION ──────────────────────────
+            // FAIL if: job itself failed OR no file found OR all metrics are zero
+            const passed = jobSucceeded && found && !metricsAllZero && !parseError;
+            const statusEmoji = passed ? '' : '';
+            const statusLabel = passed ? 'Passed' : 'Failed';
+
+            // ── 4. BUILD METRICS TABLE ────────────────────────────────
+            let metricsTable = '';
+
+            if (metrics && !metricsAllZero) {
+              // format a number to 4 decimal places, or '—' if zero/null
+              const fmt = (v) => (v && v !== 0) ? Number(v).toFixed(4) : '—';
+
+              metricsTable = [
+                ``,
+                `### Benchmark Metrics`,
+                ``,
+                `| Metric | Value |`,
+                `|--------|-------|`,
+                `| QPS                  | ${fmt(metrics.qps)}                  |`,
+                `| Recall               | ${fmt(metrics.recall)}               |`,
+                `| NDCG                 | ${fmt(metrics.ndcg)}                 |`,
+                `| Insert Duration (s)  | ${fmt(metrics.insert_duration)}      |`,
+                `| Load Duration (s)    | ${fmt(metrics.load_duration)}        |`,
+                `| Optimize Duration (s)| ${fmt(metrics.optimize_duration)}    |`,
+                `| Serial Latency P99   | ${fmt(metrics.serial_latency_p99)}   |`,
+                `| Serial Latency P95   | ${fmt(metrics.serial_latency_p95)}   |`,
+              ].join('\n');
+            }
+
+            // ── 5. FAILURE REASON ────────────────────────────────────
+            let failReason = '';
+            if (!passed) {
+              if (!jobSucceeded)    failReason = `> Benchmark job status: \`${jobResult}\``;
+              else if (!found)      failReason = `> No result file found on benchmark server.`;
+              else if (parseError)  failReason = `> Failed to parse result file: ${parseError}`;
+              else if (metricsAllZero) failReason = `> All metrics are zero — benchmark may not have run correctly.`;
+            }
+
+            // ── 6. BUILD FINAL COMMENT ───────────────────────────────
+            const body = [
+              `## VectorDB Benchmark — ${mode} —  ${statusLabel}`,
+              ``,
+              `Triggered by @${actor} · Commit \`${sha}\``,
+              ``,
+              `| Step                | Status |`,
+              `|---------------------|--------|`,
+              `| Provision Servers   | Up      |`,
+              `| Deploy Endee Server | Running |`,
+              `| Run Benchmark       | ${statusLabel} |`,
+              `| Results             | ${passed ? 'Below' : 'See reason below'} |`,
+              failReason,
+              metricsTable,
+            ].filter(Boolean).join('\n');
+
+            // ── 7. UPDATE EXISTING BOT COMMENT ON PR ─────────────────
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const existing = comments.find(c =>
+              c.body.includes('VectorDB Benchmark —') &&
+              c.user.login === 'github-actions[bot]'
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner:      context.repo.owner,
+                repo:       context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner:        context.repo.owner,
+                repo:         context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+            // ── 8. SET FINAL COMMIT STATUS ───────────────────────────
+            await github.rest.repos.createCommitStatus({
+              owner:       context.repo.owner,
+              repo:        context.repo.repo,
+              sha:         '${{ needs.validate-command.outputs.head_sha }}',
+              state:       passed ? 'success' : 'failure',
+              description: passed ? 'Benchmark passed' : 'Benchmark failed',
+              context:     'ci/vectordb-benchmark',
+              target_url:  `https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}`,
+            });

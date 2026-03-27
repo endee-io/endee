@@ -111,7 +111,7 @@ jobs:
               content:    'rocket',
             });
 
-  # ──────────────────────────────────────────────────────────
+  # ────────────────────────────────────────────────────────── 
   # JOB 1: Provision both servers in parallel
   # ──────────────────────────────────────────────────────────
   provision-servers:
@@ -201,7 +201,7 @@ jobs:
       - name: Server Names
         run: |
           echo "ENDEE_INSTANCE_NAME=Endee_correctness_${{ needs.validate-command.outputs.pr_number }}" >> $GITHUB_ENV
-          echo "CORRECTNESS_BENCHMARKING_INSTANCE_NAME=Correctness_benchmarking_${{ needs.validate-command.outputs.pr_number }}" >> $GITHUB_ENV
+          echo "CORRECTNESS_BENCHMARKING_INSTANCE_NAME=Benchmark_correctness_${{ needs.validate-command.outputs.pr_number }}" >> $GITHUB_ENV
  
       - name: Launch Endee Server
         id: start_endee_server

@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 # env:
-#   AWS_REGION: ${{ vars.AWS_REGION }}
+#   AWS_REGION: ${{ vars.AWS_REGION }}  
 #   ENDEE_SERVER_TYPE: ${{ vars.ENDEE_SERVER_TYPE }}
 #   BENCHMARKING_SERVER_TYPE: ${{ vars.BENCHMARKING_SERVER_TYPE }}
 #   AMI_ID: ${{ vars.AMI_ID }}
@@ -125,6 +125,7 @@ jobs:
     outputs:
       endee_server_id: ${{ steps.start_endee_server.outputs.instance_id }}
       endee_server_ip: ${{ steps.start_endee_server.outputs.public_ip }}
+      endee_server_private_ip: ${{ steps.start_endee_server.outputs.private_ip }}
       benchmark_server_id: ${{ steps.start_benchmark_server.outputs.instance_id }}
       benchmark_server_ip: ${{ steps.start_benchmark_server.outputs.public_ip }}
  
@@ -227,6 +228,11 @@ jobs:
               --query 'Reservations[0].Instances[0].PublicIpAddress' \
               --output text)
           
+          PRIVATE_IP=$(aws ec2 describe-instances \
+              --instance-ids $ENDEE_INSTANCE_ID \
+              --query 'Reservations[0].Instances[0].PrivateIpAddress' \
+              --output text)
+          
           aws ec2 authorize-security-group-ingress \
             --group-id ${{ secrets.VECTORDBBENCH_SERVER_GROUP_ID }} \
             --protocol tcp \
@@ -236,6 +242,7 @@ jobs:
           echo "OPEN PORT FOR VPC"
           echo "instance_id=$ENDEE_INSTANCE_ID" >> $GITHUB_OUTPUT
           echo "public_ip=$IP" >> $GITHUB_OUTPUT
+          echo "private_ip=$PRIVATE_IP" >> $GITHUB_OUTPUT
           echo "Endee Server: $IP"
           
  
@@ -596,7 +603,7 @@ jobs:
  
       - name: Basic Benchmark Server Setup and Validation
         run: |
-          ENDEE_IP="${{ needs.provision-servers.outputs.endee_server_ip }}"
+          ENDEE_IP="${{ needs.provision-servers.outputs.endee_server_private_ip }}"
           BENCHMARK_SERVER_IP="${{ needs.provision-servers.outputs.benchmark_server_ip }}"
 
           # CREATE BENCHMARK DIRECTORY IN HOME

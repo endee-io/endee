@@ -7,7 +7,7 @@ on:
     branches: [ feature/ci_main ]
 
 
-# ONYLY ONE BENCHMARK RUN AT A TIME PER PR 
+# ONYLY ONE BENCHMARK RUN AT A TIME PER PR  
 # IF SAME PR COMMENT UPDATED FROM BENCHMARK/DENSE TO BENCHMARK/HYBRID, CANCEL INPROGRESS RUN AND START UPDATED ONE  
 concurrency:
   group: vectordb-benchmark-pr${{ github.event.issue.number }}
@@ -226,6 +226,12 @@ jobs:
               --instance-ids $ENDEE_INSTANCE_ID \
               --query 'Reservations[0].Instances[0].PublicIpAddress' \
               --output text)
+          
+          asw ec2 authorize-security-group ingress \
+            --group-id ${{ secrets.VECTORDBBENCH_SERVER_GROUP_ID }}
+            --protocol tcp \
+            --port 8080 \
+            --cidr 172.31.0.0/16
           
           echo "instance_id=$ENDEE_INSTANCE_ID" >> $GITHUB_OUTPUT
           echo "public_ip=$IP" >> $GITHUB_OUTPUT

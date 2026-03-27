@@ -227,12 +227,13 @@ jobs:
               --query 'Reservations[0].Instances[0].PublicIpAddress' \
               --output text)
           
-          asw ec2 authorize-security-group ingress \
+          aws ec2 authorize-security-group ingress \
             --group-id ${{ secrets.VECTORDBBENCH_SERVER_GROUP_ID }}
             --protocol tcp \
             --port 8080 \
             --cidr 172.31.0.0/16
           
+          echo "OPEN PORT FOR VPC"
           echo "instance_id=$ENDEE_INSTANCE_ID" >> $GITHUB_OUTPUT
           echo "public_ip=$IP" >> $GITHUB_OUTPUT
           echo "Endee Server: $IP"

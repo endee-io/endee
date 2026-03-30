@@ -25,7 +25,7 @@ concurrency:
 #   ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }} 
 
 jobs:
-  # ====== GATE: VALIDATE THE COMMAND BEFORE DOING ANYTHING EXPENSIVE ======   
+  # ====== GATE: VALIDATE THE COMMAND BEFORE DOING ANYTHING EXPENSIVE ======
   validate-command:
     name: Validate Command
     runs-on: ubuntu-latest

@@ -572,7 +572,7 @@ jobs:
             });
  
   # ──────────────────────────────────────────────────────────
-  # JOB 3: Run benchmark on Benchmark server with the chosen mode 
+  # JOB 3: Run benchmark on Benchmark server with the chosen mode
   # ──────────────────────────────────────────────────────────
   run-benchmark:
     name: Run Benchmark
@@ -947,7 +947,7 @@ jobs:
   #================================================================
   teardown:
     name: Teardown Servers 
-    needs: [validate-command, provision-servers, deploy-endee, run-benchmark]
+    needs: [validate-command, provision-servers, deploy-endee, run-benchmark, report-results]
     runs-on: ubuntu-latest
     if: always()
 

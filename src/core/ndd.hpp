@@ -109,7 +109,7 @@ struct CacheEntry {
      * evictIfNeeded, recoverIndex, deleteVectorsByFilter, updateFilters,
      * deleteIndex, executeBackupJob
      *
-     * readers: searchKNN, getVector, getIndexInfo
+     * readers: searchKNN, getVector, getIndexInfo (loaded-index path only)
      *
      * NOTE: std::shared_mutex dont guarantee fairness between
      * readers and writers. ie. currently it could be the case that either
@@ -373,11 +373,9 @@ private:
     }
 
     /**
-     * Returns the shared_ptr to CacheEntry
-     * 1. If Index is active (in-memory), return from there
-     * 2. Else, fetch from disk, make active and then return.
+     * Returns the CacheEntry if it is resident in memory.
      */
-    std::shared_ptr<CacheEntry> getIndexEntry(const std::string& index_id) {
+    std::shared_ptr<CacheEntry> findInMemoryIndexEntry(const std::string& index_id) {
 
         /**
          * First check the entry in thread local storage (TLS)
@@ -396,17 +394,30 @@ private:
         }
 
         /**
-         * First check if this index is in memory.
+         * Second check if this index is in global indices_.
          * A read lock on indices_mutex_ is enough for this.
          */
-        {
-            std::shared_lock<std::shared_mutex> read_lock(indices_mutex_);
-            auto it = indices_.find(index_id);
-            if(it != indices_.end()) {
-                auto entry = it->second;
-                per_thread_indices_[index_id] = entry;
-                return entry;
-            }
+        std::shared_lock<std::shared_mutex> read_lock(indices_mutex_);
+        auto it = indices_.find(index_id);
+        if(it == indices_.end() || !it->second || !it->second->cache_valid) {
+            return nullptr;
+        }
+
+        //update TLS indices_
+        auto entry = it->second;
+        per_thread_indices_[index_id] = entry;
+
+        return entry;
+    }
+
+    /**
+     * Returns the shared_ptr to CacheEntry
+     * 1. If Index is active (in-memory), return from there
+     * 2. Else, fetch from disk, make active and then return.
+     */
+    std::shared_ptr<CacheEntry> getIndexEntry(const std::string& index_id) {
+        if(auto entry = findInMemoryIndexEntry(index_id)) {
+            return entry;
         }
 
         /**
@@ -1773,26 +1784,53 @@ public:
         return false;
     }
 
+    /**
+     * This function returns the information about a given index.
+     * Currently the implementation is as follows:
+     * 1. If the index is live (listed in IndexManager.indices_), populate
+     * information from there.
+     * 2. Else read the metadata and populate the information from there.
+     *
+     * NOTE: This is a stop-gap solution to make sure that elements_count
+     * is never stale. This should be fixed later with metadata overhaul.  
+     */
     std::optional<IndexInfo> getIndexInfo(const std::string& index_id) {
-        auto entry_ptr = getIndexEntry(index_id);
-        auto& entry = *entry_ptr;
 
-        /**
-         * XXX: We aren't using reader's lock here to enable reads while
-         * writing.
-         * TODO: check correctness when stressing the system.
-         * check other instances of shared_lock on operation_mutex.
-         */
-        std::shared_lock<std::shared_mutex> operation_lock(entry.operation_mutex);
-        IndexInfo indx = {entry.alg->getElementsCount(),
-                          entry.alg->getDimension(),
-                          entry.sparse_model,
-                          entry.alg->getSpaceTypeStr(),
-                          entry.alg->getQuantLevel(),
-                          entry.alg->getChecksum(),
-                          entry.alg->getM(),
-                          entry.alg->getEfConstruction()};
-        return indx;
+        if(auto entry_ptr = findInMemoryIndexEntry(index_id)) {
+            /**
+             * XXX: We aren't using reader's lock here to enable reads while
+             * writing.
+             * TODO: check correctness when stressing the system.
+             * check other instances of shared_lock on operation_mutex.
+             */
+
+            std::shared_lock<std::shared_mutex> operation_lock(entry_ptr->operation_mutex);
+
+            return std::optional<IndexInfo>{std::in_place,
+                                            entry_ptr->alg->getElementsCount(),
+                                            entry_ptr->alg->getDimension(),
+                                            entry_ptr->sparse_model,
+                                            entry_ptr->alg->getSpaceTypeStr(),
+                                            entry_ptr->alg->getQuantLevel(),
+                                            entry_ptr->alg->getChecksum(),
+                                            entry_ptr->alg->getM(),
+                                            entry_ptr->alg->getEfConstruction()};
+        }
+
+        auto metadata = metadata_manager_->getMetadata(index_id);
+        if(!metadata) {
+            return std::nullopt;
+        }
+
+        return std::optional<IndexInfo>{std::in_place,
+                                        metadata->total_elements,
+                                        metadata->dimension,
+                                        metadata->sparse_model,
+                                        std::move(metadata->space_type_str),
+                                        metadata->quant_level,
+                                        metadata->checksum,
+                                        metadata->M,
+                                        metadata->ef_con};
     }
 
     // Method to log vector additions with both numeric and string IDs

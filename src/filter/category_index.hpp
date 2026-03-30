@@ -175,26 +175,13 @@ namespace ndd {
                 return bitmap.contains(id);
             }
 
-            void add_batch(const std::string& field,
-                           const std::string& value,
-                           const std::vector<ndd::idInt>& ids) {
-                if(ids.empty()) {
-                    return;
-                }
-                std::string filter_key = format_filter_key(field, value);
-                ndd::RoaringBitmap bitmap = get_bitmap_internal(filter_key);
-                for(const auto& id : ids) {
-                    bitmap.add(id);
-                }
-                store_bitmap_internal(filter_key, bitmap);
-            }
-
             // Helper for batch operations where key is already formatted
             void add_batch_by_key(const std::string& key, const std::vector<ndd::idInt>& ids) {
                 if(ids.empty()) {
                     return;
                 }
                 ndd::RoaringBitmap bitmap = get_bitmap_internal(key);
+                //TODO: use addMany instead of add
                 for(const auto& id : ids) {
                     bitmap.add(id);
                 }

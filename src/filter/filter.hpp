@@ -417,7 +417,8 @@ public:
                     }
 
                     if(type == FieldType::Unknown) {
-                        LOG_DEBUG("Unsupported filter type for field '" << field << "'");
+                        /*This should ideally be an error or atleast an info log.*/
+                        LOG_INFO("Unsupported filter type for field '" << field << "'");
                         continue;
                     }
 

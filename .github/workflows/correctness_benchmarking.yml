@@ -947,7 +947,7 @@ jobs:
   #================================================================
   teardown:
     name: Teardown Servers 
-    needs: [validate-command, provision-servers]
+    needs: [validate-command, provision-servers, deploy-endee, run-benchmark]
     runs-on: ubuntu-latest
     if: always()
 

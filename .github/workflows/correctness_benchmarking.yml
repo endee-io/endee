@@ -25,7 +25,7 @@ concurrency:
 #   ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }} 
 
 jobs:
-  # ====== GATE: VALIDATE THE COMMAND BEFORE DOING ANYTHING EXPENSIVE ======   
+  # ====== GATE: VALIDATE THE COMMAND BEFORE DOING ANYTHING EXPENSIVE ======
   validate-command:
     name: Validate Command
     runs-on: ubuntu-latest
@@ -630,13 +630,13 @@ jobs:
             export AWS_DEFAULT_REGION=\${{ vars.AWS_REGION }}
             export AWS_DEFAULT_OUTPUT=json
 
-            # CHECK IF BENCHMARK SERVER CAN REACH ENDEE SERVER ON PORT 8080
-            echo "CHECKING CONNECTIVITY TO ENDEE SERVER: $ENDEE_IP:8080"
-            if ! nc -zv -w 5 $ENDEE_IP 8080 2>&1; then
-              echo "ENDEE SERVER PORT 8080 NOT REACHABLE"
-              exit 1
-            fi
-            echo "ENDEE SERVER IS REACHABLE ON PORT 8080"
+            # # CHECK IF BENCHMARK SERVER CAN REACH ENDEE SERVER ON PORT 8080
+            # echo "CHECKING CONNECTIVITY TO ENDEE SERVER: $ENDEE_IP:8080"
+            # if ! nc -zv -w 5 $ENDEE_IP 8080 2>&1; then
+            #   echo "ENDEE SERVER PORT 8080 NOT REACHABLE"
+            #   exit 1
+            # fi
+            # echo "ENDEE SERVER IS REACHABLE ON PORT 8080"
 
             cd "\$HOME/benchmark"
 

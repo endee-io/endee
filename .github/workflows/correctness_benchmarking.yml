@@ -111,7 +111,7 @@ jobs:
               content:    'rocket',
             });
 
-  # ────────────────────────────────────────────────────────── 
+  # ──────────────────────────────────────────────────────────
   # JOB 1: Provision both servers in parallel
   # ──────────────────────────────────────────────────────────
   provision-servers:
@@ -629,6 +629,19 @@ jobs:
             export AWS_SECRET_ACCESS_KEY=\${{ secrets.AWS_SECRET_ACCESS_KEY }}
             export AWS_DEFAULT_REGION=\${{ vars.AWS_REGION }}
             export AWS_DEFAULT_OUTPUT=json
+
+            mkdir -p ~/.aws 
+            cat <<EOF > ~/.aws/credentials
+            [default]
+            aws_access_key_id=\${{ secrets.AWS_ACCESS_KEY_ID }}
+            aws_secret_access_key=\${{ secrets.AWS_SECRET_ACCESS_KEY }}
+            EOF
+
+            cat <<EOF > ~/.aws/config
+            [default]
+            region=\${{ vars.AWS_REGION }}
+            output=json
+            EOF
 
             # # CHECK IF BENCHMARK SERVER CAN REACH ENDEE SERVER ON PORT 8080
             # echo "CHECKING CONNECTIVITY TO ENDEE SERVER: $ENDEE_IP:8080"

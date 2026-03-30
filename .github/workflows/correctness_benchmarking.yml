@@ -25,7 +25,7 @@ concurrency:
 #   ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }} 
 
 jobs:
-  # ====== GATE: VALIDATE THE COMMAND BEFORE DOING ANYTHING EXPENSIVE ====== 
+  # ====== GATE: VALIDATE THE COMMAND BEFORE DOING ANYTHING EXPENSIVE ======   
   validate-command:
     name: Validate Command
     runs-on: ubuntu-latest
@@ -574,144 +574,162 @@ jobs:
   # ──────────────────────────────────────────────────────────
   # JOB 3: Run benchmark on Benchmark server with the chosen mode 
   # ──────────────────────────────────────────────────────────
-  # run-benchmark:
-  #   name: Run Benchmark
-  #   needs: [validate-command, provision-servers, deploy-endee]
-  #   runs-on: ubuntu-latest
+  run-benchmark:
+    name: Run Benchmark
+    # needs: [validate-command, provision-servers, deploy-endee]
+    needs: [validate-command, provision-servers]
+    runs-on: ubuntu-latest
  
-  #   outputs:
-  #     passed: ${{ steps.run.outputs.passed }}
-  #     report: ${{ steps.run.outputs.report }}
+    outputs:
+      passed: ${{ steps.run.outputs.passed }}
+      report: ${{ steps.run.outputs.report }}
  
-  #   steps:
-  #     - name: Checkout
-  #       uses: actions/checkout@v4
-  #       with:
-  #         ref: ${{ needs.validate-command.outputs.head_sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate-command.outputs.head_sha }}
  
-  #     - name: Configure AWS credentials
-  #       uses: aws-actions/configure-aws-credentials@v4
-  #       with:
-  #         aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
-  #         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-  #         aws-region:            ${{ vars.AWS_REGION }}
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ vars.AWS_REGION }}
  
-  #     - name: Setup SSH for Benchmark Server
-  #       run: |
-  #         mkdir -p ~/.ssh
-  #         echo "${{ secrets.BENCHMARKING_SSH_PRIVATE_KEY }}" > "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}"
-  #         chmod 400 "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}"
-  #         ssh-keyscan -H ${{ needs.provision-servers.outputs.benchmark_server_ip }} >> "$HOME/.ssh/known_hosts"
+      - name: Setup SSH for Benchmark Server
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.BENCHMARKING_SSH_PRIVATE_KEY }}" > "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}"
+          chmod 400 "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}"
+          ssh-keyscan -H ${{ needs.provision-servers.outputs.benchmark_server_ip }} >> "$HOME/.ssh/known_hosts"
 
-  #         # ADD KEEPALIVE TO PREVENT SSH TIMEOUT DURING LONG OPERATIONS
-  #         cat >> "$HOME/.ssh/config" << EOF 
-  #         Host *
-  #           ServerAliveInterval 60
-  #           ServerAliveCountMax 60
-  #         EOF
+          # ADD KEEPALIVE TO PREVENT SSH TIMEOUT DURING LONG OPERATIONS
+          cat >> "$HOME/.ssh/config" << EOF 
+          Host *
+            ServerAliveInterval 60
+            ServerAliveCountMax 60
+          EOF
  
-  #     - name: Basic Benchmark Server Setup and Validation
-  #       run: |
-  #         ENDEE_IP="${{ needs.provision-servers.outputs.endee_server_private_ip }}"
-  #         BENCHMARK_SERVER_IP="${{ needs.provision-servers.outputs.benchmark_server_ip }}"
+      - name: Basic Benchmark Server Setup and Validation
+        run: |
+          ENDEE_IP="${{ needs.provision-servers.outputs.endee_server_private_ip }}"
+          BENCHMARK_SERVER_IP="${{ needs.provision-servers.outputs.benchmark_server_ip }}"
 
-  #         # CREATE BENCHMARK DIRECTORY IN HOME
-  #         ssh -i "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}" \
-  #           "${{ secrets.BENCHMARKING_USERNAME }}"@"$BENCHMARK_SERVER_IP" \
-  #           "mkdir -p \$HOME/benchmark"
+          # CREATE BENCHMARK DIRECTORY IN HOME
+          ssh -i "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}" \
+            "${{ secrets.BENCHMARKING_USERNAME }}"@"$BENCHMARK_SERVER_IP" \
+            "mkdir -p \$HOME/benchmark"
 
-  #         ssh -i "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}" \
-  #           "${{ secrets.BENCHMARKING_USERNAME }}"@"$BENCHMARK_SERVER_IP" << ENDSSH
+          ssh -i "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}" \
+            "${{ secrets.BENCHMARKING_USERNAME }}"@"$BENCHMARK_SERVER_IP" << ENDSSH
 
-  #           # CHECK IF BENCHMARK SERVER CAN REACH ENDEE SERVER ON PORT 8080
-  #           echo "CHECKING CONNECTIVITY TO ENDEE SERVER: $ENDEE_IP:8080"
-  #           if ! nc -zv -w 5 $ENDEE_IP 8080 2>&1; then
-  #             echo "ENDEE SERVER PORT 8080 NOT REACHABLE"
-  #             exit 1
-  #           fi
-  #           echo "ENDEE SERVER IS REACHABLE ON PORT 8080"
+            # ADD CREDENTIALS 
+            export AWS_ACCESS_KEY_ID=\${{ secrets.AWS_ACCESS_KEY_ID }}
+            export AWS_SECRET_ACCESS_KEY=\${{ secrets.AWS_SECRET_ACCESS_KEY }}
+            export AWS_DEFAULT_REGION=\${{ vars.AWS_REGION }}
+            export AWS_DEFAULT_OUTPUT=json
 
-  #           cd "\$HOME/benchmark"
+            # CHECK IF BENCHMARK SERVER CAN REACH ENDEE SERVER ON PORT 8080
+            echo "CHECKING CONNECTIVITY TO ENDEE SERVER: $ENDEE_IP:8080"
+            if ! nc -zv -w 5 $ENDEE_IP 8080 2>&1; then
+              echo "ENDEE SERVER PORT 8080 NOT REACHABLE"
+              exit 1
+            fi
+            echo "ENDEE SERVER IS REACHABLE ON PORT 8080"
 
-  #           # INSTALL GIT
-  #           sudo apt-get update -y
-  #           sudo apt-get install -y git-all
+            cd "\$HOME/benchmark"
 
-  #         ENDSSH
+            # INSTALL GIT
+            sudo apt-get update -y
+            sudo apt-get install -y git-all
+
+            # INSTALL AWS CLI
+            echo "INSTALLING AWS CLI"
+            sudo apt update 
+            sudo apt install awscli -y 
+
+            # IF DENSE THEN DOWNLOAD DENSE DATA
+            if [ \${{ needs.validate-command.outputs.mode}} -eq 'dense' ]; then 
+              # DOWNLOAD DATA FROM DENSE FOLDER 
+              aws s3 cp s3://\${{ secrets.BUCKET_NAME }}/dense ~/benchmark/ --recursive
 
 
-  #     - name: Dense Benchmarking
-  #       if: needs.validate-command.outputs.mode == 'dense'
-  #       run: |
-  #         # ── DEFINE VARIABLES ───────────────────────────────────  
-  #         BENCHMARK_SERVER_IP="${{ needs.provision-servers.outputs.benchmark_server_ip }}"
-  #         ENDEE_IP="${{ needs.provision-servers.outputs.endee_server_private_ip }}"
+          ENDSSH
 
-  #         # TRANSFER THE SETUP PYTHON FILE TO THE BENCHMARK SERVER
-  #         scp -i "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}" \
-  #           ".github/workflows/benchmark_dense_setup.py" \
-  #           "${{ secrets.BENCHMARKING_USERNAME }}"@"$BENCHMARK_SERVER_IP":"~/benchmark/benchmark_dense_setup.py"
 
-  #         # SSH TO BENCHMARK SERVER
-  #         ssh -i "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}" \
-  #           "${{ secrets.BENCHMARKING_USERNAME }}"@"$BENCHMARK_SERVER_IP" << ENDSSH
+      - name: Dense Benchmarking
+        if: needs.validate-command.outputs.mode == 'dense'
+        run: |
+          # ── DEFINE VARIABLES ───────────────────────────────────  
+          BENCHMARK_SERVER_IP="${{ needs.provision-servers.outputs.benchmark_server_ip }}"
+          ENDEE_IP="${{ needs.provision-servers.outputs.endee_server_private_ip }}"
 
-  #           set -euo pipefail
+          # TRANSFER THE SETUP PYTHON FILE TO THE BENCHMARK SERVER
+          scp -i "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}" \
+            ".github/workflows/benchmark_dense_setup.py" \
+            "${{ secrets.BENCHMARKING_USERNAME }}"@"$BENCHMARK_SERVER_IP":"~/benchmark/benchmark_dense_setup.py"
 
-  #           # RUN THE SETUP SCRIPT
-  #           python3 "\$HOME/benchmark/benchmark_dense_setup.py"
+          # SSH TO BENCHMARK SERVER
+          ssh -i "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}" \
+            "${{ secrets.BENCHMARKING_USERNAME }}"@"$BENCHMARK_SERVER_IP" << ENDSSH
 
-  #           # RUN BENCHMARK
-  #           echo "RUNNING DENSE BENCHMARK"
-  #           nohup bash -c '
-  #             source "\$HOME/VectorDBBench/venv/bin/activate"
-  #             NUM_PER_BATCH=1000 DATASET_LOCAL_DIR="\$HOME/benchmark/parquet_files_holder" \
-  #             vectordbbench endee \
-  #               --token "BENCHMARKING" \
-  #               --region location \
-  #               --base-url "http://$ENDEE_IP:8080/api/v1" \
-  #               --index-name index1 \
-  #               --task-label "index1" \
-  #               --m 16 \
-  #               --ef-con 128 \
-  #               --ef-search 128 \
-  #               --precision float32 \
-  #               --version 1 \
-  #               --case-type Performance1536D50K \
-  #               --k 30 \
-  #               --num-concurrency "1" \
-  #               --concurrency-duration 30 \
-  #               --concurrency-timeout 3600 \
-  #               --drop-old \
-  #               --load \
-  #               --search-concurrent \
-  #               --search-serial
-  #           ' > \$HOME/benchmark/benchmark.log 2>&1 &
+            set -euo pipefail
 
-  #           BENCHMARK_PID=\$!
-  #           echo "BENCHMARK STARTED WITH PID: \$BENCHMARK_PID"
-  #           echo \$BENCHMARK_PID > \$HOME/benchmark/benchmark.pid
+            # RUN THE SETUP SCRIPT
+            python3 "\$HOME/benchmark/benchmark_dense_setup.py"
 
-  #           echo "WAITING FOR BENCHMARK TO COMPLETE..."
-  #           while kill -0 \$BENCHMARK_PID 2>/dev/null; do
-  #             echo "BENCHMARK STILL RUNNING... (PID: \$BENCHMARK_PID)"
-  #             tail -3 \$HOME/benchmark/benchmark.log 2>/dev/null || true
-  #             sleep 30
-  #           done
+            # RUN BENCHMARK
+            echo "RUNNING DENSE BENCHMARK"
+            nohup bash -c '
+              source "\$HOME/VectorDBBench/venv/bin/activate"
+              NUM_PER_BATCH=1000 DATASET_LOCAL_DIR="\$HOME/benchmark/parquet_files_holder" \
+              vectordbbench endee \
+                --token "BENCHMARKING" \
+                --region location \
+                --base-url "http://$ENDEE_IP:8080/api/v1" \
+                --index-name index1 \
+                --task-label "index1" \
+                --m 16 \
+                --ef-con 128 \
+                --ef-search 128 \
+                --precision float32 \
+                --version 1 \
+                --case-type Performance1536D50K \
+                --k 30 \
+                --num-concurrency "1" \
+                --concurrency-duration 30 \
+                --concurrency-timeout 3600 \
+                --drop-old \
+                --load \
+                --search-concurrent \
+                --search-serial
+            ' > \$HOME/benchmark/benchmark.log 2>&1 &
 
-  #           echo "===== BENCHMARK LOGS ====="
-  #           cat \$HOME/benchmark/benchmark.log
+            BENCHMARK_PID=\$!
+            echo "BENCHMARK STARTED WITH PID: \$BENCHMARK_PID"
+            echo \$BENCHMARK_PID > \$HOME/benchmark/benchmark.pid
 
-  #           if grep -q "BENCHMARK COMPLETED\|Finished\|success" \$HOME/benchmark/benchmark.log; then
-  #             echo "DENSE BENCHMARK COMPLETED SUCCESSFULLY"
-  #           else
-  #             echo "DENSE BENCHMARK MAY HAVE FAILED — CHECK LOGS ABOVE"
-  #             exit 1
-  #           fi
+            echo "WAITING FOR BENCHMARK TO COMPLETE..."
+            while kill -0 \$BENCHMARK_PID 2>/dev/null; do
+              echo "BENCHMARK STILL RUNNING... (PID: \$BENCHMARK_PID)"
+              tail -3 \$HOME/benchmark/benchmark.log 2>/dev/null || true
+              sleep 30
+            done
 
-  #         ENDSSH
+            echo "===== BENCHMARK LOGS ====="
+            cat \$HOME/benchmark/benchmark.log
 
-            # ============================================ ENDEE HYBRID TESTING SETUP ============================================ 
+            if grep -q "BENCHMARK COMPLETED\|Finished\|success" \$HOME/benchmark/benchmark.log; then
+              echo "DENSE BENCHMARK COMPLETED SUCCESSFULLY"
+            else
+              echo "DENSE BENCHMARK MAY HAVE FAILED — CHECK LOGS ABOVE"
+              exit 1
+            fi
+
+          ENDSSH
+
+            ============================================ ENDEE HYBRID TESTING SETUP ============================================ 
       # - name: Hybrid Benchmarking
       #   run: |
 
@@ -909,42 +927,42 @@ jobs:
   #================================================================
   # JOB 5: TEARDOWN - TERMINATE BOTH SERVERS ALWAYS
   #================================================================
-  teardown:
-    name: Teardown Servers 
-    needs: [validate-command, provision-servers]
-    runs-on: ubuntu-latest
-    if: always()
+  # teardown:
+  #   name: Teardown Servers 
+  #   needs: [validate-command, provision-servers]
+  #   runs-on: ubuntu-latest
+  #   if: always()
 
-    steps:
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            ${{ vars.AWS_REGION }}
+  #   steps:
+  #     - name: Configure AWS credentials
+  #       uses: aws-actions/configure-aws-credentials@v4
+  #       with:
+  #         aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+  #         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  #         aws-region:            ${{ vars.AWS_REGION }}
 
 
-      - name: Terminate Endee Server
-        if: needs.provision-servers.outputs.endee_server_id != ''
-        run: |
-          ENDEE_ID="${{ needs.provision-servers.outputs.endee_server_id }}"
-          echo "TERMINATING ENDEE SERVER: $ENDEE_ID"
+  #     # - name: Terminate Endee Server
+  #     #   if: needs.provision-servers.outputs.endee_server_id != ''
+  #     #   run: |
+  #     #     ENDEE_ID="${{ needs.provision-servers.outputs.endee_server_id }}"
+  #     #     echo "TERMINATING ENDEE SERVER: $ENDEE_ID"
 
-          aws ec2 terminate-instances \
-            --instance-ids $ENDEE_ID
+  #     #     aws ec2 terminate-instances \
+  #     #       --instance-ids $ENDEE_ID
           
-          echo "ENDEE SERVER TERMINATED"
+  #     #     echo "ENDEE SERVER TERMINATED"
 
-      - name: Terminate Benchmark Server 
-        if: needs.provision-servers.outputs.benchmark_server_id != ''
-        run: |
-          BENCHMARK_ID=${{ needs.provision-servers.outputs.benchmark_server_id }}
-          echo "TERMINATING BENCHMARK SERVER: $BENCHMARK_ID"
+  #     - name: Terminate Benchmark Server 
+  #       if: needs.provision-servers.outputs.benchmark_server_id != ''
+  #       run: |
+  #         BENCHMARK_ID=${{ needs.provision-servers.outputs.benchmark_server_id }}
+  #         echo "TERMINATING BENCHMARK SERVER: $BENCHMARK_ID"
 
-          aws ec2 terminate-instances \
-            --instance-ids $BENCHMARK_ID
+  #         aws ec2 terminate-instances \
+  #           --instance-ids $BENCHMARK_ID
           
-          echo "BENCHMARK SERVER TERMINATED"
+  #         echo "BENCHMARK SERVER TERMINATED"
 
       # - name: Post teardown status to PR 
       #   if: always()

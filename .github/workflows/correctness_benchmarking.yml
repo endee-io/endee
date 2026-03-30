@@ -943,7 +943,7 @@ jobs:
             });
 
   #================================================================
-  # JOB 5: TEARDOWN - TERMINATE BOTH SERVERS ALWAYS
+  # JOB 5: TEARDOWN - TERMINATE BOTH SERVERS ALWAYS 
   #================================================================
   teardown:
     name: Teardown Servers 

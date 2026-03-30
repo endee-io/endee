@@ -112,7 +112,7 @@ jobs:
             });
 
   # ──────────────────────────────────────────────────────────
-  # JOB 1: Provision both servers in parallel
+  # JOB 1: Provision both servers in parallel 
   # ──────────────────────────────────────────────────────────
   provision-servers:
     name: Provision Servers

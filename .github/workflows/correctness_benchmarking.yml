@@ -112,7 +112,7 @@ jobs:
             });
 
   # ──────────────────────────────────────────────────────────
-  # JOB 1: Provision both servers in parallel
+  # JOB 1: Provision both servers in parallel 
   # ──────────────────────────────────────────────────────────
   provision-servers:
     name: Provision Servers
@@ -615,6 +615,7 @@ jobs:
         run: |
           ENDEE_IP="${{ needs.provision-servers.outputs.endee_server_private_ip }}"
           BENCHMARK_SERVER_IP="${{ needs.provision-servers.outputs.benchmark_server_ip }}"
+          MODE="${{ needs.validate-command.outputs.mode }}"
 
           # CREATE BENCHMARK DIRECTORY IN HOME
           ssh -i "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}" \
@@ -624,24 +625,14 @@ jobs:
           ssh -i "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}" \
             "${{ secrets.BENCHMARKING_USERNAME }}"@"$BENCHMARK_SERVER_IP" << ENDSSH
 
-            # ADD CREDENTIALS 
-            export AWS_ACCESS_KEY_ID=\${{ secrets.AWS_ACCESS_KEY_ID }}
-            export AWS_SECRET_ACCESS_KEY=\${{ secrets.AWS_SECRET_ACCESS_KEY }}
-            export AWS_DEFAULT_REGION=\${{ vars.AWS_REGION }}
-            export AWS_DEFAULT_OUTPUT=json
+            # CONFIGURE CREDENTIALS
+            mkdir -p ~/.aws
 
-            mkdir -p ~/.aws 
-            cat <<EOF > ~/.aws/credentials
-            [default]
-            aws_access_key_id=\${{ secrets.AWS_ACCESS_KEY_ID }}
-            aws_secret_access_key=\${{ secrets.AWS_SECRET_ACCESS_KEY }}
-            EOF
+            # USE printf INSTEAD OF <<EOF — avoids nested heredoc conflict
+            printf '[default]\naws_access_key_id=${{ secrets.AWS_ACCESS_KEY_ID }}\naws_secret_access_key=${{ secrets.AWS_SECRET_ACCESS_KEY }}\n' > ~/.aws/credentials
+            printf '[default]\nregion=${{ vars.AWS_REGION }}\noutput=json\n' > ~/.aws/config
 
-            cat <<EOF > ~/.aws/config
-            [default]
-            region=\${{ vars.AWS_REGION }}
-            output=json
-            EOF
+            echo "AWS CREDENTIALS CONFIGURED"
 
             # # CHECK IF BENCHMARK SERVER CAN REACH ENDEE SERVER ON PORT 8080
             # echo "CHECKING CONNECTIVITY TO ENDEE SERVER: $ENDEE_IP:8080"
@@ -659,17 +650,28 @@ jobs:
 
             # INSTALL AWS CLI
             echo "INSTALLING AWS CLI"
-            sudo apt install unzip
-            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-            unzip awscliv2.zip
-            sudo ./aws/install
+              curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+              sudo apt install unzip
+              unzip awscliv2.zip
+              sudo ./aws/install
+              echo "AWS CLI INSTALLED: \$(aws --version)"
 
-            # IF DENSE THEN DOWNLOAD DENSE DATA
-            if [ "${{ needs.validate-command.outputs.mode }}"=="dense" ]; then 
-              # DOWNLOAD DATA FROM DENSE FOLDER 
-              echo "DENSE DATA IS DOWNLOADING FROM S3 BUCKET"
-              sudo aws s3 cp s3://\${{ secrets.BUCKET_NAME }}/dense ~/benchmark/ --recursive
+            # ── DOWNLOAD DATA BASED ON MODE ────────────────────────────
+            if [ "$MODE" == "dense" ]; then
+              echo "DOWNLOADING DENSE DATA FROM S3"
+              aws s3 cp s3://${{ secrets.BUCKET_NAME }}/dense/ \$HOME/benchmark/ --recursive
+              echo "DENSE DATA DOWNLOAD COMPLETE"
 
+            elif [ "$MODE" == "hybrid" ]; then
+              echo "DOWNLOADING HYBRID DATA FROM S3"
+              aws s3 cp s3://${{ secrets.BUCKET_NAME }}/hybrid/ \$HOME/benchmark/ --recursive
+              echo "HYBRID DATA DOWNLOAD COMPLETE"
+
+            elif [ "$MODE" == "sparse" ]; then
+              echo "DOWNLOADING SPARSE DATA FROM S3"
+              aws s3 cp s3://${{ secrets.BUCKET_NAME }}/sparse/ \$HOME/benchmark/ --recursive
+              echo "SPARSE DATA DOWNLOAD COMPLETE"
+            fi
 
           ENDSSH
 

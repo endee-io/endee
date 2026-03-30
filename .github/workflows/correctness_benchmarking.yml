@@ -659,16 +659,16 @@ jobs:
 
             # INSTALL AWS CLI
             echo "INSTALLING AWS CLI"
-            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
             sudo apt install unzip
+            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
             unzip awscliv2.zip
             sudo ./aws/install
 
             # IF DENSE THEN DOWNLOAD DENSE DATA
-            if [ "\${{ needs.validate-command.outputs.mode }}"=="dense" ]; then 
+            if [ "${{ needs.validate-command.outputs.mode }}"=="dense" ]; then 
               # DOWNLOAD DATA FROM DENSE FOLDER 
               echo "DENSE DATA IS DOWNLOADING FROM S3 BUCKET"
-              aws s3 cp s3://\${{ secrets.BUCKET_NAME }}/dense ~/benchmark/ --recursive
+              sudo aws s3 cp s3://\${{ secrets.BUCKET_NAME }}/dense ~/benchmark/ --recursive
 
 
           ENDSSH

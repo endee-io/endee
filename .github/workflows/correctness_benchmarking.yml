@@ -768,9 +768,9 @@ jobs:
             REPO_URL="${{ secrets.HYBRID_BENCHMARK_REPO_HTTPS }}"
 
             # STRIP https:// PREFIX IF PRESENT
-            REPO_HOST="${REPO_URL#https://}"   # removes "https://" from the front
-            echo "CLONED REPO: $REPO_HOST"
-            git clone "https://x-access-token:${{ secrets.PAT }}@${REPO_HOST}"
+            REPO_HOST="\${REPO_URL#https://}"
+            echo "CLONED REPO: \$REPO_HOST"
+            git clone "https://x-access-token:${{ secrets.PAT }}@\${REPO_HOST}"
             ls -alh
 
             # GET INTO REPO

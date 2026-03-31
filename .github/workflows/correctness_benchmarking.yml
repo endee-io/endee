@@ -674,7 +674,7 @@ jobs:
       - name: Dense Benchmarking
         if: needs.validate-command.outputs.mode == 'dense'
         run: |
-          # ── DEFINE VARIABLES ─────────────────────────────────── 
+          # ── DEFINE VARIABLES ───────────────────────────────────
           BENCHMARK_SERVER_IP="${{ needs.provision-servers.outputs.benchmark_server_ip }}"
           ENDEE_IP="${{ needs.provision-servers.outputs.endee_server_private_ip }}"
 
@@ -780,6 +780,7 @@ jobs:
 
             # GET INTO REPO
             cd hybrid_benchmarking
+            mkdir -p ./data/beir_scifact/
 
 
             # INSTALL PYTHON 3.12 
@@ -809,9 +810,6 @@ jobs:
             echo "INDEX ENV CREATED"
             df -h 
             free -h
-
-            # CREATE DATA FOLDER
-            mkdir -p ./data/beir_quora
             
             # PULL DATA FROM BUCKET 
             echo "PULL HYBRID DATA FROM BUCKET"
@@ -822,7 +820,7 @@ jobs:
             python -m src.main \
               --db endee \
               --index-name quora_bench \
-              --dataset-name beir_quora \
+              --dataset-name beir_scifact \
               --results hybrid_endee_bm25 \
               --concurrency 2 \
               --top-k 10 \

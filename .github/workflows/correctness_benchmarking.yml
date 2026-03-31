@@ -765,7 +765,8 @@ jobs:
             sudo apt-get install -y git-all 
 
             # CLONE THE HYBRID REPO 
-            git clone https://x-access-token:${{ secrets.PAT }}@${{ secrets.HYBRID_BENCHMARK_REPO_HTTPS }}
+            git clone https://x-access-token:\${{ secrets.PAT }}@\${{ secrets.HYBRID_BENCHMARK_REPO_HTTPS }}
+            echo "https://x-access-token:\${{ secrets.PAT }}@\${{ secrets.HYBRID_BENCHMARK_REPO_HTTPS }}"
             ls -alh
 
             # GET INTO REPO

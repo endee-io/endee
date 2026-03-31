@@ -823,7 +823,7 @@ jobs:
               --sparse-scoring-model default
 
 
-            #  BM25 - INDEXING + QUERY + VALIDATION - USE RANK-BM25 LIBRARIES BM25L METHOD
+            #  BM25 - INDEXING + QUERY + VALIDATION - USE RANK-BM25 LIBRARIES BM25L METHOD 
             python -m src.main \
               --db endee \
               --index-name quora_bench \

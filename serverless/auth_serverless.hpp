@@ -642,6 +642,9 @@ public:
         return user->user_type;
     }
 
+    // Expose root token for impersonation validation in middleware
+    const std::string& getRootToken() const { return root_token_; }
+
     std::vector<User> listUsers() {
         std::shared_lock lock(mutex_);
         std::vector<User> users;

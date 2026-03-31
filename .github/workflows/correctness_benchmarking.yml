@@ -669,7 +669,7 @@ jobs:
       - name: Dense Benchmarking
         if: needs.validate-command.outputs.mode == 'dense'
         run: |
-          # ── DEFINE VARIABLES ─────────────────────────────────── 
+          # ── DEFINE VARIABLES ───────────────────────────────────
           BENCHMARK_SERVER_IP="${{ needs.provision-servers.outputs.benchmark_server_ip }}"
           ENDEE_IP="${{ needs.provision-servers.outputs.endee_server_private_ip }}"
 
@@ -765,7 +765,8 @@ jobs:
             sudo apt-get install -y git-all 
 
             # CLONE THE HYBRID REPO 
-            git clone https://x-access-token:${{ secrets.PAT }}@${{ secrets.HYBRID_BENCHMARK_REPO_HTTPS }}
+            git clone https://x-access-token:\${{ secrets.PAT }}@\${{ secrets.HYBRID_BENCHMARK_REPO_HTTPS }}
+            echo "https://x-access-token:\${{ secrets.PAT }}@\${{ secrets.HYBRID_BENCHMARK_REPO_HTTPS }}"
             ls -alh
 
             # GET INTO REPO

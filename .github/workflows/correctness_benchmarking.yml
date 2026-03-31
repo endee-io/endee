@@ -776,16 +776,28 @@ jobs:
             # GET INTO REPO
             cd hybrid_benchmarking
 
+
+            # INSTALL PYTHON 3.12 
+            sudo apt update && sudo apt upgrade -y
+            sudo apt install software-properties-common -y
+            sudo add-apt-repository ppa:deadsnakes/ppa -y
+            sudo apt update
+            sudo apt install python3.12 -y
+
+
+
+
             # CREATE ENVIRONMENTS
             # 1- validation-env.txt
-            python3 -m venv validation-env
+            sudo apt install python3.12-venv
+            python3.12 -m venv validation-env
             source validation-env/bin/activate
             pip3 install -r validation-env.txt
 
             deactivate 
 
             # 2- index-env
-            python3 -m venv index-env 
+            python3.12 -m venv index-env 
             source index-env/bin/activate
             pip3 install -r index-env.txt
 

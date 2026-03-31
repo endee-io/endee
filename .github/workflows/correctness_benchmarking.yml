@@ -674,7 +674,7 @@ jobs:
       - name: Dense Benchmarking
         if: needs.validate-command.outputs.mode == 'dense'
         run: |
-          # ── DEFINE VARIABLES ─────────────────────────────────── 
+          # ── DEFINE VARIABLES ───────────────────────────────────
           BENCHMARK_SERVER_IP="${{ needs.provision-servers.outputs.benchmark_server_ip }}"
           ENDEE_IP="${{ needs.provision-servers.outputs.endee_server_private_ip }}"
 

@@ -572,7 +572,7 @@ jobs:
   #           });
  
   # ──────────────────────────────────────────────────────────
-  # JOB 3: Run benchmark on Benchmark server with the chosen mode
+  # JOB 3: Run benchmark on Benchmark server with the chosen mode 
   # ──────────────────────────────────────────────────────────
   run-benchmark:
     name: Run Benchmark
@@ -758,9 +758,7 @@ jobs:
 
             mkdir -p ~/benchmark
             cd ~/benchmark
-            
-            # INSTALL PYTHON 3.13
-            sudo apt install python3.13 python3.13-venv
+
 
             # INSTALL GIT 
             sudo apt-get update -y

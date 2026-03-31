@@ -669,7 +669,7 @@ jobs:
       - name: Dense Benchmarking
         if: needs.validate-command.outputs.mode == 'dense'
         run: |
-          # ── DEFINE VARIABLES ─────────────────────────────────── 
+          # ── DEFINE VARIABLES ───────────────────────────────────
           BENCHMARK_SERVER_IP="${{ needs.provision-servers.outputs.benchmark_server_ip }}"
           ENDEE_IP="${{ needs.provision-servers.outputs.endee_server_private_ip }}"
 
@@ -789,7 +789,7 @@ jobs:
 
             # CREATE ENVIRONMENTS
             # 1- validation-env.txt
-            sudo apt install python3.12-venv
+            sudo apt install python3.12-venv -y
             python3.12 -m venv validation-env
             source validation-env/bin/activate
             pip3 install -r validation-env.txt

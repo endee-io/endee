@@ -365,211 +365,211 @@ jobs:
   # ────────────────────────────────────────────────────────── 
   # JOB 2: Deploy Endee server on Server A from the PR branch
   # ──────────────────────────────────────────────────────────
-  deploy-endee:
-    name: Deploy Endee
-    needs: [validate-command, provision-servers]
-    runs-on: ubuntu-latest
+  # deploy-endee:
+  #   name: Deploy Endee
+  #   needs: [validate-command, provision-servers]
+  #   runs-on: ubuntu-latest
  
-    steps:
-      - name: Checkout PR commit
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.validate-command.outputs.head_sha }}
+  #   steps:
+  #     - name: Checkout PR commit
+  #       uses: actions/checkout@v4
+  #       with:
+  #         ref: ${{ needs.validate-command.outputs.head_sha }}
  
-      - name: Setup SSH for Endee Server
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.ENDEE_SSH_PRIVATE_KEY }}" > "$HOME/.ssh/${{ secrets.ENDEE_PEM }}"
-          chmod 400 "$HOME/.ssh/${{ secrets.ENDEE_PEM }}"
-          ssh-keyscan -H ${{ needs.provision-servers.outputs.endee_server_ip }} >> ~/.ssh/known_hosts
+  #     - name: Setup SSH for Endee Server
+  #       run: |
+  #         mkdir -p ~/.ssh
+  #         echo "${{ secrets.ENDEE_SSH_PRIVATE_KEY }}" > "$HOME/.ssh/${{ secrets.ENDEE_PEM }}"
+  #         chmod 400 "$HOME/.ssh/${{ secrets.ENDEE_PEM }}"
+  #         ssh-keyscan -H ${{ needs.provision-servers.outputs.endee_server_ip }} >> ~/.ssh/known_hosts
 
-          # ===============================================================================================
-          # WHY SSH-KEYSCAN?
-            # KNOWN-HOSTS FILE: It's a file on your machine that stores fingerprints of servers you've already trusted. IT IS @ ~/.ssh/known_hosts
-              # EXAMPLE:
-                # ~/.ssh/known_hosts
-                # 13.219.45.27 ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTI...
-                # github.com   ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAQEAq2A...
-              # Once a server's fingerprint is in this file, SSH connects without asking.
-            # WHAT SSH-KEYSCAN DOES: It connects to the server, fetches its public key fingerprint, and prints it — without actually logging in
-              # EXAMPLE:
-              # ssh-keyscan -H 13.219.45.67
-              # 13.199.30.67 ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTI...
-            # ssh-keyscan -H ${{ needs.provision-servers.outputs.endee_server_ip }} >> ~/.ssh/known_hosts
-                # ```
+  #         # ===============================================================================================
+  #         # WHY SSH-KEYSCAN?
+  #           # KNOWN-HOSTS FILE: It's a file on your machine that stores fingerprints of servers you've already trusted. IT IS @ ~/.ssh/known_hosts
+  #             # EXAMPLE:
+  #               # ~/.ssh/known_hosts
+  #               # 13.219.45.27 ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTI...
+  #               # github.com   ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAQEAq2A...
+  #             # Once a server's fingerprint is in this file, SSH connects without asking.
+  #           # WHAT SSH-KEYSCAN DOES: It connects to the server, fetches its public key fingerprint, and prints it — without actually logging in
+  #             # EXAMPLE:
+  #             # ssh-keyscan -H 13.219.45.67
+  #             # 13.199.30.67 ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTI...
+  #           # ssh-keyscan -H ${{ needs.provision-servers.outputs.endee_server_ip }} >> ~/.ssh/known_hosts
+  #               # ```
 
-                # Step by step:
-                # ```
-                # 1. EC2 instance starts → has an IP
-                # 2. ssh-keyscan connects to that IP → fetches its fingerprint
-                # 3. >> appends that fingerprint to known_hosts
-                # 4. Now when scp/ssh connects → fingerprint already trusted → no prompt
-              # -H : IT HASHED THE IP OF SERVER WE CONNECTED TO
+  #               # Step by step:
+  #               # ```
+  #               # 1. EC2 instance starts → has an IP
+  #               # 2. ssh-keyscan connects to that IP → fetches its fingerprint
+  #               # 3. >> appends that fingerprint to known_hosts
+  #               # 4. Now when scp/ssh connects → fingerprint already trusted → no prompt
+  #             # -H : IT HASHED THE IP OF SERVER WE CONNECTED TO
 
-          # ===============================================================================================
+  #         # ===============================================================================================
   
-      - name: Bundle and transfer branch code → Endee Server
-        run: |
-          # # WHY TAR+SCP?
-          #   GitHub Actions runner already has the code  ← actions/checkout fetched it
-          #         ↓
-          #   tar it up
-          #         ↓
-          #   scp to EC2 using SSH key we already have
-          #         ↓
-          #   EC2 extracts and runs it
+  #     - name: Bundle and transfer branch code → Endee Server
+  #       run: |
+  #         # # WHY TAR+SCP?
+  #         #   GitHub Actions runner already has the code  ← actions/checkout fetched it
+  #         #         ↓
+  #         #   tar it up
+  #         #         ↓
+  #         #   scp to EC2 using SSH key we already have
+  #         #         ↓
+  #         #   EC2 extracts and runs it
 
-          # GITHUB RUNNER HAS ACCESS TO CODE AND LATEST COMMIT OF SOURCE BRANCH
-          # BUNDLE THE CODE INTO A TAR FILE AND TRANSFER IT TO THE SERVER
+  #         # GITHUB RUNNER HAS ACCESS TO CODE AND LATEST COMMIT OF SOURCE BRANCH
+  #         # BUNDLE THE CODE INTO A TAR FILE AND TRANSFER IT TO THE SERVER
 
-          tar --exclude='.git' \
-              --exclude='node_modules' \
-              --exclude='__pycache__' \
-              --exclude='.venv' \
-              -czf /tmp/endee_bundle.tar.gz .
+  #         tar --exclude='.git' \
+  #             --exclude='node_modules' \
+  #             --exclude='__pycache__' \
+  #             --exclude='.venv' \
+  #             -czf /tmp/endee_bundle.tar.gz .
           
-          # SSH TO SERVER AND CREATE ENDEE FOLDER IF NOT EXISTS AND CHANGE IT'S OWNER AS WELL
-          ssh -i "$HOME/.ssh/${{ secrets.ENDEE_PEM }}" "${{ secrets.ENDEE_USERNAME }}"@"${{ needs.provision-servers.outputs.endee_server_ip }}" "sudo mkdir -p ~/endee && sudo chown "${{ secrets.ENDEE_USERNAME }}":"${{ secrets.ENDEE_USERNAME }}" ~/endee"
+  #         # SSH TO SERVER AND CREATE ENDEE FOLDER IF NOT EXISTS AND CHANGE IT'S OWNER AS WELL
+  #         ssh -i "$HOME/.ssh/${{ secrets.ENDEE_PEM }}" "${{ secrets.ENDEE_USERNAME }}"@"${{ needs.provision-servers.outputs.endee_server_ip }}" "sudo mkdir -p ~/endee && sudo chown "${{ secrets.ENDEE_USERNAME }}":"${{ secrets.ENDEE_USERNAME }}" ~/endee"
 
-          # TRANSFER THE BUNDLE TO THE SERVER
-          scp -i "$HOME/.ssh/${{ secrets.ENDEE_PEM }}" /tmp/endee_bundle.tar.gz \
-            "${{ secrets.ENDEE_USERNAME }}"@"${{ needs.provision-servers.outputs.endee_server_ip }}":~/endee/bundle.tar.gz
+  #         # TRANSFER THE BUNDLE TO THE SERVER
+  #         scp -i "$HOME/.ssh/${{ secrets.ENDEE_PEM }}" /tmp/endee_bundle.tar.gz \
+  #           "${{ secrets.ENDEE_USERNAME }}"@"${{ needs.provision-servers.outputs.endee_server_ip }}":~/endee/bundle.tar.gz
  
-      - name: Extract, install, start Endee server
-        env:
-          ENDEE_SERVER_IP: ${{ needs.provision-servers.outputs.endee_server_ip }}
-          MODE:        ${{ needs.validate-command.outputs.mode }}
-          REPO_NAME: ${{ github.event.repository.name }}
-        run: |
-          echo "SSH TO ENDEE SERVER"
-          ssh -i "$HOME/.ssh/${{ secrets.ENDEE_PEM }}" "${{ secrets.ENDEE_USERNAME }}"@"$ENDEE_SERVER_IP" << ENDSSH
-            echo
-            set -euo pipefail
-              # ===============================================================================================
-              # -e: exit immediately on error
-                # examples: 
-                  # without -e
-                    # rm /nonexistent/file    # fails silently
-                    # echo "still running"    # keeps going ← dangerous
+  #     - name: Extract, install, start Endee server
+  #       env:
+  #         ENDEE_SERVER_IP: ${{ needs.provision-servers.outputs.endee_server_ip }}
+  #         MODE:        ${{ needs.validate-command.outputs.mode }}
+  #         REPO_NAME: ${{ github.event.repository.name }}
+  #       run: |
+  #         echo "SSH TO ENDEE SERVER"
+  #         ssh -i "$HOME/.ssh/${{ secrets.ENDEE_PEM }}" "${{ secrets.ENDEE_USERNAME }}"@"$ENDEE_SERVER_IP" << ENDSSH
+  #           echo
+  #           set -euo pipefail
+  #             # ===============================================================================================
+  #             # -e: exit immediately on error
+  #               # examples: 
+  #                 # without -e
+  #                   # rm /nonexistent/file    # fails silently
+  #                   # echo "still running"    # keeps going ← dangerous
 
-                    # # with -e
-                    # rm /nonexistent/file    # fails
-                    # echo "still running"    # NEVER REACHES HERE — script stops
-              # ------------------------------------------------------------------------------------------
-              # -u: treat unset variables as an error and exit immediately
-                # examples: 
-                    # # without -u
-                    # echo $TYPO_VAR    # prints empty string silently ← dangerous
+  #                   # # with -e
+  #                   # rm /nonexistent/file    # fails
+  #                   # echo "still running"    # NEVER REACHES HERE — script stops
+  #             # ------------------------------------------------------------------------------------------
+  #             # -u: treat unset variables as an error and exit immediately
+  #               # examples: 
+  #                   # # without -u
+  #                   # echo $TYPO_VAR    # prints empty string silently ← dangerous
 
-                    # # with -u
-                    # echo $TYPO_VAR    # ERROR: TYPO_VAR: unbound variable — script stops
+  #                   # # with -u
+  #                   # echo $TYPO_VAR    # ERROR: TYPO_VAR: unbound variable — script stops
 
-              # ------------------------------------------------------------------------------------------
-              # -o pipefail: return the exit status of the last command in a pipeline
-                # examples:
-                    # without pipefail
-                    # cat nonexistent_file | grep "something"
-                    # echo $?    # prints 0 (success) ← because grep succeeded even though cat failed
+  #             # ------------------------------------------------------------------------------------------
+  #             # -o pipefail: return the exit status of the last command in a pipeline
+  #               # examples:
+  #                   # without pipefail
+  #                   # cat nonexistent_file | grep "something"
+  #                   # echo $?    # prints 0 (success) ← because grep succeeded even though cat failed
 
-                    # # with pipefail
-                    # cat nonexistent_file | grep "something"
-                    # echo $?    # prints 1 (failure) ← because cat failed 
-              # ------------------------------------------------------------------------------------------
-              # ===============================================================================================
+  #                   # # with pipefail
+  #                   # cat nonexistent_file | grep "something"
+  #                   # echo $?    # prints 1 (failure) ← because cat failed 
+  #             # ------------------------------------------------------------------------------------------
+  #             # ===============================================================================================
               
-            cd ~/endee
-            tar -xzf bundle.tar.gz && rm bundle.tar.gz
+  #           cd ~/endee
+  #           tar -xzf bundle.tar.gz && rm bundle.tar.gz
 
-            # START ENDEE SERVER 
-            # CHECK IF DOCKER INSTALLED ON SERVER OR NOT IF NOT INSTALL THE DOCKER SERVER TO RUN WITHOUT SUDO 
-            # CHECK USING DOCKER BINARY FILES 
-            if command -v docker &>/dev/null; then
-              echo "Docker is already installed"
-            else
-              echo "Docker is not installed"
-              # INSTALL DOCKER 
-              sudo apt-get update -y 
-              sudo apt-get install -y docker.io
+  #           # START ENDEE SERVER 
+  #           # CHECK IF DOCKER INSTALLED ON SERVER OR NOT IF NOT INSTALL THE DOCKER SERVER TO RUN WITHOUT SUDO 
+  #           # CHECK USING DOCKER BINARY FILES 
+  #           if command -v docker &>/dev/null; then
+  #             echo "Docker is already installed"
+  #           else
+  #             echo "Docker is not installed"
+  #             # INSTALL DOCKER 
+  #             sudo apt-get update -y 
+  #             sudo apt-get install -y docker.io
 
-              # START DOCKER SERVICE 
-              sudo systemctl start docker  
-              sudo systemctl enable docker 
+  #             # START DOCKER SERVICE 
+  #             sudo systemctl start docker  
+  #             sudo systemctl enable docker 
 
-              echo "DOCKER INSTALLED: \$(docker --version)"
-            fi
+  #             echo "DOCKER INSTALLED: \$(docker --version)"
+  #           fi
 
-            # # RUN WITHOUT SUDO — ADD username TO DOCKER GROUP
-            # if groups ${{ secrets.ENDEE_USERNAME }} | grep -q docker; then
-            #   echo "${{ secrets.ENDEE_USERNAME }} already in docker group"
-            # else
-            #   echo "Adding ${{ secrets.ENDEE_USERNAME }} to docker group..."
-            #   sudo usermod -aG docker ${{ secrets.ENDEE_USERNAME }}
-            #   echo "${{ secrets.ENDEE_USERNAME }} added to docker group"
-            # fi
+  #           # # RUN WITHOUT SUDO — ADD username TO DOCKER GROUP
+  #           # if groups ${{ secrets.ENDEE_USERNAME }} | grep -q docker; then
+  #           #   echo "${{ secrets.ENDEE_USERNAME }} already in docker group"
+  #           # else
+  #           #   echo "Adding ${{ secrets.ENDEE_USERNAME }} to docker group..."
+  #           #   sudo usermod -aG docker ${{ secrets.ENDEE_USERNAME }}
+  #           #   echo "${{ secrets.ENDEE_USERNAME }} added to docker group"
+  #           # fi
 
-            # # APPLY GROUP CHANGE WITHOUT LOGOUT
-            # sg docker -c "docker ps >  /dev/null 2>&1 && echo 'Docker running without sudo' || echo 'Docker check failed'"
+  #           # # APPLY GROUP CHANGE WITHOUT LOGOUT
+  #           # sg docker -c "docker ps >  /dev/null 2>&1 && echo 'Docker running without sudo' || echo 'Docker check failed'"
 
-            # GET THE ARCHITECTURE OF THE SERVER
-            arc=\$(grep -o 'avx2\|avx512\|neon\|sve2' /proc/cpuinfo | sort -u)
-            echo "ARCHITECTURE: \$arc"
-
-            
-
-            # BUILD ENDEE IMAGE
-            echo "BUILDING ENDEE IMAGE"
-            sudo docker build --ulimit nofile=100000:100000 --build-arg BUILD_ARCH="\$arc" --build-arg DEBUG=true -t endee-oss:latest -f ./infra/Dockerfile .
-
-            # DOWN THE EXISTING CONTAINER IF EXISTS
-            echo "DOWNING THE EXISTING CONTAINER IF EXISTS"
-            sudo docker rm -f endee-server 2>/dev/null || true
-
-            # RUN THE ENDEE CONTAINER
-            echo "RUNNING ENDEE CONTAINER"
-            sudo docker run -d -p 8080:8080 -v endee-data:/data -e NDD_AUTH_TOKEN="" --name endee-server endee-oss:latest
-
-            # CHECK IF THE CONTAINER IS RUNNING
-            echo "CHECKING IF THE CONTAINER IS RUNNING"
-            if sudo docker ps | grep -q endee-server; then
-              echo "ENDEE CONTAINER IS RUNNING"
-            else
-              echo "ENDEE CONTAINER IS NOT RUNNING"
-              exit 1
-            fi
-
-
+  #           # GET THE ARCHITECTURE OF THE SERVER
+  #           arc=\$(grep -o 'avx2\|avx512\|neon\|sve2' /proc/cpuinfo | sort -u)
+  #           echo "ARCHITECTURE: \$arc"
 
             
-          ENDSSH
+
+  #           # BUILD ENDEE IMAGE
+  #           echo "BUILDING ENDEE IMAGE"
+  #           sudo docker build --ulimit nofile=100000:100000 --build-arg BUILD_ARCH="\$arc" --build-arg DEBUG=true -t endee-oss:latest -f ./infra/Dockerfile .
+
+  #           # DOWN THE EXISTING CONTAINER IF EXISTS
+  #           echo "DOWNING THE EXISTING CONTAINER IF EXISTS"
+  #           sudo docker rm -f endee-server 2>/dev/null || true
+
+  #           # RUN THE ENDEE CONTAINER
+  #           echo "RUNNING ENDEE CONTAINER"
+  #           sudo docker run -d -p 8080:8080 -v endee-data:/data -e NDD_AUTH_TOKEN="" --name endee-server endee-oss:latest
+
+  #           # CHECK IF THE CONTAINER IS RUNNING
+  #           echo "CHECKING IF THE CONTAINER IS RUNNING"
+  #           if sudo docker ps | grep -q endee-server; then
+  #             echo "ENDEE CONTAINER IS RUNNING"
+  #           else
+  #             echo "ENDEE CONTAINER IS NOT RUNNING"
+  #             exit 1
+  #           fi
+
+
+
+            
+  #         ENDSSH
  
-      - name: Update PR Comment → Endee running
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const mode      = '${{ needs.validate-command.outputs.mode }}';
-            const sha       = '${{ needs.validate-command.outputs.head_sha }}'.slice(0,7);
-            const actor     = context.payload.comment.user.login;
-            const modeLabel = {dense:'Dense', hybrid:'Hybrid'}[mode];
-            const body = [
-              `## VectorDB Benchmark — ${modeLabel} — Running`,
-              ``,
-              `Triggered by @${actor} · Commit \`${sha}\``,
-              ``,
-              `| Step | Status |`,
-              `|------|--------|`,
-              `| Provision Servers    | Up         |`,
-              `| Deploy Endee Server  | Running    |`,
-              `| Run Benchmark        | In progress… |`,
-              `| Results              | Waiting    |`,
-              `| Teardown             | Waiting    |`,
-            ].join('\n');
-            const { data: cs } = await github.rest.issues.listComments({
-              owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number,
-            });
-            const sc = cs.find(c => c.body.includes('VectorDB Benchmark —') && c.user.login === 'github-actions[bot]');
-            if (sc) await github.rest.issues.updateComment({
-              owner: context.repo.owner, repo: context.repo.repo, comment_id: sc.id, body,
-            });
+  #     - name: Update PR Comment → Endee running
+  #       uses: actions/github-script@v7
+  #       with:
+  #         script: |
+  #           const mode      = '${{ needs.validate-command.outputs.mode }}';
+  #           const sha       = '${{ needs.validate-command.outputs.head_sha }}'.slice(0,7);
+  #           const actor     = context.payload.comment.user.login;
+  #           const modeLabel = {dense:'Dense', hybrid:'Hybrid'}[mode];
+  #           const body = [
+  #             `## VectorDB Benchmark — ${modeLabel} — Running`,
+  #             ``,
+  #             `Triggered by @${actor} · Commit \`${sha}\``,
+  #             ``,
+  #             `| Step | Status |`,
+  #             `|------|--------|`,
+  #             `| Provision Servers    | Up         |`,
+  #             `| Deploy Endee Server  | Running    |`,
+  #             `| Run Benchmark        | In progress… |`,
+  #             `| Results              | Waiting    |`,
+  #             `| Teardown             | Waiting    |`,
+  #           ].join('\n');
+  #           const { data: cs } = await github.rest.issues.listComments({
+  #             owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number,
+  #           });
+  #           const sc = cs.find(c => c.body.includes('VectorDB Benchmark —') && c.user.login === 'github-actions[bot]');
+  #           if (sc) await github.rest.issues.updateComment({
+  #             owner: context.repo.owner, repo: context.repo.repo, comment_id: sc.id, body,
+  #           });
  
   # ──────────────────────────────────────────────────────────
   # JOB 3: Run benchmark on Benchmark server with the chosen mode
@@ -634,13 +634,13 @@ jobs:
 
             echo "AWS CREDENTIALS CONFIGURED"
 
-            # CHECK IF BENCHMARK SERVER CAN REACH ENDEE SERVER ON PORT 8080
-            echo "CHECKING CONNECTIVITY TO ENDEE SERVER: $ENDEE_IP:8080"
-            if ! nc -zv -w 5 $ENDEE_IP 8080 2>&1; then
-              echo "ENDEE SERVER PORT 8080 NOT REACHABLE"
-              exit 1
-            fi
-            echo "ENDEE SERVER IS REACHABLE ON PORT 8080"
+            # # CHECK IF BENCHMARK SERVER CAN REACH ENDEE SERVER ON PORT 8080
+            # echo "CHECKING CONNECTIVITY TO ENDEE SERVER: $ENDEE_IP:8080"
+            # if ! nc -zv -w 5 $ENDEE_IP 8080 2>&1; then
+            #   echo "ENDEE SERVER PORT 8080 NOT REACHABLE"
+            #   exit 1
+            # fi
+            # echo "ENDEE SERVER IS REACHABLE ON PORT 8080"
 
             cd "\$HOME/benchmark"
 
@@ -661,7 +661,7 @@ jobs:
               echo "DOWNLOADING DENSE DATA FROM S3"
               aws s3 cp s3://${{ secrets.BUCKET_NAME }}/dense/ \$HOME/benchmark/ --recursive
               echo "DENSE DATA DOWNLOAD COMPLETE"
-
+            fi
 
           ENDSSH
 
@@ -823,7 +823,7 @@ jobs:
               --sparse-scoring-model default
 
 
-            #  BM25 - INDEXING + QUERY + VALIDATION - USE RANK-BM25 LIBRARIES BM25L METHOD
+            #  BM25 - INDEXING + QUERY + VALIDATION - USE RANK-BM25 LIBRARIES BM25L METHOD 
             python -m src.main \
               --db endee \
               --index-name quora_bench \
@@ -1036,84 +1036,84 @@ jobs:
   #================================================================
   # JOB 5: TEARDOWN - TERMINATE BOTH SERVERS ALWAYS 
   #================================================================
-  teardown:
-    name: Teardown Servers 
-    needs: [validate-command, provision-servers, deploy-endee, run-benchmark, report-results]
-    runs-on: ubuntu-latest
-    if: always()
+  # teardown:
+  #   name: Teardown Servers 
+  #   needs: [validate-command, provision-servers, deploy-endee, run-benchmark, report-results]
+  #   runs-on: ubuntu-latest
+  #   if: always()
 
-    steps:
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            ${{ vars.AWS_REGION }}
+  #   steps:
+  #     - name: Configure AWS credentials
+  #       uses: aws-actions/configure-aws-credentials@v4
+  #       with:
+  #         aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+  #         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  #         aws-region:            ${{ vars.AWS_REGION }}
 
 
-      - name: Terminate Endee Server
-        if: needs.provision-servers.outputs.endee_server_id != ''
-        run: |
-          ENDEE_ID="${{ needs.provision-servers.outputs.endee_server_id }}"
-          echo "TERMINATING ENDEE SERVER: $ENDEE_ID"
+  #     - name: Terminate Endee Server
+  #       if: needs.provision-servers.outputs.endee_server_id != ''
+  #       run: |
+  #         ENDEE_ID="${{ needs.provision-servers.outputs.endee_server_id }}"
+  #         echo "TERMINATING ENDEE SERVER: $ENDEE_ID"
 
-          aws ec2 terminate-instances \
-            --instance-ids $ENDEE_ID
+  #         aws ec2 terminate-instances \
+  #           --instance-ids $ENDEE_ID
           
-          echo "ENDEE SERVER TERMINATED"
+  #         echo "ENDEE SERVER TERMINATED"
 
-      - name: Terminate Benchmark Server 
-        if: needs.provision-servers.outputs.benchmark_server_id != ''
-        run: |
-          BENCHMARK_ID=${{ needs.provision-servers.outputs.benchmark_server_id }}
-          echo "TERMINATING BENCHMARK SERVER: $BENCHMARK_ID"
+  #     - name: Terminate Benchmark Server 
+  #       if: needs.provision-servers.outputs.benchmark_server_id != ''
+  #       run: |
+  #         BENCHMARK_ID=${{ needs.provision-servers.outputs.benchmark_server_id }}
+  #         echo "TERMINATING BENCHMARK SERVER: $BENCHMARK_ID"
 
-          aws ec2 terminate-instances \
-            --instance-ids $BENCHMARK_ID
+  #         aws ec2 terminate-instances \
+  #           --instance-ids $BENCHMARK_ID
           
-          echo "BENCHMARK SERVER TERMINATED"
+  #         echo "BENCHMARK SERVER TERMINATED"
 
-      - name: Post teardown status to PR 
-        if: always()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const mode      = '${{ needs.validate-command.outputs.mode }}';
-            const sha       = '${{ needs.validate-command.outputs.head_sha }}'.slice(0,7);
-            const actor     = context.payload.comment.user.login;
-            const benchResult = '${{ needs.report-results.result }}';
-            const passed      = benchResult === 'success';
-            const statusLabel = passed ? 'Passed' : 'Failed';
+  #     - name: Post teardown status to PR 
+  #       if: always()
+  #       uses: actions/github-script@v7
+  #       with:
+  #         script: |
+  #           const mode      = '${{ needs.validate-command.outputs.mode }}';
+  #           const sha       = '${{ needs.validate-command.outputs.head_sha }}'.slice(0,7);
+  #           const actor     = context.payload.comment.user.login;
+  #           const benchResult = '${{ needs.report-results.result }}';
+  #           const passed      = benchResult === 'success';
+  #           const statusLabel = passed ? 'Passed' : 'Failed';
 
-            const body = [
-              `## VectorDB Benchmark — ${mode} — ${statusLabel}`,
-              ``,
-              `Triggered by @${actor} · Commit \`${sha}\``,
-              ``,
-              `| Step                | Status |`,
-              `|---------------------|--------|`,
-              `| Provision Servers   | Up      |`,
-              `| Deploy Endee Server | Done    |`,
-              `| Run Benchmark       | ${statusLabel} |`,
-              `| Results             | See above  |`,
-              `| Teardown            | Done    |`,
-            ].join('\n');
+  #           const body = [
+  #             `## VectorDB Benchmark — ${mode} — ${statusLabel}`,
+  #             ``,
+  #             `Triggered by @${actor} · Commit \`${sha}\``,
+  #             ``,
+  #             `| Step                | Status |`,
+  #             `|---------------------|--------|`,
+  #             `| Provision Servers   | Up      |`,
+  #             `| Deploy Endee Server | Done    |`,
+  #             `| Run Benchmark       | ${statusLabel} |`,
+  #             `| Results             | See above  |`,
+  #             `| Teardown            | Done    |`,
+  #           ].join('\n');
 
-            const { data: comments } = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo:  context.repo.repo,
-              issue_number: context.issue.number,
-            });
-            const existing = comments.find(c =>
-              c.body.includes('VectorDB Benchmark —') &&
-              c.user.login === 'github-actions[bot]'
-            );
-            if (existing) {
-              await github.rest.issues.updateComment({
-                owner:      context.repo.owner,
-                repo:       context.repo.repo,
-                comment_id: existing.id,
-                body,
-              });
-            }
+  #           const { data: comments } = await github.rest.issues.listComments({
+  #             owner: context.repo.owner,
+  #             repo:  context.repo.repo,
+  #             issue_number: context.issue.number,
+  #           });
+  #           const existing = comments.find(c =>
+  #             c.body.includes('VectorDB Benchmark —') &&
+  #             c.user.login === 'github-actions[bot]'
+  #           );
+  #           if (existing) {
+  #             await github.rest.issues.updateComment({
+  #               owner:      context.repo.owner,
+  #               repo:       context.repo.repo,
+  #               comment_id: existing.id,
+  #               body,
+  #             });
+  #           }
 

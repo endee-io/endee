@@ -674,7 +674,7 @@ jobs:
       - name: Dense Benchmarking
         if: needs.validate-command.outputs.mode == 'dense'
         run: |
-          # ── DEFINE VARIABLES ─────────────────────────────────── 
+          # ── DEFINE VARIABLES ───────────────────────────────────
           BENCHMARK_SERVER_IP="${{ needs.provision-servers.outputs.benchmark_server_ip }}"
           ENDEE_IP="${{ needs.provision-servers.outputs.endee_server_private_ip }}"
 
@@ -825,7 +825,7 @@ jobs:
               --concurrency 2 \
               --top-k 10 \
               --vector-token mytoken \
-              --base-url https://${{ needs.provision-servers.outputs.endee_server_ip }}:8080/api/v1 \
+              --base-url https://${{ needs.provision-servers.outputs.endee_server_private_ip }}:8080/api/v1 \
               --validation-venv validation-env \
               --sparse-mode endee_bm25 \
               --sparse-scoring-model endee_bm25
@@ -854,7 +854,7 @@ jobs:
               --concurrency 2 \
               --top-k 10 \
               --vector-token mytoken \
-              --base-url https://dev.endee.io/api/v1 \
+              --base-url https://${{ needs.provision-servers.outputs.endee_server_private_ip }}/api/v1 \
               --validation-venv validation-env \
               --sparse-mode bm25 \
               --sparse-scoring-model default

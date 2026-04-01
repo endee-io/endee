@@ -639,13 +639,13 @@ jobs:
 
             echo "AWS CREDENTIALS CONFIGURED"
 
-            # # CHECK IF BENCHMARK SERVER CAN REACH ENDEE SERVER ON PORT 8080
-            # echo "CHECKING CONNECTIVITY TO ENDEE SERVER: $ENDEE_IP:8080"
-            # if ! nc -zv -w 5 $ENDEE_IP 8080 2>&1; then
-            #   echo "ENDEE SERVER PORT 8080 NOT REACHABLE"
-            #   exit 1
-            # fi
-            # echo "ENDEE SERVER IS REACHABLE ON PORT 8080"
+            # CHECK IF BENCHMARK SERVER CAN REACH ENDEE SERVER ON PORT 8080
+            echo "CHECKING CONNECTIVITY TO ENDEE SERVER: $ENDEE_IP:8080"
+            if ! nc -zv -w 5 $ENDEE_IP 8080 2>&1; then
+              echo "ENDEE SERVER PORT 8080 NOT REACHABLE"
+              exit 1
+            fi
+            echo "ENDEE SERVER IS REACHABLE ON PORT 8080"
 
             cd "\$HOME/benchmark"
 
@@ -674,7 +674,7 @@ jobs:
       - name: Dense Benchmarking
         if: needs.validate-command.outputs.mode == 'dense'
         run: |
-          # ── DEFINE VARIABLES ───────────────────────────────────
+          # ── DEFINE VARIABLES ─────────────────────────────────── 
           BENCHMARK_SERVER_IP="${{ needs.provision-servers.outputs.benchmark_server_ip }}"
           ENDEE_IP="${{ needs.provision-servers.outputs.endee_server_private_ip }}"
 
@@ -825,7 +825,7 @@ jobs:
               --concurrency 2 \
               --top-k 10 \
               --vector-token mytoken \
-              --base-url https://${{ needs.provision-servers.outputs.endee_server_private_ip }}:8080/api/v1 \
+              --base-url http://${{ needs.provision-servers.outputs.endee_server_private_ip }}:8080/api/v1 \
               --validation-venv validation-env \
               --sparse-mode endee_bm25 \
               --sparse-scoring-model endee_bm25
@@ -839,7 +839,7 @@ jobs:
               --concurrency 2 \
               --top-k 10 \
               --vector-token mytoken \
-              --base-url https://dev.endee.io/api/v1 \
+              --base-url http://dev.endee.io/api/v1 \
               --validation-venv validation-env \
               --sparse-mode splade \
               --sparse-scoring-model default
@@ -854,7 +854,7 @@ jobs:
               --concurrency 2 \
               --top-k 10 \
               --vector-token mytoken \
-              --base-url https://${{ needs.provision-servers.outputs.endee_server_private_ip }}/api/v1 \
+              --base-url http://${{ needs.provision-servers.outputs.endee_server_private_ip }}/api/v1 \
               --validation-venv validation-env \
               --sparse-mode bm25 \
               --sparse-scoring-model default

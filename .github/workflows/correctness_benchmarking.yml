@@ -674,7 +674,7 @@ jobs:
       - name: Dense Benchmarking
         if: needs.validate-command.outputs.mode == 'dense'
         run: |
-          # ── DEFINE VARIABLES ─────────────────────────────────── 
+          # ── DEFINE VARIABLES ───────────────────────────────────
           BENCHMARK_SERVER_IP="${{ needs.provision-servers.outputs.benchmark_server_ip }}"
           ENDEE_IP="${{ needs.provision-servers.outputs.endee_server_private_ip }}"
 
@@ -834,7 +834,7 @@ jobs:
             python -m src.main \
               --db endee \
               --index-name quora_bench \
-              --dataset-name beir_quora \
+              --dataset-name beir_scifact \
               --results hybrid_splade \
               --concurrency 2 \
               --top-k 10 \
@@ -849,7 +849,7 @@ jobs:
             python -m src.main \
               --db endee \
               --index-name quora_bench \
-              --dataset-name beir_quora \
+              --dataset-name beir_scifact \
               --results hybrid_bm25 \
               --concurrency 2 \
               --top-k 10 \

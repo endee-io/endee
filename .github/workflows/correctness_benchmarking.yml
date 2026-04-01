@@ -819,7 +819,7 @@ jobs:
             # ENDEE BM25 - INDEXING + QUERY + VALIDATION
             python -m src.main \
               --db endee \
-              --index-name quora_bench \
+              --index-name quora_bench_endee_bm25 \
               --dataset-name beir_scifact \
               --results hybrid_endee_bm25 \
               --concurrency 2 \
@@ -833,13 +833,13 @@ jobs:
             #  SPLADE - INDEXING + QUERY + VALIDATION
             python -m src.main \
               --db endee \
-              --index-name quora_bench \
+              --index-name quora_bench_splade \
               --dataset-name beir_scifact \
               --results hybrid_splade \
               --concurrency 2 \
               --top-k 10 \
               --vector-token mytoken \
-              --base-url http://dev.endee.io/api/v1 \
+              --base-url http://${{ needs.provision-servers.outputs.endee_server_private_ip }}:8080/api/v1 \
               --validation-venv validation-env \
               --sparse-mode splade \
               --sparse-scoring-model default
@@ -848,7 +848,7 @@ jobs:
             #  BM25 - INDEXING + QUERY + VALIDATION - USE RANK-BM25 LIBRARIES BM25L METHOD 
             python -m src.main \
               --db endee \
-              --index-name quora_bench \
+              --index-name quora_bench_bm25 \
               --dataset-name beir_scifact \
               --results hybrid_bm25 \
               --concurrency 2 \

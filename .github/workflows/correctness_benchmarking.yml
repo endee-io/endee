@@ -674,7 +674,7 @@ jobs:
       - name: Dense Benchmarking
         if: needs.validate-command.outputs.mode == 'dense'
         run: |
-          # ── DEFINE VARIABLES ───────────────────────────────────
+          # ── DEFINE VARIABLES ─────────────────────────────────── 
           BENCHMARK_SERVER_IP="${{ needs.provision-servers.outputs.benchmark_server_ip }}"
           ENDEE_IP="${{ needs.provision-servers.outputs.endee_server_private_ip }}"
 
@@ -813,7 +813,7 @@ jobs:
             
             # PULL DATA FROM BUCKET 
             echo "PULL HYBRID DATA FROM BUCKET"
-            aws s3 cp s3://${{ secrets.BUCKET_NAME }}/hybrid/ \$HOME/benchmark/data/beir_quora --recursive
+            aws s3 cp s3://${{ secrets.BUCKET_NAME }}/hybrid/ \$HOME/benchmark/hybrid_benchmarking/data/ --recursive
             echo "HYBRID DATA DOWNLOAD COMPLETE"
 
             # ENDEE BM25 - INDEXING + QUERY + VALIDATION
@@ -825,7 +825,7 @@ jobs:
               --concurrency 2 \
               --top-k 10 \
               --vector-token mytoken \
-              --base-url https://dev.endee.io/api/v1 \
+              --base-url https://${{ needs.provision-servers.outputs.endee_server_ip }}:8080/api/v1 \
               --validation-venv validation-env \
               --sparse-mode endee_bm25 \
               --sparse-scoring-model endee_bm25

@@ -674,7 +674,7 @@ jobs:
       - name: Dense Benchmarking
         if: needs.validate-command.outputs.mode == 'dense'
         run: |
-          # ── DEFINE VARIABLES ───────────────────────────────────
+          # ── DEFINE VARIABLES ─────────────────────────────────── 
           BENCHMARK_SERVER_IP="${{ needs.provision-servers.outputs.benchmark_server_ip }}"
           ENDEE_IP="${{ needs.provision-servers.outputs.endee_server_private_ip }}"
 
@@ -874,42 +874,65 @@ jobs:
     name: Post Results 
     needs: [ validate-command, provision-servers, run-benchmark]
     runs-on: ubuntu-latest 
-    if: always() # THIS JOB WILL ALWAYS RUN, SUCCESS OR FAILURE
+    if: always()
 
     steps:
       # ─── SETUP SSH ─────────────────────────────────────────────────── 
-      - name: Capture Benchmark Results
+      - name: Setup SSH
         run: |
           mkdir -p ~/.ssh 
           echo "${{ secrets.BENCHMARKING_SSH_PRIVATE_KEY }}" > "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}"
           chmod 400 "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}"
           ssh-keyscan -H ${{ needs.provision-servers.outputs.benchmark_server_ip }} >> "$HOME/.ssh/known_hosts"
 
-      - name: Fetch Latest Result JSON from Benchmark Server 
-        id: fetch_result 
-        run: | 
+      # ─── DENSE: fetch single timestamped result file ──────────────────
+      - name: Fetch Result JSON — Dense
+        id: fetch_dense
+        if: needs.validate-command.outputs.mode == 'dense'
+        run: |
           BENCHMARK_IP="${{ needs.provision-servers.outputs.benchmark_server_ip }}"
           RESULT_DIR="~/benchmark/VectorDBBench/vectordb_bench/results/Endee"
 
-          # FIND THE LATEST RESULT FILE ON THE SERVER  
-          LATEST_RESULT_FILE=$(ssh -i "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}" "${{ secrets.BENCHMARKING_USERNAME }}"@"$BENCHMARK_IP" "ls -t $RESULT_DIR/result_*.json 2>/dev/null | head -1")
-
-          # ECHO LATEST RESULT 
-          echo "LATEST_RESULT_FILE=$LATEST_RESULT_FILE" >> $GITHUB_OUTPUT 
+          LATEST_RESULT_FILE=$(ssh -i "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}" \
+            "${{ secrets.BENCHMARKING_USERNAME }}"@"$BENCHMARK_IP" \
+            "ls -t $RESULT_DIR/result_*.json 2>/dev/null | head -1")
 
           if [ -z "$LATEST_RESULT_FILE" ]; then
             echo "NO RESULT FILE FOUND"
             echo "found=false" >> $GITHUB_OUTPUT
           else
-            # SCP THE FILE BACK TO RUNNER
-            mkdir -p /tmp/benchmark_results
+            mkdir -p /tmp/benchmark_results/dense
             scp -i "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}" \
               "${{ secrets.BENCHMARKING_USERNAME }}"@"$BENCHMARK_IP":"$LATEST_RESULT_FILE" \
-              /tmp/benchmark_results/result.json
-            
-            echo "File fetched successfully"
+              /tmp/benchmark_results/dense/result.json
             echo "found=true" >> $GITHUB_OUTPUT
           fi
+
+      # ─── HYBRID: fetch all three fixed-name result files ──────────────
+      - name: Fetch Result JSONs — Hybrid
+        id: fetch_hybrid
+        if: needs.validate-command.outputs.mode == 'hybrid'
+        run: |
+          BENCHMARK_IP="${{ needs.provision-servers.outputs.benchmark_server_ip }}"
+          RESULT_DIR="/home/ubuntu/benchmark/hybrid_benchmarking/results/endee"
+          SSH_OPTS="-i $HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}"
+          REMOTE="${{ secrets.BENCHMARKING_USERNAME }}@$BENCHMARK_IP"
+
+          mkdir -p /tmp/benchmark_results/hybrid
+
+          ALL_FOUND=true
+          for FILE in quora_bench_bm25.json quora_bench_endee_bm25.json quora_bench_splade.json; do
+            EXISTS=$(ssh $SSH_OPTS "$REMOTE" "[ -f $RESULT_DIR/$FILE ] && echo true || echo false")
+            if [ "$EXISTS" = "true" ]; then
+              scp $SSH_OPTS "$REMOTE":"$RESULT_DIR/$FILE" /tmp/benchmark_results/hybrid/"$FILE"
+              echo "Fetched: $FILE"
+            else
+              echo "NOT FOUND: $FILE"
+              ALL_FOUND=false
+            fi
+          done
+
+          echo "found=$ALL_FOUND" >> $GITHUB_OUTPUT
 
       # ─── PARSE METRICS + DETERMINE PASS/FAIL + POST TO PR ────────────
       - name: Parse results and post PR comment
@@ -917,134 +940,173 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-
-            // ── 1. READ THE RESULT FILE ──────────────────────────────
-            const fs    = require('fs');
-            const found = '${{ steps.fetch_result.outputs.found }}' === 'true';
-
-            const mode  = '${{ needs.validate-command.outputs.mode }}';
-            const sha   = '${{ needs.validate-command.outputs.head_sha }}'.slice(0, 7);
-            const actor = context.payload.comment.user.login;
-
-            // job-level result from GitHub (always reliable — even if benchmark crashed)
-            const jobResult    = '${{ needs.run-benchmark.result }}';   // 'success' | 'failure' | 'cancelled'
+            const fs           = require('fs');
+            const mode         = '${{ needs.validate-command.outputs.mode }}';
+            const sha          = '${{ needs.validate-command.outputs.head_sha }}'.slice(0, 7);
+            const actor        = context.payload.comment.user.login;
+            const jobResult    = '${{ needs.run-benchmark.result }}';
             const jobSucceeded = jobResult === 'success';
 
-            let metrics        = null;
-            let metricsAllZero = true;
-            let parseError     = null;
+            // ── HELPERS ───────────────────────────────────────────────
+            const fmt = (v) => (v != null && v !== 0) ? Number(v).toFixed(3) : '—';
 
-            if (found) {
-              try {
-                const raw  = fs.readFileSync('/tmp/benchmark_results/result.json', 'utf8');
-                const json = JSON.parse(raw);
+            const safeRead = (path) => {
+              try { return JSON.parse(fs.readFileSync(path, 'utf8')); }
+              catch (e) { return null; }
+            };
 
-                // result JSON structure: { results: [ { metrics: {...} } ] }
-                metrics = json.results?.[0]?.metrics;
+            let passed       = false;
+            let metricsTable = '';
+            let failReason   = '';
 
-                // ── 2. DETERMINE PASS/FAIL FROM METRIC VALUES ────────
-                // if ALL these are zero → benchmark didn't actually run → FAIL
-                const KEY_METRICS = [
-                  'insert_duration',
-                  'optimize_duration', 
-                  'load_duration',
-                  'qps',
-                  'serial_latency_p99',
-                  'serial_latency_p95',
-                  'recall',
-                  ];
+            // ════════════════════════════════════════════════════════
+            // DENSE
+            // ════════════════════════════════════════════════════════
+            if (mode === 'dense') {
+              const found   = '${{ steps.fetch_dense.outputs.found }}' === 'true';
+              const json    = found ? safeRead('/tmp/benchmark_results/dense/result.json') : null;
+              const metrics = json?.results?.[0]?.metrics ?? null;
 
-                metricsAllZero = KEY_METRICS.every(k => (metrics?.[k] ?? 0) === 0);
+              const KEY_METRICS = [
+                'insert_duration', 'optimize_duration', 'load_duration',
+                'qps', 'serial_latency_p99', 'serial_latency_p95', 'recall',
+              ];
+              const metricsAllZero = !metrics || KEY_METRICS.every(k => (metrics[k] ?? 0) === 0);
 
-              } catch (e) {
-                parseError = e.message;
+              passed = jobSucceeded && found && !metricsAllZero;
+
+              if (!passed) {
+                if (!jobSucceeded)       failReason = `> Benchmark job status: \`${jobResult}\``;
+                else if (!found)         failReason = `> No result file found on benchmark server.`;
+                else if (metricsAllZero) failReason = `> All metrics are zero — benchmark may not have run correctly.`;
+              }
+
+              if (metrics && !metricsAllZero) {
+                metricsTable = [
+                  ``,
+                  `### Benchmark Metrics — Dense`,
+                  ``,
+                  `| Metric                | Value |`,
+                  `|-----------------------|-------|`,
+                  `| QPS                   | ${fmt(metrics.qps)}                  |`,
+                  `| Recall                | ${fmt(metrics.recall)}               |`,
+                  `| NDCG                  | ${fmt(metrics.ndcg)}                 |`,
+                  `| Insert Duration (s)   | ${fmt(metrics.insert_duration)}      |`,
+                  `| Load Duration (s)     | ${fmt(metrics.load_duration)}        |`,
+                  `| Optimize Duration (s) | ${fmt(metrics.optimize_duration)}    |`,
+                  `| Serial Latency P99    | ${fmt(metrics.serial_latency_p99)}   |`,
+                  `| Serial Latency P95    | ${fmt(metrics.serial_latency_p95)}   |`,
+                ].join('\n');
               }
             }
 
-            // ── 3. FINAL PASS/FAIL DECISION ──────────────────────────
-            // FAIL if: job itself failed OR no file found OR all metrics are zero
-            const passed = jobSucceeded && found && !metricsAllZero && !parseError;
-            const statusEmoji = passed ? '' : '';
+            // ════════════════════════════════════════════════════════
+            // HYBRID
+            // JSON shape per file:
+            // {
+            //   "index_name":      "quora_bench_bm25",
+            //   "total_vectors":   5183,
+            //   "total_batches":   6,
+            //   "batch_size":      1000,
+            //   "total_time_sec":  24.371,
+            //   "upsert_latency_ms": { "min", "p50", "p95", "p99", "max", "mean" }
+            // }
+            // ════════════════════════════════════════════════════════
+            if (mode === 'hybrid') {
+              const found = '${{ steps.fetch_hybrid.outputs.found }}' === 'true';
+
+              const FILES = {
+                'BM25':       '/tmp/benchmark_results/hybrid/quora_bench_bm25.json',
+                'Endee BM25': '/tmp/benchmark_results/hybrid/quora_bench_endee_bm25.json',
+                'SPLADE':     '/tmp/benchmark_results/hybrid/quora_bench_splade.json',
+              };
+
+              const results  = {};
+              let   anyFound = false;
+              for (const [label, path] of Object.entries(FILES)) {
+                const json = safeRead(path);
+                if (json) { results[label] = json; anyFound = true; }
+              }
+
+              // Pass = job OK + all 3 files present + at least one non-zero total_time_sec
+              const anyNonZero = Object.values(results).some(j => (j.total_time_sec ?? 0) > 0);
+              passed = jobSucceeded && found && anyNonZero;
+
+              if (!passed) {
+                if (!jobSucceeded)    failReason = `> Benchmark job status: \`${jobResult}\``;
+                else if (!found)      failReason = `> One or more result files were not found on the benchmark server.`;
+                else if (!anyNonZero) failReason = `> All timing metrics are zero — benchmark may not have run correctly.`;
+              }
+
+              if (anyFound) {
+                const rows = Object.entries(results).map(([label, j]) => {
+                  const lat = j.upsert_latency_ms ?? {};
+                  return [
+                    `| ${label.padEnd(10)}`,
+                    ` ${j.total_vectors   ?? '—'}`,
+                    ` ${fmt(j.total_time_sec)}`,
+                    ` ${fmt(lat.mean)}`,
+                    ` ${fmt(lat.p50)}`,
+                    ` ${fmt(lat.p95)}`,
+                    ` ${fmt(lat.p99)}`,
+                    ` ${fmt(lat.min)}`,
+                    ` ${fmt(lat.max)} |`,
+                  ].join(' |');
+                });
+
+                metricsTable = [
+                  ``,
+                  `### Benchmark Metrics — Hybrid`,
+                  ``,
+                  `| Method     | Vectors | Total Time (s) | Upsert Mean (ms) | P50 (ms) | P95 (ms) | P99 (ms) | Min (ms) | Max (ms) |`,
+                  `|------------|---------|----------------|------------------|----------|----------|----------|----------|----------|`,
+                  ...rows,
+                ].join('\n');
+              }
+            }
+
+            // ── BUILD FINAL COMMENT ───────────────────────────────────
+            const modeLabel   = { dense: 'Dense', hybrid: 'Hybrid' }[mode] ?? mode;
             const statusLabel = passed ? 'Passed' : 'Failed';
 
-            // ── 4. BUILD METRICS TABLE ────────────────────────────────
-            let metricsTable = '';
-
-            if (metrics && !metricsAllZero) {
-              // format a number to 4 decimal places, or '—' if zero/null
-              const fmt = (v) => (v && v !== 0) ? Number(v).toFixed(4) : '—';
-
-              metricsTable = [
-                ``,
-                `### Benchmark Metrics`,
-                ``,
-                `| Metric | Value |`,
-                `|--------|-------|`,
-                `| QPS                  | ${fmt(metrics.qps)}                  |`,
-                `| Recall               | ${fmt(metrics.recall)}               |`,
-                `| NDCG                 | ${fmt(metrics.ndcg)}                 |`,
-                `| Insert Duration (s)  | ${fmt(metrics.insert_duration)}      |`,
-                `| Load Duration (s)    | ${fmt(metrics.load_duration)}        |`,
-                `| Optimize Duration (s)| ${fmt(metrics.optimize_duration)}    |`,
-                `| Serial Latency P99   | ${fmt(metrics.serial_latency_p99)}   |`,
-                `| Serial Latency P95   | ${fmt(metrics.serial_latency_p95)}   |`,
-              ].join('\n');
-            }
-
-            // ── 5. FAILURE REASON ────────────────────────────────────
-            let failReason = '';
-            if (!passed) {
-              if (!jobSucceeded)    failReason = `> Benchmark job status: \`${jobResult}\``;
-              else if (!found)      failReason = `> No result file found on benchmark server.`;
-              else if (parseError)  failReason = `> Failed to parse result file: ${parseError}`;
-              else if (metricsAllZero) failReason = `> All metrics are zero — benchmark may not have run correctly.`;
-            }
-
-            // ── 6. BUILD FINAL COMMENT ───────────────────────────────
             const body = [
-              `## VectorDB Benchmark — ${mode} —  ${statusLabel}`,
+              `## VectorDB Benchmark — ${modeLabel} — ${statusLabel}`,
               ``,
               `Triggered by @${actor} · Commit \`${sha}\``,
               ``,
               `| Step                | Status |`,
               `|---------------------|--------|`,
-              `| Provision Servers   | Up      |`,
-              `| Deploy Endee Server | Running |`,
+              `| Provision Servers   | Up     |`,
+              `| Deploy Endee Server | Done   |`,
               `| Run Benchmark       | ${statusLabel} |`,
               `| Results             | ${passed ? 'Below' : 'See reason below'} |`,
               failReason,
               metricsTable,
             ].filter(Boolean).join('\n');
 
-            // ── 7. UPDATE EXISTING BOT COMMENT ON PR ─────────────────
+            // ── UPDATE / CREATE BOT COMMENT ───────────────────────────
             const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo:  context.repo.repo,
               issue_number: context.issue.number,
             });
-
             const existing = comments.find(c =>
               c.body.includes('VectorDB Benchmark —') &&
               c.user.login === 'github-actions[bot]'
             );
-
             if (existing) {
               await github.rest.issues.updateComment({
-                owner:      context.repo.owner,
-                repo:       context.repo.repo,
-                comment_id: existing.id,
-                body,
+                owner: context.repo.owner, repo: context.repo.repo,
+                comment_id: existing.id, body,
               });
             } else {
               await github.rest.issues.createComment({
-                owner:        context.repo.owner,
-                repo:         context.repo.repo,
-                issue_number: context.issue.number,
-                body,
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: context.issue.number, body,
               });
             }
 
-            // ── 8. SET FINAL COMMIT STATUS ───────────────────────────
+            // ── SET FINAL COMMIT STATUS ───────────────────────────────
             await github.rest.repos.createCommitStatus({
               owner:       context.repo.owner,
               repo:        context.repo.repo,

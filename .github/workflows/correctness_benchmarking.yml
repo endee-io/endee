@@ -1065,7 +1065,7 @@ jobs:
               }
             }
 
-            // ── BUILD FINAL COMMENT ───────────────────────────────────
+            // ── BUILD FINAL COMMENT ─────────────────────────────────── 
             const modeLabel   = { dense: 'Dense', hybrid: 'Hybrid' }[mode] ?? mode;
             const statusLabel = passed ? 'Passed' : 'Failed';
 

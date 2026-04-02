@@ -1168,27 +1168,19 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const mode      = '${{ needs.validate-command.outputs.mode }}';
-            const sha       = '${{ needs.validate-command.outputs.head_sha }}'.slice(0,7);
-            const actor     = context.payload.comment.user.login;
-            const benchResult = '${{ needs.report-results.result }}';
-            const passed      = benchResult === 'success';
-            const statusLabel = passed ? 'Passed' : 'Failed';
+            const mode        = '${{ needs.validate-command.outputs.mode }}';
+            const sha         = '${{ needs.validate-command.outputs.head_sha }}'.slice(0,7);
+            const actor       = context.payload.comment.user.login;
+            const modeLabel   = { dense: 'Dense', hybrid: 'Hybrid' }[mode] ?? mode;
 
-            const body = [
-              `## VectorDB Benchmark — ${mode} — ${statusLabel}`,
-              ``,
-              `Triggered by @${actor} · Commit \`${sha}\``,
-              ``,
-              `| Step                | Status |`,
-              `|---------------------|--------|`,
-              `| Provision Servers   | Up      |`,
-              `| Deploy Endee Server | Done    |`,
-              `| Run Benchmark       | ${statusLabel} |`,
-              `| Results             | See above  |`,
-              `| Teardown            | Done    |`,
-            ].join('\n');
+            // ── DERIVE FINAL STATUS FROM UPSTREAM JOBS ────────────────
+            // run-benchmark failing is the source of truth for pass/fail
+            // report-results is always() so its result is not a reliable signal
+            const benchResult  = '${{ needs.run-benchmark.result }}';   // success | failure | cancelled
+            const passed       = benchResult === 'success';
+            const statusLabel  = passed ? 'Passed' : 'Failed';
 
+            // ── FIND THE EXISTING BOT COMMENT ─────────────────────────
             const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo:  context.repo.repo,
@@ -1198,11 +1190,64 @@ jobs:
               c.body.includes('VectorDB Benchmark —') &&
               c.user.login === 'github-actions[bot]'
             );
+
             if (existing) {
+              // ── PATCH ONLY THE TEARDOWN ROW — KEEP EVERYTHING ELSE ──
+              // Replace the header line to reflect final status
+              let body = existing.body
+                .replace(
+                  /^## VectorDB Benchmark — .+ — .+$/m,
+                  `## VectorDB Benchmark — ${modeLabel} — ${statusLabel}`
+                )
+                // Update the Run Benchmark row in case it still says "In progress"
+                .replace(
+                  /\| Run Benchmark\s+\|.+\|/,
+                  `| Run Benchmark       | ${statusLabel} |`
+                )
+                // Update Results row
+                .replace(
+                  /\| Results\s+\|.+\|/,
+                  `| Results             | ${passed ? 'See below' : 'See reason below'} |`
+                )
+                // Append or update the Teardown row
+                .replace(
+                  /\| Teardown\s+\|.+\|/,
+                  `| Teardown            | Done ✓ |`
+                );
+
+              // If there was no Teardown row yet, append it after the last table row
+              if (!body.includes('| Teardown')) {
+                body = body.replace(
+                  /(\| Results\s+\|.+\|)/,
+                  `$1\n| Teardown            | Done ✓ |`
+                );
+              }
+
               await github.rest.issues.updateComment({
                 owner:      context.repo.owner,
                 repo:       context.repo.repo,
                 comment_id: existing.id,
+                body,
+              });
+            } else {
+              // Fallback: no existing comment — create a minimal one
+              const body = [
+                `## VectorDB Benchmark — ${modeLabel} — ${statusLabel}`,
+                ``,
+                `Triggered by @${actor} · Commit \`${sha}\``,
+                ``,
+                `| Step                | Status |`,
+                `|---------------------|--------|`,
+                `| Provision Servers   | Up     |`,
+                `| Deploy Endee Server | Done   |`,
+                `| Run Benchmark       | ${statusLabel} |`,
+                `| Results             | ${passed ? 'See above' : 'See reason above'} |`,
+                `| Teardown            | Done ✓ |`,
+              ].join('\n');
+              await github.rest.issues.createComment({
+                owner:        context.repo.owner,
+                repo:         context.repo.repo,
+                issue_number: context.issue.number,
                 body,
               });
             }

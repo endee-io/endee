@@ -885,7 +885,7 @@ jobs:
           chmod 400 "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}"
           ssh-keyscan -H ${{ needs.provision-servers.outputs.benchmark_server_ip }} >> "$HOME/.ssh/known_hosts"
 
-      # ─── DENSE: fetch single timestamped result file ────────────────── 
+      # ─── DENSE: fetch single timestamped result file ──────────────────
       - name: Fetch Result JSON — Dense
         id: fetch_dense
         if: needs.validate-command.outputs.mode == 'dense'

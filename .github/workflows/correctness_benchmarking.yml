@@ -908,7 +908,7 @@ jobs:
             echo "found=true" >> $GITHUB_OUTPUT
           fi
 
-      # ─── HYBRID: fetch all three fixed-name result files ──────────────
+      # ─── HYBRID: fetch upsert + correctness for all three methods ─────
       - name: Fetch Result JSONs — Hybrid
         id: fetch_hybrid
         if: needs.validate-command.outputs.mode == 'hybrid'
@@ -918,16 +918,30 @@ jobs:
           SSH_OPTS="-i $HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}"
           REMOTE="${{ secrets.BENCHMARKING_USERNAME }}@$BENCHMARK_IP"
 
-          mkdir -p /tmp/benchmark_results/hybrid
-
           ALL_FOUND=true
-          for FILE in quora_bench_bm25.json quora_bench_endee_bm25.json quora_bench_splade.json; do
-            EXISTS=$(ssh $SSH_OPTS "$REMOTE" "[ -f $RESULT_DIR/$FILE ] && echo true || echo false")
+
+          for KEY in bm25 endee_bm25 splade; do
+            mkdir -p /tmp/benchmark_results/hybrid/$KEY
+
+            # ── upsert JSON (root level) ───────────────────────────
+            UPSERT_FILE="$RESULT_DIR/quora_bench_${KEY}.json"
+            EXISTS=$(ssh $SSH_OPTS "$REMOTE" "[ -f $UPSERT_FILE ] && echo true || echo false")
             if [ "$EXISTS" = "true" ]; then
-              scp $SSH_OPTS "$REMOTE":"$RESULT_DIR/$FILE" /tmp/benchmark_results/hybrid/"$FILE"
-              echo "Fetched: $FILE"
+              scp $SSH_OPTS "$REMOTE":"$UPSERT_FILE" /tmp/benchmark_results/hybrid/$KEY/upsert.json
+              echo "Fetched upsert: quora_bench_${KEY}.json"
             else
-              echo "NOT FOUND: $FILE"
+              echo "NOT FOUND: $UPSERT_FILE"
+              ALL_FOUND=false
+            fi
+
+            # ── correctness JSON (inside concurrency subdir) ───────
+            CORRECTNESS_FILE="$RESULT_DIR/hybrid_${KEY}_concurrency2/correctness.json"
+            EXISTS=$(ssh $SSH_OPTS "$REMOTE" "[ -f $CORRECTNESS_FILE ] && echo true || echo false")
+            if [ "$EXISTS" = "true" ]; then
+              scp $SSH_OPTS "$REMOTE":"$CORRECTNESS_FILE" /tmp/benchmark_results/hybrid/$KEY/correctness.json
+              echo "Fetched correctness: hybrid_${KEY}_concurrency2/correctness.json"
+            else
+              echo "NOT FOUND: $CORRECTNESS_FILE"
               ALL_FOUND=false
             fi
           done
@@ -988,48 +1002,45 @@ jobs:
                   ``,
                   `| Metric                | Value |`,
                   `|-----------------------|-------|`,
-                  `| QPS                   | ${fmt(metrics.qps)}                  |`,
-                  `| Recall                | ${fmt(metrics.recall)}               |`,
-                  `| NDCG                  | ${fmt(metrics.ndcg)}                 |`,
-                  `| Insert Duration (s)   | ${fmt(metrics.insert_duration)}      |`,
-                  `| Load Duration (s)     | ${fmt(metrics.load_duration)}        |`,
-                  `| Optimize Duration (s) | ${fmt(metrics.optimize_duration)}    |`,
-                  `| Serial Latency P99    | ${fmt(metrics.serial_latency_p99)}   |`,
-                  `| Serial Latency P95    | ${fmt(metrics.serial_latency_p95)}   |`,
+                  `| QPS                   | ${fmt(metrics.qps)}               |`,
+                  `| Recall                | ${fmt(metrics.recall)}            |`,
+                  `| NDCG                  | ${fmt(metrics.ndcg)}              |`,
+                  `| Insert Duration (s)   | ${fmt(metrics.insert_duration)}   |`,
+                  `| Load Duration (s)     | ${fmt(metrics.load_duration)}     |`,
+                  `| Optimize Duration (s) | ${fmt(metrics.optimize_duration)} |`,
+                  `| Serial Latency P99    | ${fmt(metrics.serial_latency_p99)}|`,
+                  `| Serial Latency P95    | ${fmt(metrics.serial_latency_p95)}|`,
                 ].join('\n');
               }
             }
 
             // ════════════════════════════════════════════════════════
             // HYBRID
-            // JSON shape per file:
-            // {
-            //   "index_name":      "quora_bench_bm25",
-            //   "total_vectors":   5183,
-            //   "total_batches":   6,
-            //   "batch_size":      1000,
-            //   "total_time_sec":  24.371,
-            //   "upsert_latency_ms": { "min", "p50", "p95", "p99", "max", "mean" }
-            // }
+            // upsert.json:      { total_time_sec, upsert_latency_ms: { p95, p99, ... } }
+            // correctness.json: { "recall@10", "ndcg@10", "map@10" }
             // ════════════════════════════════════════════════════════
             if (mode === 'hybrid') {
               const found = '${{ steps.fetch_hybrid.outputs.found }}' === 'true';
 
-              const FILES = {
-                'BM25':       '/tmp/benchmark_results/hybrid/quora_bench_bm25.json',
-                'Endee BM25': '/tmp/benchmark_results/hybrid/quora_bench_endee_bm25.json',
-                'SPLADE':     '/tmp/benchmark_results/hybrid/quora_bench_splade.json',
+              const METHODS = {
+                'BM25':       'bm25',
+                'Endee BM25': 'endee_bm25',
+                'SPLADE':     'splade',
               };
 
               const results  = {};
               let   anyFound = false;
-              for (const [label, path] of Object.entries(FILES)) {
-                const json = safeRead(path);
-                if (json) { results[label] = json; anyFound = true; }
+
+              for (const [label, key] of Object.entries(METHODS)) {
+                const upsert      = safeRead(`/tmp/benchmark_results/hybrid/${key}/upsert.json`);
+                const correctness = safeRead(`/tmp/benchmark_results/hybrid/${key}/correctness.json`);
+                if (upsert || correctness) {
+                  results[label] = { upsert, correctness };
+                  anyFound = true;
+                }
               }
 
-              // Pass = job OK + all 3 files present + at least one non-zero total_time_sec
-              const anyNonZero = Object.values(results).some(j => (j.total_time_sec ?? 0) > 0);
+              const anyNonZero = Object.values(results).some(r => (r.upsert?.total_time_sec ?? 0) > 0);
               passed = jobSucceeded && found && anyNonZero;
 
               if (!passed) {
@@ -1039,27 +1050,22 @@ jobs:
               }
 
               if (anyFound) {
-                const rows = Object.entries(results).map(([label, j]) => {
-                  const lat = j.upsert_latency_ms ?? {};
-                  return [
-                    `| ${label.padEnd(10)}`,
-                    ` ${j.total_vectors   ?? '—'}`,
-                    ` ${fmt(j.total_time_sec)}`,
-                    ` ${fmt(lat.mean)}`,
-                    ` ${fmt(lat.p50)}`,
-                    ` ${fmt(lat.p95)}`,
-                    ` ${fmt(lat.p99)}`,
-                    ` ${fmt(lat.min)}`,
-                    ` ${fmt(lat.max)} |`,
-                  ].join(' |');
+                const rows = Object.entries(results).map(([label, { upsert, correctness }]) => {
+                  const lat    = upsert?.upsert_latency_ms ?? {};
+                  const p95    = fmt(lat.p95);
+                  const p99    = fmt(lat.p99);
+                  const recall = fmt(correctness?.['recall@10']);
+                  const ndcg   = fmt(correctness?.['ndcg@10']);
+                  const map    = fmt(correctness?.['map@10']);
+                  return `| ${label.padEnd(10)} | ${p95} | ${p99} | ${recall} | ${ndcg} | ${map} |`;
                 });
 
                 metricsTable = [
                   ``,
                   `### Benchmark Metrics — Hybrid`,
                   ``,
-                  `| Method     | Vectors | Total Time (s) | Upsert Mean (ms) | P50 (ms) | P95 (ms) | P99 (ms) | Min (ms) | Max (ms) |`,
-                  `|------------|---------|----------------|------------------|----------|----------|----------|----------|----------|`,
+                  `| Method     | P95 Upsert (ms) | P99 Upsert (ms) | Recall@10 | NDCG@10 | MAP@10 |`,
+                  `|------------|-----------------|-----------------|-----------|---------|--------|`,
                   ...rows,
                 ].join('\n');
               }
@@ -1120,84 +1126,84 @@ jobs:
   #================================================================
   # JOB 5: TEARDOWN - TERMINATE BOTH SERVERS ALWAYS 
   #================================================================
-  # teardown:
-  #   name: Teardown Servers 
-  #   needs: [validate-command, provision-servers, deploy-endee, run-benchmark, report-results]
-  #   runs-on: ubuntu-latest
-  #   if: always()
+  teardown:
+    name: Teardown Servers 
+    needs: [validate-command, provision-servers, deploy-endee, run-benchmark, report-results]
+    runs-on: ubuntu-latest
+    if: always()
 
-  #   steps:
-  #     - name: Configure AWS credentials
-  #       uses: aws-actions/configure-aws-credentials@v4
-  #       with:
-  #         aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
-  #         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-  #         aws-region:            ${{ vars.AWS_REGION }}
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ vars.AWS_REGION }}
 
 
-  #     - name: Terminate Endee Server
-  #       if: needs.provision-servers.outputs.endee_server_id != ''
-  #       run: |
-  #         ENDEE_ID="${{ needs.provision-servers.outputs.endee_server_id }}"
-  #         echo "TERMINATING ENDEE SERVER: $ENDEE_ID"
+      - name: Terminate Endee Server
+        if: needs.provision-servers.outputs.endee_server_id != ''
+        run: |
+          ENDEE_ID="${{ needs.provision-servers.outputs.endee_server_id }}"
+          echo "TERMINATING ENDEE SERVER: $ENDEE_ID"
 
-  #         aws ec2 terminate-instances \
-  #           --instance-ids $ENDEE_ID
+          aws ec2 terminate-instances \
+            --instance-ids $ENDEE_ID
           
-  #         echo "ENDEE SERVER TERMINATED"
+          echo "ENDEE SERVER TERMINATED"
 
-  #     - name: Terminate Benchmark Server 
-  #       if: needs.provision-servers.outputs.benchmark_server_id != ''
-  #       run: |
-  #         BENCHMARK_ID=${{ needs.provision-servers.outputs.benchmark_server_id }}
-  #         echo "TERMINATING BENCHMARK SERVER: $BENCHMARK_ID"
+      - name: Terminate Benchmark Server 
+        if: needs.provision-servers.outputs.benchmark_server_id != ''
+        run: |
+          BENCHMARK_ID=${{ needs.provision-servers.outputs.benchmark_server_id }}
+          echo "TERMINATING BENCHMARK SERVER: $BENCHMARK_ID"
 
-  #         aws ec2 terminate-instances \
-  #           --instance-ids $BENCHMARK_ID
+          aws ec2 terminate-instances \
+            --instance-ids $BENCHMARK_ID
           
-  #         echo "BENCHMARK SERVER TERMINATED"
+          echo "BENCHMARK SERVER TERMINATED"
 
-  #     - name: Post teardown status to PR 
-  #       if: always()
-  #       uses: actions/github-script@v7
-  #       with:
-  #         script: |
-  #           const mode      = '${{ needs.validate-command.outputs.mode }}';
-  #           const sha       = '${{ needs.validate-command.outputs.head_sha }}'.slice(0,7);
-  #           const actor     = context.payload.comment.user.login;
-  #           const benchResult = '${{ needs.report-results.result }}';
-  #           const passed      = benchResult === 'success';
-  #           const statusLabel = passed ? 'Passed' : 'Failed';
+      - name: Post teardown status to PR 
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const mode      = '${{ needs.validate-command.outputs.mode }}';
+            const sha       = '${{ needs.validate-command.outputs.head_sha }}'.slice(0,7);
+            const actor     = context.payload.comment.user.login;
+            const benchResult = '${{ needs.report-results.result }}';
+            const passed      = benchResult === 'success';
+            const statusLabel = passed ? 'Passed' : 'Failed';
 
-  #           const body = [
-  #             `## VectorDB Benchmark — ${mode} — ${statusLabel}`,
-  #             ``,
-  #             `Triggered by @${actor} · Commit \`${sha}\``,
-  #             ``,
-  #             `| Step                | Status |`,
-  #             `|---------------------|--------|`,
-  #             `| Provision Servers   | Up      |`,
-  #             `| Deploy Endee Server | Done    |`,
-  #             `| Run Benchmark       | ${statusLabel} |`,
-  #             `| Results             | See above  |`,
-  #             `| Teardown            | Done    |`,
-  #           ].join('\n');
+            const body = [
+              `## VectorDB Benchmark — ${mode} — ${statusLabel}`,
+              ``,
+              `Triggered by @${actor} · Commit \`${sha}\``,
+              ``,
+              `| Step                | Status |`,
+              `|---------------------|--------|`,
+              `| Provision Servers   | Up      |`,
+              `| Deploy Endee Server | Done    |`,
+              `| Run Benchmark       | ${statusLabel} |`,
+              `| Results             | See above  |`,
+              `| Teardown            | Done    |`,
+            ].join('\n');
 
-  #           const { data: comments } = await github.rest.issues.listComments({
-  #             owner: context.repo.owner,
-  #             repo:  context.repo.repo,
-  #             issue_number: context.issue.number,
-  #           });
-  #           const existing = comments.find(c =>
-  #             c.body.includes('VectorDB Benchmark —') &&
-  #             c.user.login === 'github-actions[bot]'
-  #           );
-  #           if (existing) {
-  #             await github.rest.issues.updateComment({
-  #               owner:      context.repo.owner,
-  #               repo:       context.repo.repo,
-  #               comment_id: existing.id,
-  #               body,
-  #             });
-  #           }
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c =>
+              c.body.includes('VectorDB Benchmark —') &&
+              c.user.login === 'github-actions[bot]'
+            );
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner:      context.repo.owner,
+                repo:       context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            }
 

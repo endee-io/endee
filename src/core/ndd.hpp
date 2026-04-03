@@ -224,7 +224,8 @@ private:
     std::thread autosave_thread_;
     std::atomic<bool> running_{true};
     BackupStore backup_store_;
-    void executeBackupJob(const std::string& index_id, const std::string& backup_name);
+    void executeBackupJob(const std::string& index_id, const std::string& backup_name,
+                          std::stop_token st);
 
     std::unique_ptr<WriteAheadLog> createWAL(const std::string& index_id) {
         const std::string wal_dir = data_dir_ + "/" + index_id;
@@ -594,8 +595,12 @@ public:
     }
 
     ~IndexManager() {
-        // Signal autosave thread to stop
+        // Signal all threads to stop (running_ is checked by autosave and backup threads)
         running_ = false;
+
+        // Join background backup threads before destroying members
+        // (prevents use-after-free when detached threads outlive IndexManager)
+        backup_store_.joinAllThreads();
 
         /**
          * Don't wait for autosave thread to exit.
@@ -1907,7 +1912,7 @@ public:
         return backup_store_.deleteBackup(backup_name, username);
     }
 
-    std::optional<ActiveBackup> getActiveBackup(const std::string& username) {
+    std::optional<std::pair<std::string, std::string>> getActiveBackup(const std::string& username) {
         return backup_store_.getActiveBackup(username);
     }
 
@@ -1923,7 +1928,8 @@ public:
 
 // ========== IndexManager backup implementations ==========
 
-inline void IndexManager::executeBackupJob(const std::string& index_id, const std::string& backup_name) {
+inline void IndexManager::executeBackupJob(const std::string& index_id, const std::string& backup_name,
+                                            std::stop_token st) {
     std::string username;
     size_t upos = index_id.find('/');
     if (upos != std::string::npos) {
@@ -1984,6 +1990,13 @@ inline void IndexManager::executeBackupJob(const std::string& index_id, const st
             throw std::runtime_error("Cannot create backup without index metadata");
         }
 
+        // Check stop_token before expensive operations
+        if (st.stop_requested()) {
+            LOG_INFO(2046, index_id, "Backup cancelled");
+            backup_store_.clearActiveBackup(username);
+            return;
+        }
+
         auto entry_ptr = getIndexEntry(index_id);
         auto& entry = *entry_ptr;
         std::string metadata_file_in_index = source_dir + "/metadata.json";
@@ -1997,6 +2010,13 @@ inline void IndexManager::executeBackupJob(const std::string& index_id, const st
              * Check other instances of shared_lock on operation_mutex.
              */
             std::unique_lock<std::shared_mutex> operation_lock(entry.operation_mutex);
+
+            // Check again after acquiring lock (shutdown may have been requested while waiting)
+            if (st.stop_requested()) {
+                LOG_INFO(2047, index_id, "Backup cancelled");
+                backup_store_.clearActiveBackup(username);
+                return;
+            }
 
             saveIndexInternal(entry);
 
@@ -2017,7 +2037,7 @@ inline void IndexManager::executeBackupJob(const std::string& index_id, const st
 
             std::string error_msg;
             LOG_DEBUG("Creating tar archive from " << source_dir << " to " << backup_tar_temp);
-            if(!backup_store_.createBackupTar(source_dir, backup_tar_temp, error_msg)) {
+            if(!backup_store_.createBackupTar(source_dir, backup_tar_temp, error_msg, st)) {
                 if(std::filesystem::exists(metadata_file_in_index)) {
                     std::filesystem::remove(metadata_file_in_index);
                 }
@@ -2187,12 +2207,10 @@ inline std::pair<bool, std::string> IndexManager::createBackupAsync(const std::s
         return {false, "Backup already exists: " + backup_name};
     }
 
-    (void)getIndexEntry(index_id);
-    backup_store_.setActiveBackup(username, index_id, backup_name);
-
-    std::thread([this, index_id, backup_name]() {
-        executeBackupJob(index_id, backup_name);
-    }).detach();
+    std::jthread t([this, index_id, backup_name](std::stop_token st) {
+        executeBackupJob(index_id, backup_name, st);
+    });
+    backup_store_.setActiveBackup(username, index_id, backup_name, std::move(t));
 
     LOG_INFO(2046, index_id, "Backup started: " << backup_name);
 

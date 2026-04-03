@@ -22,13 +22,14 @@
 struct ActiveBackup {
     std::string index_id;
     std::string backup_name;
+    std::jthread thread;       // jthread: built-in stop_token + auto-join on destruction
 };
 
 class BackupStore {
 private:
     std::string data_dir_;
     std::unordered_map<std::string, ActiveBackup> active_user_backups_;
-    mutable std::mutex backup_state_mutex_;
+    mutable std::mutex active_user_backups_mutex_;
 
 public:
     BackupStore(const std::string& data_dir)
@@ -41,7 +42,8 @@ public:
 
     bool createBackupTar(const std::filesystem::path& source_dir,
                          const std::filesystem::path& archive_path,
-                         std::string& error_msg) {
+                         std::string& error_msg,
+                         std::stop_token st = {}) {
         struct archive* a = archive_write_new();
         archive_write_set_format_pax_restricted(a);
 
@@ -52,6 +54,13 @@ public:
         }
 
         for(const auto& entry : std::filesystem::recursive_directory_iterator(source_dir)) {
+            // Check stop_token per-file so shutdown doesn't block on large tar operations
+            if(st.stop_requested()) {
+                archive_write_close(a);
+                archive_write_free(a);
+                error_msg = "Backup cancelled";
+                return false;
+            }
             if(entry.is_regular_file()) {
                 struct archive_entry* e = archive_entry_new();
 
@@ -65,6 +74,7 @@ public:
                 if(archive_write_header(a, e) != ARCHIVE_OK) {
                     error_msg = archive_error_string(a);
                     archive_entry_free(e);
+                    archive_write_close(a);
                     archive_write_free(a);
                     return false;
                 }
@@ -178,19 +188,50 @@ public:
 
     // Active backup tracking
 
-    void setActiveBackup(const std::string& username, const std::string& index_id, const std::string& backup_name) {
-        std::lock_guard<std::mutex> lock(backup_state_mutex_);
-        active_user_backups_[username] = {index_id, backup_name};
+    void setActiveBackup(const std::string& username, const std::string& index_id,
+                         const std::string& backup_name, std::jthread&& thread) {
+        std::lock_guard<std::mutex> lock(active_user_backups_mutex_);
+        active_user_backups_[username] = {index_id, backup_name, std::move(thread)};
     }
 
     void clearActiveBackup(const std::string& username) {
-        std::lock_guard<std::mutex> lock(backup_state_mutex_);
-        active_user_backups_.erase(username);
+        std::lock_guard<std::mutex> lock(active_user_backups_mutex_);
+        auto it = active_user_backups_.find(username);
+        if (it != active_user_backups_.end()) {
+            // Called from within the thread itself — detach so erase doesn't try to join
+            if (it->second.thread.joinable()) {
+                it->second.thread.detach();
+            }
+            active_user_backups_.erase(it);
+        }
     }
 
     bool hasActiveBackup(const std::string& username) const {
-        std::lock_guard<std::mutex> lock(backup_state_mutex_);
+        std::lock_guard<std::mutex> lock(active_user_backups_mutex_);
         return active_user_backups_.count(username) > 0;
+    }
+
+    // Join all background backup threads before destroying IndexManager members.
+    // Moves threads out under lock, then request_stop + join outside lock to avoid
+    // deadlock (finishing threads call clearActiveBackup which also locks active_user_backups_mutex_).
+    void joinAllThreads() {
+        std::vector<std::jthread> threads_to_join;
+        {
+            std::lock_guard<std::mutex> lock(active_user_backups_mutex_);
+            for (auto& [username, backup] : active_user_backups_) {
+                if (backup.thread.joinable()) {
+                    threads_to_join.push_back(std::move(backup.thread));
+                }
+            }
+            active_user_backups_.clear();
+        }
+        // request_stop + join outside the lock
+        for (auto& t : threads_to_join) {
+            t.request_stop();   // signal stop_token — thread sees it inside createBackupTar
+            if (t.joinable()) {
+                t.join();
+            }
+        }
     }
 
     // Backup name validation
@@ -251,10 +292,12 @@ public:
 
     // Active backup query
 
-    std::optional<ActiveBackup> getActiveBackup(const std::string& username) {
-        std::lock_guard<std::mutex> lock(backup_state_mutex_);
+    std::optional<std::pair<std::string, std::string>> getActiveBackup(const std::string& username) {
+        std::lock_guard<std::mutex> lock(active_user_backups_mutex_);
         auto it = active_user_backups_.find(username);
-        if (it != active_user_backups_.end()) return it->second;
+        if (it != active_user_backups_.end()) {
+            return std::make_pair(it->second.index_id, it->second.backup_name);
+        }
         return std::nullopt;
     }
 

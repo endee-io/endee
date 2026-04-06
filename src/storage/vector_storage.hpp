@@ -280,6 +280,9 @@ public:
                 MDBX_val data{const_cast<uint8_t*>(vector_bytes.data()), vector_bytes.size()};
 
                 int rc = mdbx_put(txn, dbi_, &key, &data, MDBX_UPSERT);
+                if(rc != MDBX_SUCCESS) {
+                    return rc;
+                }
             }
             return MDBX_SUCCESS;
         };
@@ -449,7 +452,7 @@ public:
             }
         };
 
-        auto write_batch = [&](MDBX_txn* txn) {
+        auto write_batch = [&](MDBX_txn* txn) -> int {
             for(const auto& [numeric_id, meta] : batch) {
                 msgpack::sbuffer sbuf;
                 msgpack::pack(sbuf, meta);
@@ -459,6 +462,7 @@ public:
 
                 int rc = mdbx_put(txn, dbi_, &key, &data, MDBX_UPSERT);
                 if(rc != MDBX_SUCCESS) {
+                    return rc;
                 }
             }
             return MDBX_SUCCESS;

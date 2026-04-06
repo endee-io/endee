@@ -263,6 +263,7 @@ message(STATUS "Binary name: ${NDD_BINARY_NAME}")
 # Add new src/*.cpp files here when they should be compiled into ndd.
 set(NDD_CORE_SOURCES
     src/sparse/inverted_index.cpp
+    src/utils/system_sanity/system_sanity.cpp
 )
 
 # Build non-main project sources separately so they can be compiled in parallel

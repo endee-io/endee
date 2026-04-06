@@ -68,6 +68,8 @@ The same overload shapes apply to `LOG_WARN` and `LOG_ERROR`.
 ## Rules
 
 - Explicit numeric codes are preferred for stable operational logs.
+- Each numeric code must map to exactly one production log site. Do not reuse a code for a
+  different message or path.
 - Code-less logs are valid and must never receive synthesized IDs.
 - Prefer logging at request boundaries, lifecycle transitions, and rare failure paths.
 - Do not add logs in hot loops or per-vector/per-result paths.
@@ -85,7 +87,7 @@ The same overload shapes apply to `LOG_WARN` and `LOG_ERROR`.
   - `1400s` WAL logs
   - `1500s` metadata logs
   - `1600s` vector storage logs
-  - `1700s` CPU compatibility logs
+  - `1700s` system sanity checks (CPU compatibility, disk, memory, ulimits)
   - `2000s` index manager logs
   - `2100s` HNSW load/cache logs
 

@@ -37,8 +37,7 @@
 #include "core/ndd.hpp"
 #include "auth.hpp"
 #include "quant/common.hpp"
-#include "cpu_compat_check/check_avx_compat.hpp"
-#include "cpu_compat_check/check_arm_compat.hpp"
+#include "system_sanity/system_sanity.hpp"
 
 #ifdef NDD_SERVERLESS
 #include "../serverless/middleware_serverless.hpp"
@@ -158,32 +157,6 @@ inline nlohmann::ordered_json make_index_info_payload(const IndexInfo& info) {
     return payload;
 }
 
-/**
- * Checks if the CPU is compatible with all
- * the instruction sets being used for x86, ARM and MAC Mxx
- */
-bool is_cpu_compatible() {
-    bool ret = true;
-
-#if defined(USE_AVX2) && (defined(__x86_64__) || defined(_M_X64))
-    ret &= is_avx2_compatible();
-#endif  //AVX2 checks
-
-#if defined(USE_AVX512) && (defined(__x86_64__) || defined(_M_X64))
-    ret &= is_avx512_compatible();
-#endif  //AVX512 checks
-
-#if defined(USE_NEON)
-    ret &= is_neon_compatible();
-#endif
-
-#if defined(USE_SVE2)
-    ret &= is_sve2_compatible();
-#endif
-
-    return ret;
-}
-
 // Read file contents
 std::string read_file(const std::string& path) {
     std::ifstream file(path, std::ios::binary);
@@ -249,15 +222,15 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    if(!is_cpu_compatible()) {
-        LOG_ERROR(1004, "CPU is not compatible; server startup aborted");
-        return 0;
-    }    
+    if(!run_startup_sanity_checks()) {
+        LOG_ERROR(1799, "Server startup aborted due to failed sanity checks");
+        return 1;
+    }
 
 #ifdef NDD_SERVERLESS
     // Serverless mode: NDD_AUTH_TOKEN is mandatory
     if(settings::AUTH_TOKEN.empty()) {
-        std::cerr << "FATAL: NDD_AUTH_TOKEN must be set in serverless mode." << std::endl;
+        LOG_ERROR(1066, "NDD_AUTH_TOKEN must be set in serverless mode");
         return 1;
     }
 #endif
@@ -277,6 +250,7 @@ int main(int argc, char** argv) {
     LOG_INFO("DEFAULT_MAX_ELEMENTS_INCREMENT: " << settings::DEFAULT_MAX_ELEMENTS_INCREMENT);
     LOG_INFO("DEFAULT_MAX_ELEMENTS_INCREMENT_TRIGGER: "
                 << settings::DEFAULT_MAX_ELEMENTS_INCREMENT_TRIGGER);
+    LOG_INFO("MINIMUM_REQUIRED_DRAM_MB: " << settings::MINIMUM_REQUIRED_DRAM_MB);
 
     // Path to React build directory
     // Get the executable's directory and resolve frontend/dist relative to it
@@ -287,7 +261,6 @@ int main(int argc, char** argv) {
 
     // Initialize index manager with persistence config
     std::string data_dir = settings::DATA_DIR;
-    std::filesystem::create_directories(data_dir);
 
     PersistenceConfig persistence_config{
             settings::SAVE_EVERY_N_UPDATES,                        // Save every n updates
@@ -306,10 +279,11 @@ int main(int argc, char** argv) {
 
     // ========== GENERAL ==========
     // Health check endpoint (no auth required)
-    CROW_ROUTE(app, "/api/v1/health").methods("GET"_method)([](const crow::request& req) {
+    // CROW_ROUTE(app, "/api/v1/health").methods("GET"_method)([](const crow::request& req) {
+    CROW_ROUTE(app, "/api/v1/health").methods("GET"_method)([]() {
         crow::json::wvalue response(
                 {{"status", "ok"},
-                 {"timestamp", std::chrono::system_clock::now().time_since_epoch().count()}});
+                {"timestamp", (std::int64_t)std::chrono::system_clock::now().time_since_epoch().count()}});
         PRINT_LOG_TIME();
         ndd::printSparseSearchDebugStats();
         ndd::printSparseUpdateDebugStats();
@@ -455,7 +429,7 @@ int main(int argc, char** argv) {
                         body.has("sparse_model") ? std::string(body["sparse_model"].s()) : "None";
                 const auto sparse_model = ndd::sparseScoringModelFromString(sparse_model_str);
                 if(!sparse_model.has_value()) {
-                    LOG_WARN(1019, index_id, "Invalid sparse_model: " << sparse_model_str);
+                    LOG_WARN(1025, index_id, "Invalid sparse_model: " << sparse_model_str);
                     return json_error(
                         400,
                         "Invalid sparse_model. Must be one of: None, default, endee_bm25");
@@ -525,7 +499,7 @@ int main(int argc, char** argv) {
 #endif
                     return crow::response(200, "Index created successfully");
                 } catch(const std::runtime_error& e) {
-                    LOG_WARN(1019, index_id, "Create-index request failed: " << e.what());
+                    LOG_WARN(1026, index_id, "Create-index request failed: " << e.what());
                     return json_error(409, e.what());
                 } catch(const std::exception& e) {
                     return json_error_500(
@@ -1013,6 +987,10 @@ int main(int argc, char** argv) {
                 // Verify content type is application/msgpack or application/json
                 auto content_type = req.get_header_value("Content-Type");
 
+                if(is_disk_full()){
+                    return json_error(400, "Batch insertion aborted: Not enough storage space");
+                }
+
                 if(content_type == "application/json") {
                     auto body = crow::json::load(req.body);
                     if(!body) {
@@ -1076,7 +1054,14 @@ int main(int argc, char** argv) {
 
                     try {
                         bool success = index_manager.addVectors(index_id, vectors);
-                        return crow::response(success ? 200 : 400);
+                        if(!success) {
+                            LOG_WARN(1066,
+                                     ctx.username,
+                                     index_name,
+                                     "Insert request failed without detailed error from addVectors");
+                            return json_error(400, "Batch insertion failed");
+                        }
+                        return crow::response(200);
                     } catch(const std::runtime_error& e) {
                         LOG_WARN(1041, ctx.username, index_name, "Insert request rejected: " << e.what());
                         return json_error(400, e.what());
@@ -1094,13 +1079,27 @@ int main(int argc, char** argv) {
                             auto vectors = obj.as<std::vector<ndd::HybridVectorObject>>();
                             LOG_DEBUG("Batch size (Hybrid): " << vectors.size());
                             bool success = index_manager.addVectors(index_id, vectors);
-                            return crow::response(success ? 200 : 400);
+                            if(!success) {
+                                LOG_WARN(1067,
+                                         ctx.username,
+                                         index_name,
+                                         "Insert request failed without detailed error from addVectors");
+                                return json_error(400, "Batch insertion failed");
+                            }
+                            return crow::response(200);
                         } catch(...) {
                             // Fallback to VectorObject
                             auto vectors = obj.as<std::vector<ndd::VectorObject>>();
                             LOG_DEBUG("Batch size (Dense): " << vectors.size());
                             bool success = index_manager.addVectors(index_id, vectors);
-                            return crow::response(success ? 200 : 400);
+                            if(!success) {
+                                LOG_WARN(1068,
+                                         ctx.username,
+                                         index_name,
+                                         "Insert request failed without detailed error from addVectors");
+                                return json_error(400, "Batch insertion failed");
+                            }
+                            return crow::response(200);
                         }
                     } catch(const std::runtime_error& e) {
                         LOG_WARN(1042, ctx.username, index_name, "Insert request rejected: " << e.what());

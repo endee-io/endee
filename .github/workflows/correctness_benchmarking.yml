@@ -31,6 +31,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       issues: write
+      pull-requests: read
+      statuses: write
 
     # ONLY RUN ON PR COMMENTS(NOT ON PLAIN ISSUE COMMENTS)
     if: |
@@ -105,6 +107,7 @@ jobs:
         if: steps.parse.outputs.mode != '' && steps.authz.outputs.authorized == 'true'
         uses: actions/github-script@v7
         with:
+          github-token: ${{ secrets.WORKFLOW_PAT }} 
           script: |
             await github.rest.reactions.createForIssueComment({
               owner:      context.repo.owner,

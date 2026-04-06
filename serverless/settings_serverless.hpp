@@ -15,6 +15,24 @@ namespace serverless {
     constexpr size_t PRO_MAX_INDICES        = 10;
     // Scale = unlimited (-1), Admin = unlimited (-1)
 
+    // Max vector dimension per tier
+    constexpr size_t MAX_DIM_STARTER = 2'000;
+    constexpr size_t MAX_DIM_PRO     = 4'000;
+    constexpr size_t MAX_DIM_SCALE   = 8'000;
+    constexpr size_t MAX_DIM_ADMIN   = 16'384;  // matches global settings::MAX_DIMENSION
+
+    // top_k limits per tier
+    constexpr size_t MAX_K_STARTER = 128;
+    constexpr size_t MAX_K_PRO     = 1'024;
+    constexpr size_t MAX_K_SCALE   = 4'096;
+    constexpr size_t MAX_K_ADMIN   = 4'096;
+
+    // Filter boost percentage cap per tier (0 = not allowed)
+    constexpr size_t MAX_BOOST_STARTER = 0;
+    constexpr size_t MAX_BOOST_PRO     = 100;
+    constexpr size_t MAX_BOOST_SCALE   = 400;
+    constexpr size_t MAX_BOOST_ADMIN   = 400;
+
     // Bloom filter bits per tier
     constexpr size_t BLOOM_FILTER_BITS_STARTER    = 20;  // 1M elements
     constexpr size_t BLOOM_FILTER_BITS_PRO        = 23;  // 8M elements

@@ -78,6 +78,39 @@ inline size_t getBloomFilterBits(UserType type) {
     return BLOOM_FILTER_BITS_SCALE;
 }
 
+inline size_t getMaxDimension(UserType type) {
+    using namespace settings::serverless;
+    switch(type) {
+        case UserType::Starter: return MAX_DIM_STARTER;
+        case UserType::Pro:     return MAX_DIM_PRO;
+        case UserType::Scale:   return MAX_DIM_SCALE;
+        case UserType::Admin:   return MAX_DIM_ADMIN;
+    }
+    return MAX_DIM_ADMIN;
+}
+
+inline size_t getMaxTopK(UserType type) {
+    using namespace settings::serverless;
+    switch(type) {
+        case UserType::Starter: return MAX_K_STARTER;
+        case UserType::Pro:     return MAX_K_PRO;
+        case UserType::Scale:   return MAX_K_SCALE;
+        case UserType::Admin:   return MAX_K_ADMIN;
+    }
+    return MAX_K_ADMIN;
+}
+
+inline size_t getMaxBoostPercentage(UserType type) {
+    using namespace settings::serverless;
+    switch(type) {
+        case UserType::Starter: return MAX_BOOST_STARTER;
+        case UserType::Pro:     return MAX_BOOST_PRO;
+        case UserType::Scale:   return MAX_BOOST_SCALE;
+        case UserType::Admin:   return MAX_BOOST_ADMIN;
+    }
+    return MAX_BOOST_ADMIN;
+}
+
 inline bool isPrecisionAllowed(UserType type, ndd::quant::QuantizationLevel level) {
     using namespace settings::serverless;
     const std::vector<ndd::quant::QuantizationLevel>* allowed;

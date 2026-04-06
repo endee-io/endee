@@ -473,6 +473,16 @@ int main(int argc, char** argv) {
 #ifdef NDD_SERVERLESS
                 // Serverless mode: enforce tier-based limits
 
+                // Enforce dimension limit
+                {
+                    size_t max_dim = getMaxDimension(ctx.user_type);
+                    if(dim > max_dim) {
+                        return json_error(403,
+                            "Dimension " + std::to_string(dim) +
+                            " exceeds tier limit of " + std::to_string(max_dim));
+                    }
+                }
+
                 // Enforce index count limit
                 int max_indices = getMaxAllowedIndices(ctx.user_type);
                 if(max_indices != -1) {
@@ -925,6 +935,26 @@ int main(int argc, char** argv) {
                                 static_cast<size_t>(fp["boost_percentage"].i());
                     }
                 }
+#ifdef NDD_SERVERLESS
+                {
+                    size_t max_k = getMaxTopK(ctx.user_type);
+                    if(k > max_k) {
+                        return json_error(403,
+                            "k=" + std::to_string(k) +
+                            " exceeds tier limit of " + std::to_string(max_k));
+                    }
+                    size_t max_boost = getMaxBoostPercentage(ctx.user_type);
+                    if(filter_params.boost_percentage > max_boost) {
+                        if(max_boost == 0) {
+                            return json_error(403,
+                                "Filter boosting is not available on your tier");
+                        }
+                        return json_error(403,
+                            "boost_percentage " + std::to_string(filter_params.boost_percentage) +
+                            " exceeds tier limit of " + std::to_string(max_boost) + "%");
+                    }
+                }
+#endif
 
                 float dense_rrf_weight = body.has("dense_rrf_weight") ? (float)body["dense_rrf_weight"].d() : settings::DEFAULT_DENSE_RRF_WEIGHT;
                 if (dense_rrf_weight < 0.0f || dense_rrf_weight > 1.0f) {

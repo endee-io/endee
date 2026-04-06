@@ -29,6 +29,8 @@ jobs:
   validate-command:
     name: Validate Command
     runs-on: ubuntu-latest
+    permissions:
+      issues: write
 
     # ONLY RUN ON PR COMMENTS(NOT ON PLAIN ISSUE COMMENTS)
     if: |

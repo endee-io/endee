@@ -50,13 +50,16 @@ inline bool sendUsageStatsToServer(const nlohmann::json& usage_data) {
 inline void collectAndSendUsageStats(std::unordered_map<std::string, std::shared_ptr<CacheEntry>>& indices) {
     nlohmann::json usage_array = nlohmann::json::array();
 
+    auto now = std::chrono::system_clock::now();
+    auto ts = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+
     for(auto& [index_id, entry] : indices) {
-        if(entry && entry->searchCount > 0 && entry->alg) {
-            double search_points = (static_cast<double>(entry->searchCount) * entry->alg->getDimension()) / 1'000'000.0;
+        if(entry && entry->searchCount > 0) {
             usage_array.push_back({
                 {"server_id", settings::SERVER_ID},
                 {"index_id", index_id},
-                {"search_points", search_points}
+                {"query_count", entry->searchCount},
+                {"timestamp", ts}
             });
             entry->resetSearchCount();
         }

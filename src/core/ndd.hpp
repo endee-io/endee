@@ -1507,7 +1507,7 @@ public:
              */
             // std::shared_lock<std::shared_mutex> operation_lock(entry.operation_mutex);
 
-            entry.searchCount += k;
+            entry.searchCount += 1;
             const bool run_dense_search = kDenseRrfWeight > 0.0f && !query.empty();
 
             const bool run_sparse_search =

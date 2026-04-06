@@ -1,0 +1,103 @@
+# CONTINUOUS INTEGRATION WORKFLOW
+# LINT TEST -> UNIT TEST -> BUILD
+
+
+name: Continuous Integration 
+
+# ========== TRIGGER EVENT ==========
+on: 
+  # PUSH EVENT  
+  # push:
+  #   branches: [ feature/linting_tests ]
+  # PULL REQUEST EVENT
+  pull_request:
+    branches: [ master]
+
+  
+# ========== JOBS ==========
+jobs:
+
+  # ----- JOB: 1 -> LINT AND CODE QUALITY 
+  lint:
+    name: Lint and Code Quality Check
+    runs-on: ubuntu-latest
+
+    steps:
+
+      #---------------- STEP 1: CHECKOUT TO SOURCE CODE
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      #---------------- STEP 2: CACHE FIRST, THEN INSTALL
+      - name: Cache apt packages
+        uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          packages: clang-format clang-tidy shellcheck cmake libcurl4-openssl-dev
+          version: 1.0
+      
+      # - name: Cache apt packages
+      #   uses: awalsh128/cache-apt-pkgs-action@latest
+      #   with:
+      #     packages: clang-format clang-tidy shellcheck cmake libcurl4-openssl-dev
+      #     version: 1.0
+
+      # RUN CLANG-FORMAT FOR CODE STYLE, INDENTATIONS, SPACING
+      # DRY RUN MAKE SURE IT WON'T CHANGE CODE ONLY IT WILL CHECK FORMATTING
+      - name: C++ and HPP formatting
+        run: |
+          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD \
+            | grep -E '\.(cpp|hpp)$' \
+            | grep -v 'third_party/' \
+            || true)
+
+          if [ -z "$CHANGED" ]; then
+            echo "No C++/HPP files changed — skipping"
+            exit 0
+          fi
+
+          echo "Checking files:"
+          echo "$CHANGED"
+          echo "$CHANGED" | xargs clang-format --dry-run --Werror
+
+      - name: C++ Static Analysis
+        run: |
+          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD \
+            | grep -E '\.cpp$' \
+            | grep -v 'third_party/' \
+            || true)
+
+          if [ -z "$CHANGED" ]; then
+            echo "No .cpp files changed — skipping"
+            exit 0
+          fi
+
+          rm -rf build && mkdir -p build
+          cd build
+          cmake .. \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DUSE_AVX2=ON \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+          cd ..
+
+          echo "Checking files:"
+          echo "$CHANGED"
+          echo "$CHANGED" | xargs clang-tidy \
+            -p build/compile_commands.json \
+            --header-filter='^.*(src)/.*'
+
+      - name: Lint Shell Scripts
+        run: |
+          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD \
+            | grep -E '\.sh$' \
+            | grep -v 'build/' \
+            | grep -v 'third_party/' \
+            || true)
+
+          if [ -z "$CHANGED" ]; then
+            echo "No shell scripts changed — skipping"
+            exit 0
+          fi
+
+          echo "Checking files:"
+          echo "$CHANGED"
+          echo "$CHANGED" | xargs shellcheck -x

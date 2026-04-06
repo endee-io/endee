@@ -1287,8 +1287,8 @@ public:
         return true;
     }
 
-    std::optional<ndd::VectorObject> getVector(const std::string& index_id,
-                                               const std::string& str_id) {
+    std::optional<ndd::HybridVectorObject> getVector(const std::string& index_id,
+                                                     const std::string& str_id) {
         try {
             auto entry_ptr = getIndexEntry(index_id);
             auto& entry = *entry_ptr;
@@ -1308,7 +1308,7 @@ public:
             std::vector<uint8_t> vec_bytes = entry.vector_storage->get_vector(numeric_id);
             ndd::VectorMeta meta = entry.vector_storage->get_meta(numeric_id);
 
-            ndd::VectorObject obj;
+            ndd::HybridVectorObject obj;
             obj.id = meta.id;
             obj.meta = meta.meta;
             obj.filter = meta.filter;
@@ -1322,6 +1322,15 @@ public:
 
             // Add the float data to the msgpack
             obj.vector = {float_data.begin(), float_data.end()};
+
+            if(entry.sparse_storage) {
+                auto sparse_txn = entry.sparse_storage->begin_transaction(true);
+                auto sparse_vec = sparse_txn->get_vector(numeric_id);
+                if(sparse_vec.has_value()) {
+                    obj.sparse_ids = std::move(sparse_vec->indices);
+                    obj.sparse_values = std::move(sparse_vec->values);
+                }
+            }
 
             return obj;
         } catch(const std::exception& e) {

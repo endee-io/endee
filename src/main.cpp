@@ -1136,7 +1136,7 @@ int main(int argc, char** argv) {
                                 LOG_WARN(1045, ctx.username, index_name, "Get-vector request for missing vector id " << vector_id);
                                 return json_error(404, "Vector with the given ID does not exist");
                             }
-                            // Serialize vector as MsgPack
+                            // Serialize hybrid vector as MsgPack
                             msgpack::sbuffer sbuf;
                             msgpack::pack(sbuf, vector.value());
                             // Return as MessagePack

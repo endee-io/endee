@@ -1472,16 +1472,6 @@ public:
         }
     }
 
-    std::optional<std::vector<ndd::VectorResult>> searchKNN(const std::string& index_id,
-                                                            const std::vector<float>& query,
-                                                            size_t k,
-                                                            const nlohmann::json& filter_array,
-                                                            ndd::FilterParams params = {},
-                                                            bool include_vectors = false,
-                                                            size_t ef = 0) {
-        return searchKNN(index_id, query, {}, {}, k, filter_array, params, include_vectors, ef);
-    }
-
     std::optional<std::vector<ndd::VectorResult>>
     searchKNN(const std::string& index_id,
                 const std::vector<float>& query,

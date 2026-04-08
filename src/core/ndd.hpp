@@ -222,9 +222,9 @@ private:
     std::atomic<bool> running_{true};
     BackupStore backup_store_;
     Rebuild rebuild_;
-    void executeBackupJob(const std::string& index_id, const std::string& backup_name);
+    void executeBackupJob(const std::string& index_id, const std::string& backup_name, std::stop_token st);
     void executeRebuildJob(const std::string& index_id, const std::string& username,
-                           size_t new_M, size_t new_ef_con);
+                           size_t new_M, size_t new_ef_con, std::stop_token st);
 
     std::unique_ptr<WriteAheadLog> createWAL(const std::string& index_id) {
         const std::string wal_dir = data_dir_ + "/" + index_id;
@@ -593,9 +593,10 @@ public:
         // Signal all threads to stop (running_ is checked by autosave and backup threads)
         running_ = false;
 
-        // Join background backup threads before destroying members
-        // (prevents use-after-free when detached threads outlive IndexManager)
+        // Join background backup and rebuild threads before destroying members
+        // (prevents use-after-free when threads outlive IndexManager)
         backup_store_.joinAllThreads();
+        rebuild_.joinAllThreads();
 
         /**
          * Don't wait for autosave thread to exit.
@@ -2374,13 +2375,11 @@ inline std::pair<bool, std::string> IndexManager::rebuildIndexAsync(const std::s
         return {false, "No configuration changes specified"};
     }
 
-    // Set active rebuild state (per-user, one rebuild at a time)
-    rebuild_.setActiveRebuild(username, index_id, current_count);
-
-    // Spawn background thread (same pattern as createBackupAsync)
-    std::thread([this, index_id, username, new_M, new_ef_con]() {
-        executeRebuildJob(index_id, username, new_M, new_ef_con);
-    }).detach();
+    // Set active rebuild state and spawn jthread (same pattern as createBackupAsync)
+    std::jthread t([this, index_id, username, new_M, new_ef_con](std::stop_token st) {
+        executeRebuildJob(index_id, username, new_M, new_ef_con, st);
+    });
+    rebuild_.setActiveRebuild(username, index_id, current_count, std::move(t));
 
     LOG_INFO(2050, index_id, "Rebuild started: M=" << new_M
                               << " ef_con=" << new_ef_con);
@@ -2390,7 +2389,8 @@ inline std::pair<bool, std::string> IndexManager::rebuildIndexAsync(const std::s
 
 inline void IndexManager::executeRebuildJob(const std::string& index_id,
                                              const std::string& username,
-                                             size_t new_M, size_t new_ef_con) {
+                                             size_t new_M, size_t new_ef_con,
+                                             std::stop_token st) {
     std::string base_path = data_dir_ + "/" + index_id;
     std::string temp_path = rebuild_.getTempPath(base_path);
     std::string timestamped_path = rebuild_.getTimestampedPath(base_path);
@@ -2440,6 +2440,14 @@ inline void IndexManager::executeRebuildJob(const std::string& index_id,
         constexpr size_t CHECKPOINT_INTERVAL = 5;  // Save temp every 5 batches
 
         while (cursor.hasNext()) {
+            if (st.stop_requested()) {
+                if (std::filesystem::exists(temp_path)) {
+                    std::filesystem::remove(temp_path);
+                }
+                rebuild_.failActiveRebuild(username, "Rebuild interrupted by server shutdown");
+                return;
+            }
+
             // Collect batch
             std::vector<std::pair<ndd::idInt, std::vector<uint8_t>>> batch;
             batch.reserve(batch_size);

@@ -5,10 +5,12 @@
 #include <memory>
 #include <atomic>
 #include <mutex>
+#include <thread>
 #include <chrono>
 #include <filesystem>
 #include <iomanip>
 #include <sstream>
+#include <vector>
 
 #include "settings.hpp"
 #include "log.hpp"
@@ -21,6 +23,7 @@ struct ActiveRebuild {
     std::atomic<size_t> total_vectors{0};
     std::chrono::system_clock::time_point started_at;
     std::chrono::system_clock::time_point completed_at;
+    std::jthread thread;  // jthread: built-in stop_token + auto-join on destruction
 };
 
 class Rebuild {
@@ -62,7 +65,7 @@ public:
     // State tracking — per user
 
     void setActiveRebuild(const std::string& username, const std::string& index_id,
-                          size_t total_vectors) {
+                          size_t total_vectors, std::jthread&& thread) {
         std::lock_guard<std::mutex> lock(rebuild_state_mutex_);
         auto state = std::make_shared<ActiveRebuild>();
         state->index_id = index_id;
@@ -70,6 +73,7 @@ public:
         state->total_vectors.store(total_vectors);
         state->vectors_processed.store(0);
         state->started_at = std::chrono::system_clock::now();
+        state->thread = std::move(thread);
         active_rebuilds_[username] = state;
     }
 
@@ -77,6 +81,10 @@ public:
         std::lock_guard<std::mutex> lock(rebuild_state_mutex_);
         auto it = active_rebuilds_.find(username);
         if (it != active_rebuilds_.end()) {
+            // Called from within the thread — detach so the jthread dtor doesn't join us
+            if (it->second->thread.joinable()) {
+                it->second->thread.detach();
+            }
             it->second->status = "completed";
             it->second->completed_at = std::chrono::system_clock::now();
         }
@@ -86,6 +94,10 @@ public:
         std::lock_guard<std::mutex> lock(rebuild_state_mutex_);
         auto it = active_rebuilds_.find(username);
         if (it != active_rebuilds_.end()) {
+            // Called from within the thread — detach so the jthread dtor doesn't join us
+            if (it->second->thread.joinable()) {
+                it->second->thread.detach();
+            }
             it->second->status = "failed";
             it->second->error_message = error;
             it->second->completed_at = std::chrono::system_clock::now();
@@ -97,6 +109,28 @@ public:
         auto it = active_rebuilds_.find(username);
         // Only "in_progress" blocks a new rebuild
         return it != active_rebuilds_.end() && it->second->status == "in_progress";
+    }
+
+    // Join all in-progress rebuild threads on shutdown. Mirrors BackupStore::joinAllThreads:
+    // move threads out under lock, request_stop + join outside lock to avoid deadlock
+    // (finishing threads call completeActiveRebuild which also locks rebuild_state_mutex_).
+    void joinAllThreads() {
+        std::vector<std::jthread> threads_to_join;
+        {
+            std::lock_guard<std::mutex> lock(rebuild_state_mutex_);
+            for (auto& [username, state] : active_rebuilds_) {
+                if (state->thread.joinable()) {
+                    threads_to_join.push_back(std::move(state->thread));
+                }
+            }
+            active_rebuilds_.clear();
+        }
+        for (auto& t : threads_to_join) {
+            t.request_stop();
+            if (t.joinable()) {
+                t.join();
+            }
+        }
     }
 
     std::shared_ptr<ActiveRebuild> getActiveRebuild(const std::string& username) const {

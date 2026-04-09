@@ -226,6 +226,31 @@ private:
     void executeRebuildJob(const std::string& index_id, const std::string& username,
                            size_t new_M, size_t new_ef_con, std::stop_token st);
 
+    // Shared parallel addPoint utility — static chunk partition (same as addVectors).
+    // ProcessFn signature: void(size_t index)
+    template <typename ProcessFn>
+    static void parallelAddPoints(size_t count, size_t max_threads, ProcessFn&& process) {
+        if (count == 0) return;
+        size_t num_threads = std::min(max_threads, count);
+        const size_t chunk_size = (count + num_threads - 1) / num_threads;  // Ceiling division
+        std::vector<std::thread> threads;
+        threads.reserve(num_threads);
+
+        for (size_t t = 0; t < num_threads; ++t) {
+            threads.emplace_back([&, t]() {
+                size_t start_idx = t * chunk_size;
+                size_t end_idx = std::min(start_idx + chunk_size, count);
+                for (size_t i = start_idx; i < end_idx; ++i) {
+                    process(i);
+                }
+            });
+        }
+
+        for (auto& th : threads) {
+            th.join();
+        }
+    }
+
     std::unique_ptr<WriteAheadLog> createWAL(const std::string& index_id) {
         const std::string wal_dir = data_dir_ + "/" + index_id;
         return std::make_unique<WriteAheadLog>(wal_dir, index_id);
@@ -1113,47 +1138,15 @@ public:
             logInsertsAndUpdates(entry, numeric_ids);
 
             // Add to HNSW index in parallel using pre-quantized data from QuantVectorObject
-            size_t available_threads = settings::NUM_PARALLEL_INSERTS;
-            const size_t num_threads = (available_threads < quantized_vectors.size())
-                                               ? available_threads
-                                               : quantized_vectors.size();
-            std::vector<std::thread> threads;
-            const size_t chunk_size =
-                    (quantized_vectors.size() + num_threads - 1) / num_threads;  // Ceiling division
-
-            threads.reserve(num_threads);
-            for(size_t t = 0; t < num_threads; t++) {
-                threads.emplace_back([&, t]() {
-                    // Calculate start and end indices for this thread
-                    size_t start_idx = t * chunk_size;
-                    size_t end_idx = (start_idx + chunk_size < quantized_vectors.size())
-                                            ? (start_idx + chunk_size)
-                                            : quantized_vectors.size();
-
-                    // Process assigned chunk of vectors
-                    for(size_t i = start_idx; i < end_idx; i++) {
-                        const auto& quant_vec_obj = quantized_vectors[i];
-
-                        // Use pre-quantized data directly from QuantVectorObject - no conversion
-                        // needed!
-                        const uint8_t* vector_data = quant_vec_obj.quant_vector.data();
-
-                        // Add to HNSW index using pre-quantized raw bytes
-                        if(numeric_ids[i].second) {
-                            // If it's a new ID, add it to the index
-                            entry.alg->addPoint<true>(vector_data, numeric_ids[i].first);
-                        } else {
-                            // If it's an update, add it to the index
-                            entry.alg->addPoint<false>(vector_data, numeric_ids[i].first);
-                        }
+            parallelAddPoints(quantized_vectors.size(), settings::NUM_PARALLEL_INSERTS,
+                [&](size_t i) {
+                    const uint8_t* vector_data = quantized_vectors[i].quant_vector.data();
+                    if(numeric_ids[i].second) {
+                        entry.alg->addPoint<true>(vector_data, numeric_ids[i].first);
+                    } else {
+                        entry.alg->addPoint<false>(vector_data, numeric_ids[i].first);
                     }
                 });
-            }
-
-            // Wait for all threads to complete
-            for(auto& thread : threads) {
-                thread.join();
-            }
 
             entry.markDirty();
 
@@ -1942,8 +1935,8 @@ public:
 
     // Index stats (safe to call from routes)
     size_t getElementCount(const std::string& index_id) {
-        auto& entry = getIndexEntry(index_id);
-        return entry.alg->getElementsCount();
+        auto entry = getIndexEntry(index_id);
+        return entry->alg->getElementsCount();
     }
 
 
@@ -2367,8 +2360,8 @@ inline std::pair<bool, std::string> IndexManager::rebuildIndexAsync(const std::s
     }
 
     // Load entry to get current element count
-    auto& entry = getIndexEntry(index_id);
-    size_t current_count = entry.alg->getElementsCount();
+    auto entry = getIndexEntry(index_id);
+    size_t current_count = entry->alg->getElementsCount();
 
     // Ensure at least one parameter differs
     if (new_M == meta->M && new_ef_con == meta->ef_con) {
@@ -2398,20 +2391,20 @@ inline void IndexManager::executeRebuildJob(const std::string& index_id,
     std::string index_path = vector_storage_dir + "/" + settings::DEFAULT_SUBINDEX + ".idx";
 
     try {
-        auto& entry = getIndexEntry(index_id);
+        auto entry = getIndexEntry(index_id);
 
         // Hold operation_mutex for entire rebuild — writes timeout, searches continue
-        std::lock_guard<std::mutex> operation_lock(entry.operation_mutex);
+        std::unique_lock<std::shared_mutex> operation_lock(entry->operation_mutex);
 
         // Phase 1 — Save current state
-        saveIndexInternal(entry);
+        saveIndexInternal(*entry);
 
         // Read current config from the existing HNSW graph
-        auto space_type = entry.alg->getSpaceType();
-        size_t dim = entry.alg->getDimension();
-        auto quant_level = entry.alg->getQuantLevel();
-        int32_t checksum = entry.alg->getChecksum();
-        size_t max_elements = entry.alg->getMaxElements();
+        auto space_type = entry->alg->getSpaceType();
+        size_t dim = entry->alg->getDimension();
+        auto quant_level = entry->alg->getQuantLevel();
+        int32_t checksum = entry->alg->getChecksum();
+        size_t max_elements = entry->alg->getMaxElements();
 
         // Phase 2 — Build new HNSW (same max_elements as current index)
         auto new_alg = std::make_unique<hnswlib::HierarchicalNSW<float>>(
@@ -2421,11 +2414,11 @@ inline void IndexManager::executeRebuildJob(const std::string& index_id,
         // Set vector fetcher BEFORE adding vectors — searchBaseLayer during
         // graph construction needs this to compute distances for base-layer-only
         // nodes (base layer doesn't store vector data inline)
-        new_alg->setVectorFetcher([vs = entry.vector_storage](ndd::idInt label, uint8_t* buffer) {
+        new_alg->setVectorFetcher([vs = entry->vector_storage](ndd::idInt label, uint8_t* buffer) {
             return vs->get_vector(label, buffer);
         });
 
-        new_alg->setVectorFetcherBatch([vs = entry.vector_storage](const ndd::idInt* labels,
+        new_alg->setVectorFetcherBatch([vs = entry->vector_storage](const ndd::idInt* labels,
                                                                      uint8_t* buffers,
                                                                      bool* success,
                                                                      size_t count) -> size_t {
@@ -2433,7 +2426,7 @@ inline void IndexManager::executeRebuildJob(const std::string& index_id,
         });
 
         // Iterate VectorStore and re-insert all vectors
-        auto cursor = entry.vector_storage->getCursor();
+        auto cursor = entry->vector_storage->getCursor();
         const size_t batch_size = settings::RECOVERY_BATCH_SIZE;
         size_t total_processed = 0;
         size_t batches_since_checkpoint = 0;
@@ -2462,24 +2455,12 @@ inline void IndexManager::executeRebuildJob(const std::string& index_id,
                 break;
             }
 
-            // Multi-threaded insert (same pattern as addVectors and recoverIndex)
-            size_t num_threads = std::min(settings::NUM_RECOVERY_THREADS, batch.size());
-            std::atomic<size_t> next{0};
-            std::vector<std::thread> threads;
-
-            for (size_t t = 0; t < num_threads; ++t) {
-                threads.emplace_back([&]() {
-                    size_t i;
-                    while ((i = next.fetch_add(1)) < batch.size()) {
-                        const auto& [label, vec_bytes] = batch[i];
-                        new_alg->addPoint<true>(vec_bytes.data(), label);
-                    }
+            // Multi-threaded insert (shared utility with addVectors)
+            parallelAddPoints(batch.size(), settings::NUM_PARALLEL_INSERTS,
+                [&](size_t i) {
+                    const auto& [label, vec_bytes] = batch[i];
+                    new_alg->addPoint<true>(vec_bytes.data(), label);
                 });
-            }
-
-            for (auto& th : threads) {
-                th.join();
-            }
 
             total_processed += batch.size();
 
@@ -2509,18 +2490,18 @@ inline void IndexManager::executeRebuildJob(const std::string& index_id,
         // Load fresh from disk + swap pointer (reloadIndex pattern)
         auto fresh_alg = std::make_unique<hnswlib::HierarchicalNSW<float>>(index_path, 0);
 
-        fresh_alg->setVectorFetcher([vs = entry.vector_storage](ndd::idInt label, uint8_t* buffer) {
+        fresh_alg->setVectorFetcher([vs = entry->vector_storage](ndd::idInt label, uint8_t* buffer) {
             return vs->get_vector(label, buffer);
         });
 
-        fresh_alg->setVectorFetcherBatch([vs = entry.vector_storage](const ndd::idInt* labels,
+        fresh_alg->setVectorFetcherBatch([vs = entry->vector_storage](const ndd::idInt* labels,
                                                                        uint8_t* buffers,
                                                                        bool* success,
                                                                        size_t count) -> size_t {
             return vs->get_vectors_batch_into(labels, buffers, success, count);
         });
 
-        entry.alg = std::move(fresh_alg);
+        entry->alg = std::move(fresh_alg);
 
         // Delete temp checkpoint and timestamped file
         if (std::filesystem::exists(temp_path)) {
@@ -2535,12 +2516,11 @@ inline void IndexManager::executeRebuildJob(const std::string& index_id,
         if (meta) {
             meta->M = new_M;
             meta->ef_con = new_ef_con;
-            meta->total_elements = entry.alg->getElementsCount();
+            meta->total_elements = entry->alg->getElementsCount();
             metadata_manager_->storeMetadata(index_id, *meta);
         }
 
-        entry.markUpdated();
-        entry.updated = false;  // We just saved the new graph
+        entry->is_dirty = false;  // We just saved the new graph
 
         LOG_INFO(2051, index_id, "Rebuild completed: " << total_processed << " vectors rebuilt");
         rebuild_.completeActiveRebuild(username);

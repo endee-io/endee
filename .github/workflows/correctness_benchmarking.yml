@@ -91,7 +91,7 @@ jobs:
               username: context.payload.comment.user.login,
             });
             const level   = perm.permission;
-            const allowed = ['admin', 'write'].includes(level);
+            const allowed = ['admin'].includes(level);
             core.setOutput('authorized', String(allowed));
  
             if (!allowed) {

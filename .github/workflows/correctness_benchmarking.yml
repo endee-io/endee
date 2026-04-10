@@ -219,7 +219,7 @@ jobs:
             --key-name ${{ secrets.ENDEE_PEM }} \
             --security-group-ids ${{ secrets.VECTORDBBENCH_SERVER_GROUP_ID }} \
             --subnet-id ${{ secrets.AWS_SUBNET_ID }} \
-            --block-device-mappings '[{"DeviceName":"/dev/xvda","Ebs":{"VolumeSize":30,"VolumeType":"gp3"}}]' \
+            --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":30,"VolumeType":"gp3"}}]' \
             --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$ENDEE_INSTANCE_NAME}]" \
             --query 'Instances[0].InstanceId' \
             --output text)
@@ -542,7 +542,7 @@ jobs:
 
             # RUN THE ENDEE CONTAINER
             echo "RUNNING ENDEE CONTAINER"
-            sudo docker compose up -d
+            sudo docker-compose up -d
 
             # CHECK IF THE CONTAINER IS RUNNING
             echo "CHECKING IF THE CONTAINER IS RUNNING"
@@ -1267,4 +1267,3 @@ jobs:
                 body,
               });
             }
-

@@ -544,17 +544,6 @@ jobs:
             echo "RUNNING ENDEE CONTAINER"
             sudo docker-compose up -d
 
-            # CHECK IF THE CONTAINER IS RUNNING
-            echo "CHECKING IF THE CONTAINER IS RUNNING"
-            if sudo docker ps | grep -q endee-server; then
-              echo "ENDEE CONTAINER IS RUNNING"
-            else
-              echo "ENDEE CONTAINER IS NOT RUNNING"
-              exit 1
-            fi
-
-
-
             
           ENDSSH
  

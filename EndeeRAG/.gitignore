@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Environment
+.env
+venv/
+.venv/
+
+# Data
+data/
+endee-data/
+*.jsonl
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Benchmarks
+benchmark_results.json

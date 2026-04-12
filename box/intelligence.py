@@ -59,6 +59,17 @@ class BoxIntelligence:
         self.client = endee.Endee()
         self.model = SentenceTransformer('all-MiniLM-L6-v2')
         self.splitter = CodeSplitter()
+        self.manifest_path = os.path.join(os.path.dirname(__file__), "manifest.json")
+
+    def _load_manifest(self) -> Dict[str, str]:
+        if os.path.exists(self.manifest_path):
+            with open(self.manifest_path, 'r') as f:
+                return json.load(f)
+        return {}
+
+    def _save_manifest(self, manifest: Dict[str, str]):
+        with open(self.manifest_path, 'w') as f:
+            json.dump(manifest, f, indent=2)
 
     def get_index(self, name: Optional[str] = None):
         target_name = name or self.index_name
@@ -70,31 +81,68 @@ class BoxIntelligence:
     def index_root(self, root_dir: str):
         index = self.get_index()
         exts = ('.cpp', '.h', '.hpp', '.py', '.cmake', 'CMakeLists.txt', '.md')
+        manifest = self._load_manifest()
+        new_manifest = {}
         
+        all_payloads = []
+        files_to_process = []
+
         for root, _, files in os.walk(root_dir):
             if any(p in root for p in ['.git', 'build', '__pycache__', 'ide']): continue
             for f in files:
                 if f.endswith(exts):
                     file_path = os.path.join(root, f)
-                    try:
-                        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f_in:
-                            content = f_in.read()
-                        chunks = self.splitter.split(content, file_path)
-                        rel_path = os.path.relpath(file_path, root_dir)
-                        embeddings = self.model.encode(chunks).tolist()
+                    rel_path = os.path.relpath(file_path, root_dir)
+                    mtime = str(os.path.getmtime(file_path))
+                    
+                    # Delta Check
+                    if manifest.get(rel_path) == mtime:
+                        new_manifest[rel_path] = mtime
+                        continue
                         
-                        payload = []
-                        for chunk, emb in zip(chunks, embeddings):
-                            # Hybrid: generate sparse weights for the chunk
-                            sparse = SparseGenerator.text_to_sparse(chunk)
-                            payload.append({
-                                "id": str(uuid.uuid4()),
-                                "vector": emb,
-                                "sparse_vector": sparse,
-                                "meta": {"text": chunk, "path": rel_path, "type": "code"}
-                            })
-                        if payload: index.upsert(payload)
-                    except Exception: continue
+                    files_to_process.append((file_path, rel_path, mtime))
+
+        if not files_to_process:
+            print("[Box Turbo] No changes detected. Index is up to date.")
+            return
+
+        print(f"[Box Turbo] Processing {len(files_to_process)} changed files...")
+
+        for file_path, rel_path, mtime in files_to_process:
+            try:
+                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f_in:
+                    content = f_in.read()
+                
+                chunks = self.splitter.split(content, file_path)
+                embeddings = self.model.encode(chunks).tolist()
+                
+                for chunk, emb in zip(chunks, embeddings):
+                    sparse = SparseGenerator.text_to_sparse(chunk)
+                    all_payloads.append({
+                        "id": str(uuid.uuid4()),
+                        "vector": emb,
+                        "sparse_vector": sparse,
+                        "meta": {"text": chunk, "path": rel_path, "type": "code"}
+                    })
+                
+                new_manifest[rel_path] = mtime
+
+                # Batch upsert every 100 items
+                if len(all_payloads) >= 100:
+                    index.upsert(all_payloads)
+                    all_payloads = []
+                    
+            except Exception as e:
+                print(f"[!] Error processing {rel_path}: {e}")
+                continue
+
+        # Final flush
+        if all_payloads:
+            index.upsert(all_payloads)
+        
+        # Merge and save manifest
+        final_manifest = {**manifest, **new_manifest}
+        self._save_manifest(final_manifest)
 
     def search(self, query: str, top_k=5, index_name=None, filter_dict=None, hybrid=True) -> List[Dict]:
         idx_name = index_name or self.index_name

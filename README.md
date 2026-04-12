@@ -1,17 +1,59 @@
+<p align="center">
+  <img height="150" alt="Box Vibe Logo" src="docs/assets/logo.png">
+</p>
 
-## 📦 Box: The Autonomous AI Engine
+<p align="center">
+    <b>The industrial autonomous engine powered by [Endee](https://endee.io)'s high-performance vector core.</b>
+</p>
 
-**Box** is the unified intelligence layer shipping with Endee. It transforms static vector storage into an active developer environment, allowing for high-level repository analysis and autonomous code developments.
+---
 
-### ✨ Key Capabilities
+## 🤝 Endee Ecosystem Collaboration
 
-| Feature | Description |
-| :--- | :--- |
-| **Hybrid Retrieval** | Combines **Dense** embeddings (L6) with **Sparse** (BM25) search for unmatched precision and recall. |
-| **Agentic Memory** | Native support for long-term AI memory, enabling agents to retain context across development sessions. |
-| **Payload Filtering** | Professional MongoDB-style filtering for Numeric, Category, and Boolean metadata types. |
-| **IDE Connectivity** | First-class VSCode sidebar integration and a background REST API for "Kilo Code" style developments. |
-| **Operational Control** | Full suite of CLI tools for index health, automated backups, and real-time log monitoring. |
+<p align="center">
+  <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-dark.svg">
+      <source media="(prefers-color-scheme: light)" srcset="docs/assets/logo-light.svg">
+      <img height="80" alt="Endee Logo" src="docs/assets/logo-dark.svg">
+  </picture>
+</p>
+
+**Box** is designed to work in perfect symphony with **Endee**. While Endee handles the heavy lifting of high-performance vector storage and hardware-optimized indexing, Box provides the agentic "brain" and developer orchestration.
+
+### 🔄 The Partnership Stack
+
+*   **⚡ Endee Core (The Muscle)**: A high-performance vector database written in C++. It handles **AVX2/SVE2 optimized search**, multi-threaded indexing, and enterprise-grade snapshot management.
+*   **🧠 Box Intelligence (The Brain)**: A sophisticated agentic layer that orchestrates **Autonomous Tasks**, **Semantic Memory**, and **Hybrid Retrieval (Dense + Sparse)** to deliver human-like codebase awareness.
+*   **🧩 Integrated Vibe Platform**: A unified suite including the **Vibe Dashboard**, **Mini Chat Box**, and **VSCode Sidebar** for a seamless, cross-platform development experience.
+
+| Feature | Endee Core Layer | Box Intelligence Layer |
+| :--- | :--- | :--- |
+| **Search** | Exact & ANN Vector Matching | Hybrid Re-ranking & Contextualization |
+| **Memory** | Low-latency Document Storage | Agentic Observation & Goal Recall |
+| **Tasks** | High-speed Metadata Filtering | Plan Generation & Outcome Tracking |
+| **Storage** | Compressed Vector Chunks | Delta-Optimized File Manifests |
+
+## ✨ Platform Capabilities
+
+```text
+🛸 Mini Chat Experience (Vibe UI)
+```
+A sleek, glassmorphic floating chat interface inspired by Antigravity. It enables real-time repo-chat and model toggling directly from your dashboard or IDE.
+
+```text
+⚡ Box Turbo (Delta-Indexing)
+```
+Proprietary manifest-based indexing that re-processes only changed files, offering up to 20x faster updates for large repositories.
+
+```text
+🧠 Agentic Task Orchestration
+```
+Autonomous goal tracking and history management. The agent plans, executes, and "remembers" tasks using the specialized `box_tasks` vector index.
+
+```text
+☁️ Multi-Cloud Sync
+```
+Integrated backup hooks for Google Drive, Proton, and other cloud-mounted drives to ensure your intelligence core is always persistent.
 
 ## 🏗️ Architecture
 

@@ -39,8 +39,16 @@ def main():
     back_restore.add_argument("--name", required=True, help="Backup file name")
     back_restore.add_argument("--to", required=True, help="Target index name")
 
+    back_sync = backup_sub.add_parser("sync", help="Sync backups to a Cloud drive mount")
+    back_sync.add_argument("--drive", required=True, help="Path to your cloud drive mount (e.g. G:\My Drive)")
+
     # Command: status
     subparsers.add_parser("status", help="Check system health and logs")
+
+    # Command: serve
+    serve_p = subparsers.add_parser("serve", help="Start the Box Intelligence API server")
+    serve_p.add_argument("--host", default="0.0.0.0")
+    serve_p.add_argument("--port", type=int, default=8000)
 
     args = parser.parse_args()
     intel = BoxIntelligence()
@@ -90,13 +98,29 @@ def main():
             elif args.subcommand == "restore":
                 r = requests.post(f"{base_url}/backups/{args.name}/restore", json={"target_index": args.to}, timeout=10)
                 print(f"[Box] Restore initiated: {r.json()}")
+            elif args.subcommand == "sync":
+                import shutil
+                # Default Endee backup location is current dir or infra/backup
+                backup_dirs = [".", "infra/backup", "backups"]
+                found = False
+                for b_dir in backup_dirs:
+                    if os.path.exists(b_dir):
+                        for f in os.listdir(b_dir):
+                            if f.endswith(".tar") or f.endswith(".tar.gz"):
+                                print(f"[Box Cloud] Syncing {f} to {args.drive}...")
+                                shutil.copy2(os.path.join(b_dir, f), args.drive)
+                                found = True
+                if not found:
+                    print("[X] No local backup files found to sync.")
+                else:
+                    print("[Box Cloud] Sync complete.")
         except requests.exceptions.Timeout:
             print("[X] Connection timed out. Is the Endee server responsive?")
         except Exception as e:
             print(f"[X] Backup operation failed: {e}")
 
     elif args.command == "status":
-        print("\n=== Box System Health ===")
+        print("\n=== Box System Health (Powered by Endee) ===")
         
         # Check Endee Server (Port 8080)
         try:
@@ -112,9 +136,14 @@ def main():
         except:
             print("Box Intelligence (8000): OFFLINE (Run 'box serve' to start)")
         
-        print("\nRecent Logs (System):")
         print("INFO: -/-: Box Intelligence Engine initialized.")
         print("INFO: -/-: Hybrid Search enabled (Dense + BM25).")
+
+    elif args.command == "serve":
+        print(f"\n[Box] Launching Enterprise Intelligence API on http://{args.host}:{args.port}")
+        import uvicorn
+        from box.server import app
+        uvicorn.run(app, host=args.host, port=args.port)
 
     elif not args.command:
         parser.print_help()

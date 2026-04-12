@@ -7,7 +7,9 @@ from typing import Optional, List, Dict
 
 # Add parent to path for relative imports
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from box.intelligence import BoxIntelligence, DeveloperAgent, BoxMemory
+from box.tasks import TaskManager
 
 app = FastAPI(title="Box Enterprise Engine API")
 
@@ -22,6 +24,7 @@ app.add_middleware(
 # Global instances
 intel = BoxIntelligence()
 memory = BoxMemory()
+tasks = TaskManager()
 agent = DeveloperAgent(
     api_key=os.getenv("OPENAI_API_KEY"),
     base_url=os.getenv("LOCAL_AI_BASE_URL")
@@ -42,6 +45,14 @@ class DevelopRequest(BaseModel):
     instruction: str
     file_path: str
     file_content: Optional[str] = ""
+
+class TaskRequest(BaseModel):
+    goal: str
+    context: Optional[str] = None
+
+class TaskUpdateRequest(BaseModel):
+    status: str
+    message: str
 
 @app.post("/index")
 async def trigger_index():
@@ -95,6 +106,20 @@ async def develop(req: DevelopRequest):
 @app.get("/health")
 async def health():
     return {"status": "ok", "engine": "Box Enterprise"}
+
+@app.post("/tasks/create")
+async def create_task(req: TaskRequest):
+    tid = tasks.create_task(req.goal, req.context)
+    return {"status": "success", "task_id": tid}
+
+@app.get("/tasks")
+async def list_tasks(status: Optional[str] = None):
+    return {"tasks": tasks.list_tasks(status)}
+
+@app.post("/tasks/{task_id}/update")
+async def update_task(task_id: str, req: TaskUpdateRequest):
+    tasks.update_task(task_id, req.status, req.message)
+    return {"status": "success"}
 
 if __name__ == "__main__":
     import uvicorn

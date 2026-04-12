@@ -1,0 +1,58 @@
+{
+  "name": "box-autonomous-agent",
+  "displayName": "Box AI",
+  "description": "Autonomous AI Developer Agent powered by Endee",
+  "version": "1.0.0",
+  "publisher": "DoguparthiAakash",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "AI",
+    "Machine Learning"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "box-sidebar",
+          "title": "Box Engine",
+          "icon": "$(box)"
+        }
+      ]
+    },
+    "views": {
+      "box-sidebar": [
+        {
+          "id": "box-chat",
+          "type": "webview",
+          "name": "Box Chat"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "box.ask",
+        "title": "Box: Ask about current file"
+      },
+      {
+        "command": "box.develop",
+        "title": "Box: Autonomous Development"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package",
+    "publish": "ovsx publish"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.4.5"
+  }
+}

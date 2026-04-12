@@ -1,0 +1,45 @@
+/* Global Styles */
+[data-testid="stAppViewContainer"] {
+    background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+    color: #f8fafc;
+}
+
+/* Chat Input Styling */
+[data-testid="stChatInput"] {
+    border: 1px solid #334155;
+    border-radius: 12px;
+    background-color: #1e293b;
+}
+
+/* Sidebar Customization */
+[data-testid="stSidebar"] {
+    background-color: #0f172a;
+    border-right: 1px solid #1e293b;
+}
+
+/* Chat Message Styling */
+.stChatMessage {
+    border-radius: 15px;
+    padding: 1rem;
+    margin-bottom: 1rem;
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+}
+
+/* Accent for Assistant Messages */
+[data-testid="stChatMessageAssistant"] {
+    background-color: #1e293b;
+    border: 1px solid #3b82f6;
+}
+
+/* Accent for User Messages */
+[data-testid="stChatMessageUser"] {
+    background-color: #334155;
+}
+
+/* Title and Header Gradients */
+h1 {
+    background: -webkit-linear-gradient(#3b82f6, #2dd4bf);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    font-weight: 800 !important;
+}

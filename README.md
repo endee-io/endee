@@ -1,139 +1,111 @@
-<p align="center">
-  <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-dark.svg">
-      <source media="(prefers-color-scheme: light)" srcset="docs/assets/logo-light.svg">
-      <img height="100" alt="Endee" src="docs/assets/logo-dark.svg">
-  </picture>
-</p>
 
-<p align="center">
-    <b>High-performance open-source vector database for AI search, RAG, semantic search, and hybrid retrieval.</b>
-</p>
+## 📦 Box: The Autonomous AI Engine
 
-<p align="center">
-    <a href="./docs/getting-started.md"><img src="https://img.shields.io/badge/Quick_Start-Local_Setup-success?style=flat-square" alt="Quick Start"></a>
-    <a href="https://docs.endee.io/quick-start"><img src="https://img.shields.io/badge/Docs-Quick_Start-success?style=flat-square" alt="Docs"></a>
-    <a href="https://github.com/endee-io/endee/blob/master/LICENSE"><img src="https://img.shields.io/github/license/endee-io/endee?style=flat-square" alt="License"></a>
-    <a href="https://discord.gg/5HFGqDZQE3"><img src="https://img.shields.io/badge/Discord-Join_Chat-5865F2?logo=discord&style=flat-square" alt="Discord"></a>
-    <a href="https://endee.io/"><img src="https://img.shields.io/badge/Website-Endee-111111?style=flat-square" alt="Website"></a>
-    <!-- <a href="https://endee.io/benchmarks"><img src="https://img.shields.io/badge/Benchmarks-Coming_Soon-1F8B4C?style=flat-square" alt="Benchmarks"></a> -->
-    <!-- <a href="https://endee.io/cloud"><img src="https://img.shields.io/badge/Cloud-Coming_Soon-2496ED?style=flat-square" alt="Cloud"></a> -->
-</p>
+**Box** is the unified intelligence layer shipping with Endee. It transforms static vector storage into an active developer environment, allowing for high-level repository analysis and autonomous code developments.
 
-<p align="center">
-<strong><a href="./docs/getting-started.md">Quick Start</a> • <a href="#why-endee">Why Endee</a> • <a href="#use-cases">Use Cases</a> • <a href="#features">Features</a> • <a href="#api-and-clients">API and Clients</a> • <a href="#docs-and-links">Docs</a> • <a href="#community-and-contact">Contact</a></strong>
-</p>
+### ✨ Key Capabilities
 
-# Endee: Open-Source Vector Database for AI Search
+| Feature | Description |
+| :--- | :--- |
+| **Hybrid Retrieval** | Combines **Dense** embeddings (L6) with **Sparse** (BM25) search for unmatched precision and recall. |
+| **Agentic Memory** | Native support for long-term AI memory, enabling agents to retain context across development sessions. |
+| **Payload Filtering** | Professional MongoDB-style filtering for Numeric, Category, and Boolean metadata types. |
+| **IDE Connectivity** | First-class VSCode sidebar integration and a background REST API for "Kilo Code" style developments. |
+| **Operational Control** | Full suite of CLI tools for index health, automated backups, and real-time log monitoring. |
 
-**Endee** is a high-performance open-source vector database built for AI search and retrieval workloads. It is designed for teams building **RAG pipelines**, **semantic search**, **hybrid search**, recommendation systems, and filtered vector retrieval APIs that need production-oriented performance and control.
+## 🏗️ Architecture
 
-Endee combines vector search with filtering, sparse retrieval support, backup workflows, and deployment flexibility across local builds and Docker-based environments. The project is implemented in C++ and optimized for modern CPU targets, including AVX2, AVX512, NEON, and SVE2.
-
-If you want the fastest path to evaluate Endee locally, start with the [Getting Started guide](./docs/getting-started.md) or the hosted docs at [docs.endee.io](https://docs.endee.io/quick-start).
-
-## Why Endee
-
-- Built as a dedicated vector database for AI applications, search systems, and retrieval-heavy workloads.
-- Supports dense vector retrieval plus sparse search capabilities for hybrid search use cases.
-- Includes payload filtering for metadata-aware retrieval and application-specific query logic.
-- Ships with operational features already documented in this repo, including backup flows and runtime observability.
-- Offers flexible deployment paths: local scripts, manual builds, Docker images, and prebuilt registry images.
-
-## Getting Started
-
-The full installation, build, Docker, runtime, and authentication instructions are in [docs/getting-started.md](./docs/getting-started.md).
-
-Fastest local path:
-
-```bash
-chmod +x ./install.sh ./run.sh
-./install.sh --release --avx2
-./run.sh
+```text
+┌──────────────────────────────────────────────────────────┐
+│              Autonomous Developer Interface               │
+│   ┌──────────────┐      ┌──────────────┐      ┌───────┐  │
+│   │ CLI (box)    │ <──> │ VSCode Side  │ <──> │ API   │  │
+│   └──────┬───────┘      └──────┬───────┘      └───┬───┘  │
+└──────────│─────────────────────│──────────────────│──────┘
+           │                     │                  │
+           └─────────────────────┴──────────────────┘
+                         │
+┌────────────────────────▼─────────────────────────────────┐
+│                 Box API Server (Port 8000)               │
+│      (FastAPI, DeveloperAgent, Contextual Memory)        │
+└────────────────────────┬─────────────────────────────────┘
+                         │
+┌────────────────────────▼─────────────────────────────────┐
+│              Endee Vector Database (Port 8080)           │
+│   ┌─────────────┐     ┌─────────────┐     ┌──────────┐   │
+│   │ Dense Index │     │ Sparse Index│     │ Filters  │   │
+│   └─────────────┘     └─────────────┘     └──────────┘   │
+└──────────────────────────────────────────────────────────┘
 ```
 
-The server listens on port `8080`. For detailed setup paths, supported operating systems, CPU optimization flags, Docker usage, and authentication examples, use:
+---
 
-- [Getting Started](./docs/getting-started.md)
-- [Hosted Quick Start Docs](https://docs.endee.io/quick-start)
+## 🚀 Getting Started
 
-## Use Cases
+### 1 — One-Click Setup (Master Suite)
+Initialize the entire environment (Python, PATH, Initial Indexing) with a single command:
+```powershell
+.\setup.bat
+```
 
-### RAG and AI Retrieval
+### 2 — Starting the Intelligence Layer
+Launch the Box API Server to enable IDE and external tool connectivity:
+```powershell
+box serve
+```
 
-Use Endee as the retrieval layer for question answering, chat assistants, copilots, and other RAG applications that need fast vector search with metadata-aware filtering.
+### 3 — Building the Sidebar (VSCode)
+To use the included IDE extension, use our build tool to compile the TypeScript source:
+```powershell
+.\ide\vscode\build.bat
+```
 
-### Agentic AI and AI Agent Memory
+---
 
-Use Endee as the long-term memory and context retrieval layer for AI agents built with frameworks like LangChain, CrewAI, AutoGen, and LlamaIndex. Store and retrieve past observations, tool outputs, conversation history, and domain knowledge mid-execution with low-latency filtered vector search, so your autonomous agents get the right context without stalling their reasoning loop.
+## 🛠️ Usage Workflow
 
-### Semantic Search
+### 1. Codebase Awareness
+Before using the AI, ensuring your index is fresh.
+```bash
+box index
+```
 
-Build semantic search experiences for documents, products, support content, and knowledge bases using vector similarity search instead of exact keyword-only matching.
+### 2. Autonomous IDE Chat
+1. Launch the API: `box serve`
+2. Open VSCode and navigate to the **Box Engine** activity bar icon.
+3. Start chatting with your codebase! Box uses hybrid semantic search to find relevant context automatically.
 
-### Hybrid Search
+### 3. Agentic Development
+Use the CLI for direct autonomous improvements:
+```bash
+box search "logic for vector upsert" --top_k 3
+```
+Or use the context-aware `develop` API via the VSCode extension commands (`Box: Ask about current file`).
 
-Combine dense retrieval, sparse vectors, and filtering to improve relevance for search workflows where both semantic understanding and term-level precision matter.
+---
 
-### Recommendations and Matching
+## 📂 Project Structure
 
-Support recommendation, similarity matching, and nearest-neighbor retrieval workflows across text, embeddings, and other high-dimensional representations.
+| Directory | Content |
+| :--- | :--- |
+| **`box/`** | 🧠 The core Intelligence Engine (CLI, Server, Logic). |
+| **`ide/`** | 🧩 IDE extension source code and build tools. |
+| **`docs/`** | 📖 Comprehensive technical guides (Memory, Filtering, Sparse). |
+| **`data/`** | 📂 Sample datasets for initial evaluation. |
+| **`box.bat`** | 🚀 Unified entry point for the Windows CLI. |
 
-## Features
+## ⚙️ CLI Reference
 
-- **Vector search** for AI retrieval and semantic similarity workloads.
-- **Hybrid retrieval support** with sparse vector capabilities documented in [docs/sparse.md](./docs/sparse.md).
-- **Payload filtering** for structured retrieval logic documented in [docs/filter.md](./docs/filter.md).
-- **Backup APIs and flows** documented in [docs/backup-system.md](./docs/backup-system.md).
-- **Operational logging and instrumentation** documented in [docs/logs.md](./docs/logs.md) and [docs/mdbx-instrumentation.md](./docs/mdbx-instrumentation.md).
-- **CPU-targeted builds** for AVX2, AVX512, NEON, and SVE2 deployments.
-- **Docker deployment options** for local and server environments.
+- `box index` - Scans and indexes the current codebase.
+- `box search "query"` - Performs a hybrid semantic lookup.
+- `box status` - Real-time system health and connectivity check.
+- `box backup create` - Generates a snapshot of your index.
 
-## API and Clients
+## 🛡️ License
 
-Endee exposes an HTTP API for managing indexes and serving retrieval workloads. The current repo documentation and examples focus on running the server directly and calling its API endpoints.
+Endee is open-source software licensed under the **Apache License 2.0**. For enterprise support or branding permissions, contact [enterprise@endee.io](mailto:enterprise@endee.io).
 
-Current developer entry points:
-
-- [Getting Started](./docs/getting-started.md) for local build and run flows
-- [Hosted Docs](https://docs.endee.io/quick-start) for product documentation
-- [Release Notes 1.0.0](https://github.com/endee-io/endee/releases/tag/1.0.0) for recent platform changes
-
-## Docs and Links
-
-- [Getting Started](./docs/getting-started.md)
-- [Hosted Documentation](https://docs.endee.io/quick-start)
-- [Release Notes](https://github.com/endee-io/endee/releases/tag/1.0.0)
-- [Sparse Search](./docs/sparse.md)
-- [Filtering](./docs/filter.md)
-- [Backups](./docs/backup-system.md)
-
-## Community and Contact
-
-- Join the community on [Discord](https://discord.gg/5HFGqDZQE3)
-- Visit the website at [endee.io](https://endee.io/)
-- For trademark or branding permissions, contact [enterprise@endee.io](mailto:enterprise@endee.io)
-
-## Contributing
-
-We welcome contributions from the community to help make vector search faster and more accessible for everyone.
-
-- Submit pull requests for fixes, features, and improvements
-- Report bugs or performance issues through GitHub issues
-- Propose enhancements for search quality, performance, and deployment workflows
-
-## License
-
-Endee is open source software licensed under the **Apache License 2.0**. See the [LICENSE](./LICENSE) file for full terms.
-
-## Trademark and Branding
-
-“Endee” and the Endee logo are trademarks of Endee Labs.
-
-The Apache License 2.0 does not grant permission to use the Endee name, logos, or branding in a way that suggests endorsement or affiliation.
-
-If you offer a hosted or managed service based on this software, you must use your own branding and avoid implying it is an official Endee service.
-
-## Third-Party Software
-
-This project includes or depends on third-party software components licensed under their respective open-source licenses. Use of those components is governed by their own license terms.
+---
+<p align="center">
+    <b>Built with performance in mind by the Endee Community.</b>
+</p>

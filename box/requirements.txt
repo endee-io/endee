@@ -1,0 +1,19 @@
+# Core Vector DB
+endee
+
+# AI & Intelligence
+sentence-transformers
+openai
+beautifulsoup4
+requests
+pandas
+torch
+transformers
+peft
+accelerate
+
+# API & Server
+fastapi
+uvicorn
+pydantic
+python-multipart

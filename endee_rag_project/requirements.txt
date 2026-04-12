@@ -1,0 +1,10 @@
+endee
+sentence-transformers
+streamlit
+pandas
+openai
+python-dotenv
+rich
+textual
+beautifulsoup4
+requests

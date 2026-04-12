@@ -1,139 +1,41 @@
-<p align="center">
-  <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-dark.svg">
-      <source media="(prefers-color-scheme: light)" srcset="docs/assets/logo-light.svg">
-      <img height="100" alt="Endee" src="docs/assets/logo-dark.svg">
-  </picture>
-</p>
+# Nexus AI: Multimodal Semantic Search Engine
 
-<p align="center">
-    <b>High-performance open-source vector database for AI search, RAG, semantic search, and hybrid retrieval.</b>
-</p>
+An internship project built for the Endee AI Challenge. This application performs high-accuracy semantic image retrieval through a Telegram interface.
 
-<p align="center">
-    <a href="./docs/getting-started.md"><img src="https://img.shields.io/badge/Quick_Start-Local_Setup-success?style=flat-square" alt="Quick Start"></a>
-    <a href="https://docs.endee.io/quick-start"><img src="https://img.shields.io/badge/Docs-Quick_Start-success?style=flat-square" alt="Docs"></a>
-    <a href="https://github.com/endee-io/endee/blob/master/LICENSE"><img src="https://img.shields.io/github/license/endee-io/endee?style=flat-square" alt="License"></a>
-    <a href="https://discord.gg/5HFGqDZQE3"><img src="https://img.shields.io/badge/Discord-Join_Chat-5865F2?logo=discord&style=flat-square" alt="Discord"></a>
-    <a href="https://endee.io/"><img src="https://img.shields.io/badge/Website-Endee-111111?style=flat-square" alt="Website"></a>
-    <!-- <a href="https://endee.io/benchmarks"><img src="https://img.shields.io/badge/Benchmarks-Coming_Soon-1F8B4C?style=flat-square" alt="Benchmarks"></a> -->
-    <!-- <a href="https://endee.io/cloud"><img src="https://img.shields.io/badge/Cloud-Coming_Soon-2496ED?style=flat-square" alt="Cloud"></a> -->
-</p>
+## 🏗️ System Design (Adaptive Retrieval Architecture)
 
-<p align="center">
-<strong><a href="./docs/getting-started.md">Quick Start</a> • <a href="#why-endee">Why Endee</a> • <a href="#use-cases">Use Cases</a> • <a href="#features">Features</a> • <a href="#api-and-clients">API and Clients</a> • <a href="#docs-and-links">Docs</a> • <a href="#community-and-contact">Contact</a></strong>
-</p>
+My implementation follows a production-style AI pipeline designed for low-latency search:
 
-# Endee: Open-Source Vector Database for AI Search
+1. **Preprocessing Layer:** Images stored in `/pics` are loaded via Pillow and normalized for the AI model.
+2. **Embedding Engine:** Uses the `CLIP (ViT-B-32)` transformer model. This is a **multimodal** model that understands the relationship between natural language and visual pixels, converting them into 512-dimensional vectors.
+3. **Local Vector Database:** To ensure portability and overcome environment constraints with Docker, I developed a custom **JSON-based Vector Store** (`vector_db.json`). This stores the file paths and their corresponding high-dimensional embeddings.
+4. **Search & Similarity Logic:**
+   - The system calculates the **Cosine Similarity** between the user's text query and all stored image vectors.
+   - **Adaptive Filtering:** I implemented a custom "Smart Gate." If the top match is significantly stronger than the rest, only 1 result is sent. If multiple images are highly relevant (within a 90% similarity threshold), the bot adaptively returns the top 2.
 
-**Endee** is a high-performance open-source vector database built for AI search and retrieval workloads. It is designed for teams building **RAG pipelines**, **semantic search**, **hybrid search**, recommendation systems, and filtered vector retrieval APIs that need production-oriented performance and control.
+## 🛠️ How I Built It
+- **Semantic Search:** Unlike keyword search, this bot understands concepts. Searching "mammal" will find a "bear" even without that specific word in the filename.
+- **Python-Telegram-Bot:** A clean, real-world interface for user interaction.
+- **NumPy Math:** Used for fast vector normalization and dot-product calculations.
 
-Endee combines vector search with filtering, sparse retrieval support, backup workflows, and deployment flexibility across local builds and Docker-based environments. The project is implemented in C++ and optimized for modern CPU targets, including AVX2, AVX512, NEON, and SVE2.
+## 🚀 Setup Instructions
 
-If you want the fastest path to evaluate Endee locally, start with the [Getting Started guide](./docs/getting-started.md) or the hosted docs at [docs.endee.io](https://docs.endee.io/quick-start).
-
-## Why Endee
-
-- Built as a dedicated vector database for AI applications, search systems, and retrieval-heavy workloads.
-- Supports dense vector retrieval plus sparse search capabilities for hybrid search use cases.
-- Includes payload filtering for metadata-aware retrieval and application-specific query logic.
-- Ships with operational features already documented in this repo, including backup flows and runtime observability.
-- Offers flexible deployment paths: local scripts, manual builds, Docker images, and prebuilt registry images.
-
-## Getting Started
-
-The full installation, build, Docker, runtime, and authentication instructions are in [docs/getting-started.md](./docs/getting-started.md).
-
-Fastest local path:
-
+### 1. Install Dependencies
+Run the following command to install the required AI libraries:
 ```bash
-chmod +x ./install.sh ./run.sh
-./install.sh --release --avx2
-./run.sh
-```
+pip install sentence-transformers pillow python-telegram-bot numpy
 
-The server listens on port `8080`. For detailed setup paths, supported operating systems, CPU optimization flags, Docker usage, and authentication examples, use:
+2. Index Your Images
+Ensure your images are in the /pics folder, then run the engine to generate your vector database:
 
-- [Getting Started](./docs/getting-started.md)
-- [Hosted Quick Start Docs](https://docs.endee.io/quick-start)
+python engine.py
 
-## Use Cases
+3. Start the Bot
+Update the token in bot.py and run the main service to go live:
 
-### RAG and AI Retrieval
+python bot.py
 
-Use Endee as the retrieval layer for question answering, chat assistants, copilots, and other RAG applications that need fast vector search with metadata-aware filtering.
+📝 Project Evolution Note
 
-### Agentic AI and AI Agent Memory
+Originally designed for the Endee Docker environment, I successfully pivoted to a Local Vector Engine implementation to ensure 100% functionality and easier evaluation for the technical team during this 24-hour challenge.
 
-Use Endee as the long-term memory and context retrieval layer for AI agents built with frameworks like LangChain, CrewAI, AutoGen, and LlamaIndex. Store and retrieve past observations, tool outputs, conversation history, and domain knowledge mid-execution with low-latency filtered vector search, so your autonomous agents get the right context without stalling their reasoning loop.
-
-### Semantic Search
-
-Build semantic search experiences for documents, products, support content, and knowledge bases using vector similarity search instead of exact keyword-only matching.
-
-### Hybrid Search
-
-Combine dense retrieval, sparse vectors, and filtering to improve relevance for search workflows where both semantic understanding and term-level precision matter.
-
-### Recommendations and Matching
-
-Support recommendation, similarity matching, and nearest-neighbor retrieval workflows across text, embeddings, and other high-dimensional representations.
-
-## Features
-
-- **Vector search** for AI retrieval and semantic similarity workloads.
-- **Hybrid retrieval support** with sparse vector capabilities documented in [docs/sparse.md](./docs/sparse.md).
-- **Payload filtering** for structured retrieval logic documented in [docs/filter.md](./docs/filter.md).
-- **Backup APIs and flows** documented in [docs/backup-system.md](./docs/backup-system.md).
-- **Operational logging and instrumentation** documented in [docs/logs.md](./docs/logs.md) and [docs/mdbx-instrumentation.md](./docs/mdbx-instrumentation.md).
-- **CPU-targeted builds** for AVX2, AVX512, NEON, and SVE2 deployments.
-- **Docker deployment options** for local and server environments.
-
-## API and Clients
-
-Endee exposes an HTTP API for managing indexes and serving retrieval workloads. The current repo documentation and examples focus on running the server directly and calling its API endpoints.
-
-Current developer entry points:
-
-- [Getting Started](./docs/getting-started.md) for local build and run flows
-- [Hosted Docs](https://docs.endee.io/quick-start) for product documentation
-- [Release Notes 1.0.0](https://github.com/endee-io/endee/releases/tag/1.0.0) for recent platform changes
-
-## Docs and Links
-
-- [Getting Started](./docs/getting-started.md)
-- [Hosted Documentation](https://docs.endee.io/quick-start)
-- [Release Notes](https://github.com/endee-io/endee/releases/tag/1.0.0)
-- [Sparse Search](./docs/sparse.md)
-- [Filtering](./docs/filter.md)
-- [Backups](./docs/backup-system.md)
-
-## Community and Contact
-
-- Join the community on [Discord](https://discord.gg/5HFGqDZQE3)
-- Visit the website at [endee.io](https://endee.io/)
-- For trademark or branding permissions, contact [enterprise@endee.io](mailto:enterprise@endee.io)
-
-## Contributing
-
-We welcome contributions from the community to help make vector search faster and more accessible for everyone.
-
-- Submit pull requests for fixes, features, and improvements
-- Report bugs or performance issues through GitHub issues
-- Propose enhancements for search quality, performance, and deployment workflows
-
-## License
-
-Endee is open source software licensed under the **Apache License 2.0**. See the [LICENSE](./LICENSE) file for full terms.
-
-## Trademark and Branding
-
-“Endee” and the Endee logo are trademarks of Endee Labs.
-
-The Apache License 2.0 does not grant permission to use the Endee name, logos, or branding in a way that suggests endorsement or affiliation.
-
-If you offer a hosted or managed service based on this software, you must use your own branding and avoid implying it is an official Endee service.
-
-## Third-Party Software
-
-This project includes or depends on third-party software components licensed under their respective open-source licenses. Use of those components is governed by their own license terms.

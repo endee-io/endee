@@ -1,0 +1,41 @@
+# 🚀 AI Resume Analyzer using Endee (RAG)
+
+## 📌 Overview
+Full-stack AI system using Endee vector database for semantic search and resume analysis.
+
+## 🧠 Features
+- Resume parsing (PDF)
+- Embedding generation (384-dim)
+- Vector storage using Endee
+- Semantic search
+- RAG-based AI response
+
+## 🏗️ Tech Stack
+- Node.js (Backend)
+- React (Frontend)
+- Endee (Vector DB)
+- Sentence Transformers
+
+## ⚙️ Endee Integration
+- Created collection via API
+- Stored embeddings
+- Performed similarity search
+
+## ▶️ Run
+
+### Start Endee
+cd endee  
+./run.sh  
+
+### Backend
+cd backend  
+npm install  
+node server.js  
+
+### Frontend
+cd frontend  
+npm install  
+npm start  
+
+## 🎯 Use Case
+AI-powered resume screening using vector search and RAG.

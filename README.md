@@ -32,6 +32,18 @@ Endee combines vector search with filtering, sparse retrieval support, backup wo
 
 If you want the fastest path to evaluate Endee locally, start with the [Getting Started guide](./docs/getting-started.md) or the hosted docs at [docs.endee.io](https://docs.endee.io/quick-start).
 
+## 🚀 Challenge Submission: ResearchFlow AI
+
+This repository features **ResearchFlow AI**, a highly-performant Technical Document Retrieval application built natively on top of the Endee Vector Database. It seamlessly ingests technical PDFs or text, generates dense vector embeddings via `sentence-transformers`, indexes them rapidly into Endee, and powers a robust RAG (Retrieval-Augmented Generation) Q&A system.
+
+**Tech Stack Showcase:**
+- **Vector Database:** Endee (Local Docker Container)
+- **LLM / Inference Engine:** **Groq API**, utilizing the ultra-fast and state-of-the-art **`llama-3.3-70b-versatile`** model to answer deep logical queries instantly.
+- **Application UI:** Streamlit
+- **Document Parsing:** PyPDF
+
+You can review all of the submission source code inside the [`Research-FlowAI/`](./Research-FlowAI) directory!
+
 ## Why Endee
 
 - Built as a dedicated vector database for AI applications, search systems, and retrieval-heavy workloads.

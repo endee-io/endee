@@ -30,3 +30,28 @@ frontend/*
 
 # DS Store
 .DS_Store
+
+# --- Python & Streamlit (ResearchFlow AI) ---
+# Environments and Packages
+.venv/
+venv/
+env/
+Lib/
+Include/
+Scripts/
+
+# Environment Variables & Secrets
+.env
+.env.*
+
+# Python Cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Uploads & Temporary files
+*.pdf
+
+# Streamlit specific
+.streamlit/credentials.toml

@@ -1,16 +1,26 @@
-#!/bin/bash
-export PYTHONPATH=$PYTHONPATH:$(pwd)
+#!/usr/bin/env bash
 
-if [ "$1" == "serve" ]; then
-    echo "[Box] Starting API Server on http://localhost:8000 ..."
-    python3 box/server.py
-elif [ "$1" == "index" ]; then
-    echo "[Box] Indexing Codebase ..."
-    python3 -c "from box.intelligence import BoxIntelligence; BoxIntelligence().index_root('.')"
-else
-    echo "Box Autonomous Engine"
+# Box Autonomous AI Engine - UNIX Launcher
+# Compatible with Linux, macOS, and BSD
+
+# Get the directory of the script
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+export PYTHONPATH="$PYTHONPATH:$SCRIPT_DIR"
+
+# Check if help was requested or no arguments
+if [ -z "$1" ]; then
+    echo "Box Autonomous AI Engine"
+    echo ""
     echo "Usage:"
-    echo "  ./box.sh serve   - Start the background API server"
-    echo "  ./box.sh index   - Re-index the codebase"
-    echo "  ./box.sh build   - Run the original training pipeline"
+    echo "  ./box.sh index      - Scan and index the codebase"
+    echo "  ./box.sh search     - Semantic/Hybrid lookup"
+    echo "  ./box.sh serve      - Start the background API server"
+    echo "  ./box.sh backup     - Manage snapshots"
+    echo "  ./box.sh status     - System health check"
+    echo "  ./box.sh build      - Run the dataset building pipeline"
+    exit 0
 fi
+
+# Pass all arguments to the box.cli module
+python3 -m box.cli "$@"
+exit $?

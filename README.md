@@ -43,21 +43,35 @@
 ## 🚀 Getting Started
 
 ### 1 — One-Click Setup (Master Suite)
-Initialize the entire environment (Python, PATH, Initial Indexing) with a single command:
+Initialize the entire environment (Dependencies, PATH, and Initial Indexing) with a single command:
+
+**Windows:**
 ```powershell
 .\setup.bat
 ```
 
+**Linux / macOS / BSD:**
+```bash
+chmod +x setup.sh && ./setup.sh
+```
+
 ### 2 — Starting the Intelligence Layer
 Launch the Box API Server to enable IDE and external tool connectivity:
-```powershell
-box serve
+```bash
+box serve  # (Or ./box.sh serve)
 ```
 
 ### 3 — Building the Sidebar (VSCode)
 To use the included IDE extension, use our build tool to compile the TypeScript source:
+
+**Windows:**
 ```powershell
 .\ide\vscode\build.bat
+```
+
+**Linux / macOS / BSD:**
+```bash
+chmod +x ide/vscode/build.sh && ./ide/vscode/build.sh
 ```
 
 ---
@@ -92,14 +106,23 @@ Or use the context-aware `develop` API via the VSCode extension commands (`Box: 
 | **`ide/`** | 🧩 IDE extension source code and build tools. |
 | **`docs/`** | 📖 Comprehensive technical guides (Memory, Filtering, Sparse). |
 | **`data/`** | 📂 Sample datasets for initial evaluation. |
-| **`box.bat`** | 🚀 Unified entry point for the Windows CLI. |
+| **`box.bat` / `box.sh`** | 🚀 Unified entry points for Windows and UNIX-like systems. |
 
 ## ⚙️ CLI Reference
+
+Use `box` (if installed to PATH) or `./box.sh` / `.\box.bat`:
 
 - `box index` - Scans and indexes the current codebase.
 - `box search "query"` - Performs a hybrid semantic lookup.
 - `box status` - Real-time system health and connectivity check.
 - `box backup create` - Generates a snapshot of your index.
+
+---
+
+## 🏗️ Technical Details
+- **Architecture**: Multi-layered (DB <-> API <-> IDE)
+- **Platforms**: Windows, Linux (Ubuntu/Debian/RHEL/Fedora), macOS (arm64), FreeBSD/OpenBSD/NetBSD.
+- **Dependencies**: Python 3.10+, Node.js (for IDE), C++17 Compiler (for core build).
 
 ## 🛡️ License
 
@@ -107,5 +130,5 @@ Endee is open-source software licensed under the **Apache License 2.0**. For ent
 
 ---
 <p align="center">
-    <b>Built with performance in mind by the Endee Community.</b>
+    <b>Built with performance in mind for all major operating systems.</b>
 </p>

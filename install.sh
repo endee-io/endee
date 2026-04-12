@@ -150,6 +150,20 @@ install_dependencies_macos() {
 }
 
 # ****************************************
+# BSD (FreeBSD/OpenBSD/NetBSD)
+# ****************************************
+install_dependencies_bsd() {
+    echo "--- Detected BSD-family ---"
+    if command -v pkg >/dev/null 2>&1; then
+        log "Installing dependencies via pkg..."
+        sudo pkg install -y cmake openssl curl git unzip python3
+    else
+        error "pkg manager not found. Please install dependencies manually (cmake, openssl, curl, git)."
+        exit 1
+    fi
+}
+
+# ****************************************
 # DISTRO FACTORY
 # ****************************************
 distro_factory() {
@@ -162,8 +176,14 @@ distro_factory() {
         Darwin)
             OS_FAMILY="mac"
             ;;
+        *BSD)
+            OS_FAMILY="bsd"
+            ;;
+        FreeBSD|OpenBSD|NetBSD)
+            OS_FAMILY="bsd"
+            ;;
         *)
-            error "Unsupported kernel: $uname_s"
+            error "Unsupported kernel: $(uname -s)"
             exit 1
             ;;
     esac
@@ -175,6 +195,12 @@ distro_factory() {
             error "Unsupported macOS architecture: $OS_ARCH. Only Apple Silicon (arm64/M-series) is supported."
             exit 1
         fi
+        return 0
+    fi
+
+    if [[ "$OS_FAMILY" == "bsd" ]]; then
+        DISTRO_ID="bsd"
+        INSTALLER_FUNC="install_dependencies_bsd"
         return 0
     fi
 

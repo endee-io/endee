@@ -30,3 +30,17 @@ frontend/*
 
 # DS Store
 .DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+env/
+venv/
+.venv/
+*.env
+.env
+
+# pytest
+.pytest_cache/

@@ -54,10 +54,10 @@ Endee powers the core retrieval engine of ResearchFlow AI. It was chosen for its
    You will need to configure your OpenAI API key to power the generation side of the RAG pipeline.
    ```bash
    # Linux / macOS
-   export OPENAI_API_KEY="your-openai-api-key"
+   export GROQ_API_KEY="your-groq-api-key"
    
    # Windows (Powershell)
-   $env:OPENAI_API_KEY="your-openai-api-key"
+   $env:Groq_API_KEY="your-Groq-api-key"
    ```
 
 5. **Start Endee Vector DB:**

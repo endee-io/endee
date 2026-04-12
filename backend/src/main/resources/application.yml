@@ -1,0 +1,42 @@
+spring:
+  application:
+    name: resume-matcher
+  servlet:
+    multipart:
+      max-file-size: 10MB
+      max-request-size: 10MB
+
+server:
+  port: 8080
+  error:
+    include-message: always
+    include-binding-errors: always
+
+# Endee Vector Database Configuration
+endee:
+  base-url: ${ENDEE_BASE_URL:http://localhost:8090}
+  index-name: ${ENDEE_INDEX_NAME:resume_embeddings}
+  vector-dimension: ${ENDEE_VECTOR_DIMENSION:1536}
+  similarity-metric: ${ENDEE_SIMILARITY_METRIC:cosine}
+
+# OpenAI Configuration
+openai:
+  api-key: ${OPENAI_API_KEY:your-api-key-here}
+  model: ${OPENAI_EMBEDDING_MODEL:text-embedding-ada-002}
+  max-retries: 3
+
+# Application Settings
+app:
+  embedding:
+    batch-size: 10
+    cache-enabled: true
+  resume:
+    max-file-size: 10485760 # 10MB
+    allowed-formats: pdf,doc,docx,txt
+
+logging:
+  level:
+    com.resumematcher: DEBUG
+    org.springframework.web: INFO
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} - %msg%n"

@@ -1,0 +1,44 @@
+[
+  {
+    "content": "How to crack TCS Ninja Interview: The interview process consists of three rounds - Ninja Test, Technical Interview, and HR Interview. For the Ninja Test, focus on aptitude questions, basic programming concepts in C/C++/Java, and verbal ability. In the technical interview, expect questions on data structures, OOPs concepts, database management, and your final year project. Common questions include: Explain polymorphism, difference between SQL and NoSQL, write a program to find factorial using recursion. For HR round, prepare answers for 'Tell me about yourself', 'Why TCS?', 'Where do you see yourself in 5 years?'",
+    "metadata": {
+      "category": "interview_experience",
+      "company": "TCS",
+      "role": "Ninja",
+      "difficulty": "easy"
+    }
+  },
+  {
+    "content": "Top 20 DSA Patterns for Placement: 1) Two Pointers - used for sorted arrays, palindrome problems. 2) Sliding Window - subarray problems, longest substring. 3) Binary Search - search in sorted arrays. 4) BFS/DFS - tree and graph traversal. 5) Dynamic Programming - optimization problems. 6) Greedy Algorithms - interval scheduling. 7) Backtracking - combination/ permutation problems. 8) Hash Map - frequency counting, two sum. 9) Heap/Priority Queue - top K elements. 10) Trie - prefix problems. Master these patterns and you can solve 80% of interview questions.",
+    "metadata": {
+      "category": "dsa_notes",
+      "topic": "patterns",
+      "difficulty": "medium"
+    }
+  },
+  {
+    "content": "Common HR Interview Questions and Answers: 1) Tell me about yourself - Start with education, mention key projects, highlight relevant skills. 2) What are your strengths? - Mention 2-3 strengths with examples. 3) What are your weaknesses? - Be honest but show improvement. 4) Why should we hire you? - Match your skills with job requirements. 5) Where do you see yourself in 5 years? - Show ambition but be realistic. 6) Why do you want to work here? - Research the company. 7) What is your greatest achievement? - Use STAR method. 8) How do you handle pressure? - Give specific examples. 9) Do you prefer working alone or in a team? - Show flexibility. 10) Any questions for us? - Always have 2-3 questions ready.",
+    "metadata": {
+      "category": "hr_questions",
+      "topic": "common_questions",
+      "difficulty": "easy"
+    }
+  },
+  {
+    "content": "Resume Writing Tips for Freshers: 1) Keep it to one page - recruiters spend only 6-7 seconds initially. 2) Use action verbs - 'Developed', 'Implemented', 'Optimized' instead of 'Worked on'. 3) Quantify achievements - 'Improved performance by 30%' not 'Improved performance'. 4) Tailor for each company - match keywords from job description. 5) Include projects with tech stack - mention technologies used. 6) Add GitHub/Live links - showcase your work. 7) Education section - include CGPA if above 7.5. 8) Skills section - categorize into Programming, Web Dev, Tools, etc. 9) Certifications - include relevant ones only. 10) Avoid: photos, hobbies unless relevant, personal details like address, fake information.",
+    "metadata": {
+      "category": "resume_tips",
+      "topic": "freshers",
+      "difficulty": "easy"
+    }
+  },
+  {
+    "content": "Infosys System Engineer Interview Experience: Round 1 - Online Assessment with 3 sections: Reasoning (15 questions), Math (10 questions), and Verbal (10 questions). Time limit: 45 minutes. Round 2 - Technical Interview focused on: One programming question (array manipulation or string operations), Database normalization and SQL queries, OOPs concepts with real-world examples, Discussion about internship projects. Key preparation areas: Practice coding on arrays and strings, revise DBMS basics, understand SDLC models, prepare 2-3 projects thoroughly. Round 3 - HR Interview - Standard questions about relocation, night shifts, career goals, and family background.",
+    "metadata": {
+      "category": "interview_experience",
+      "company": "Infosys",
+      "role": "System Engineer",
+      "difficulty": "easy"
+    }
+  }
+]

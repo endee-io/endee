@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Campus Placement Copilot</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Campus Placement Copilot</h1>
+            <p class="subtitle">Ask questions about interviews, DSA, HR rounds, and resume tips</p>
+        </header>
+
+        <main>
+            <!-- Input Section -->
+            <div class="input-section">
+                <div class="input-wrapper">
+                    <input 
+                        type="text" 
+                        id="question-input" 
+                        placeholder="e.g., How to prepare for TCS interview?"
+                        autocomplete="off"
+                    >
+                    <button id="search-btn" class="btn-primary">Search</button>
+                </div>
+            </div>
+
+            <!-- Loading State -->
+            <div id="loading" class="loading-state hidden">
+                <div class="spinner"></div>
+                <p>Finding relevant information...</p>
+            </div>
+
+            <!-- Error State -->
+            <div id="error" class="error-state hidden">
+                <div class="error-icon">⚠️</div>
+                <p id="error-message">Something went wrong. Please try again.</p>
+            </div>
+
+            <!-- Answer Section -->
+            <div id="answer-section" class="answer-section hidden">
+                <h2>Answer</h2>
+                <div id="answer-content" class="answer-content"></div>
+            </div>
+
+            <!-- Sources Section -->
+            <div id="sources-section" class="sources-section hidden">
+                <h2>Retrieved Sources</h2>
+                <div id="sources-list" class="sources-list"></div>
+            </div>
+
+            <!-- Initial State -->
+            <div id="initial-state" class="initial-state">
+                <div class="welcome-card">
+                    <h2>👋 Welcome!</h2>
+                    <p>I can help you with placement preparation. Try asking:</p>
+                    <ul class="example-questions">
+                        <li>How to crack TCS Ninja interview?</li>
+                        <li>What are important DSA patterns?</li>
+                        <li>Common HR interview questions?</li>
+                        <li>Tips for writing a good resume?</li>
+                        <li>Infosys interview experience?</li>
+                    </ul>
+                </div>
+            </div>
+        </main>
+
+        <footer>
+            <p>Powered by RAG + Endee Vector Database</p>
+        </footer>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>

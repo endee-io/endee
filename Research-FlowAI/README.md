@@ -1,7 +1,7 @@
 # ResearchFlow AI 🧠
 
 ## Project Overview
-ResearchFlow AI is an advanced Retrieval-Augmented Generation (RAG) application designed for technical document retrieval and synthesis. Built natively for the **Endee Vector Database Challenge**, this tool allows users to upload complex technical texts, convert them into vector embeddings, and seamlessly retrieve the most relevant chunks to answer queries via GPT-4o-mini.
+ResearchFlow AI is an advanced Retrieval-Augmented Generation (RAG) application designed for technical document retrieval and synthesis. Built natively for the **Endee Vector Database Challenge**, this tool allows users to upload complex technical texts, convert them into vector embeddings, and seamlessly retrieve the most relevant chunks to answer queries via llama-3.3-70b-versatile.
 
 By leveraging the high-speed Endee Vector Database, ResearchFlow AI performs extremely efficient cosine similarity searches, routing context-aware knowledge to Large Language Models in milliseconds.
 
@@ -16,7 +16,7 @@ graph TD
     A -->|4. Ask Question| E[Embed Query]
     E -->|5. 384-dim Query Vector| D
     D -->|6. Top 2 Context Chunks| F[Prompt Builder]
-    F -->|7. Assembled System Prompt| G[OpenAI GPT-4o-mini]
+    F -->|7. Assembled System Prompt| G[Groq=llama-3.3-70b-versatile]
     G -->|8. RAG Generated Answer| A
 ```
 

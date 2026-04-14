@@ -1,0 +1,6 @@
+streamlit
+sentence-transformers
+PyPDF2
+requests
+ollama
+endee

@@ -1,0 +1,4 @@
+Endee is a vector database designed for AI applications.
+It helps store embeddings and perform similarity search.
+AI systems use vector databases in retrieval augmented generation.
+Machine learning models generate embeddings from text.

@@ -8,7 +8,7 @@ on:
 
 
 # ONYLY ONE BENCHMARK RUN AT A TIME PER PR  
-# IF SAME PR COMMENT UPDATED FROM BENCHMARK/DENSE TO BENCHMARK/HYBRID, CANCEL INPROGRESS RUN AND START UPDATED ONE  
+# IF SAME PR COMMENT UPDATED FROM BENCHMARK/DENSE TO BENCHMARK/HYBRID, CANCEL INPROGRESS RUN AND START UPDATED ONE
 concurrency:
   group: vectordb-benchmark-pr${{ github.event.issue.number }}
   cancel-in-progress: true
@@ -29,6 +29,10 @@ jobs:
   validate-command:
     name: Validate Command
     runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: read
+      statuses: write
 
     # ONLY RUN ON PR COMMENTS(NOT ON PLAIN ISSUE COMMENTS)
     if: |
@@ -87,7 +91,7 @@ jobs:
               username: context.payload.comment.user.login,
             });
             const level   = perm.permission;
-            const allowed = ['admin', 'write'].includes(level);
+            const allowed = ['admin'].includes(level);
             core.setOutput('authorized', String(allowed));
  
             if (!allowed) {
@@ -103,6 +107,7 @@ jobs:
         if: steps.parse.outputs.mode != '' && steps.authz.outputs.authorized == 'true'
         uses: actions/github-script@v7
         with:
+          github-token: ${{ secrets.WORKFLOW_PAT }} 
           script: |
             await github.rest.reactions.createForIssueComment({
               owner:      context.repo.owner,
@@ -214,6 +219,7 @@ jobs:
             --key-name ${{ secrets.ENDEE_PEM }} \
             --security-group-ids ${{ secrets.VECTORDBBENCH_SERVER_GROUP_ID }} \
             --subnet-id ${{ secrets.AWS_SUBNET_ID }} \
+            --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":30,"VolumeType":"gp3"}}]' \
             --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$ENDEE_INSTANCE_NAME}]" \
             --query 'Instances[0].InstanceId' \
             --output text)
@@ -496,6 +502,15 @@ jobs:
               sudo systemctl enable docker 
 
               echo "DOCKER INSTALLED: \$(docker --version)"
+
+              # Download docker compose binary directly
+              sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-\$(uname -s)-\$(uname -m)" -o /usr/local/bin/docker-compose
+
+              # Give execute permission
+              sudo chmod +x /usr/local/bin/docker-compose
+
+              mkdir -p ~/.docker/cli-plugins
+              cp /usr/local/bin/docker-compose ~/.docker/cli-plugins/docker-compose
             fi
 
             # # RUN WITHOUT SUDO — ADD username TO DOCKER GROUP
@@ -514,11 +529,12 @@ jobs:
             arc=\$(grep -o 'avx2\|avx512\|neon\|sve2' /proc/cpuinfo | sort -u)
             echo "ARCHITECTURE: \$arc"
 
-            
+            # UPDATE ULIMIT OF OS 
+            ulimit -n 5000
 
             # BUILD ENDEE IMAGE
             echo "BUILDING ENDEE IMAGE"
-            sudo docker build --ulimit nofile=100000:100000 --build-arg BUILD_ARCH="\$arc" --build-arg DEBUG=true -t endee-oss:latest -f ./infra/Dockerfile .
+            sudo docker build --build-arg BUILD_ARCH="\$arc" --build-arg DEBUG=true -t endee-oss:latest -f ./infra/Dockerfile .
 
             # DOWN THE EXISTING CONTAINER IF EXISTS
             echo "DOWNING THE EXISTING CONTAINER IF EXISTS"
@@ -526,18 +542,7 @@ jobs:
 
             # RUN THE ENDEE CONTAINER
             echo "RUNNING ENDEE CONTAINER"
-            sudo docker run -d -p 8080:8080 -v endee-data:/data -e NDD_AUTH_TOKEN="" --name endee-server endee-oss:latest
-
-            # CHECK IF THE CONTAINER IS RUNNING
-            echo "CHECKING IF THE CONTAINER IS RUNNING"
-            if sudo docker ps | grep -q endee-server; then
-              echo "ENDEE CONTAINER IS RUNNING"
-            else
-              echo "ENDEE CONTAINER IS NOT RUNNING"
-              exit 1
-            fi
-
-
+            sudo docker-compose up -d
 
             
           ENDSSH
@@ -885,7 +890,7 @@ jobs:
           chmod 400 "$HOME/.ssh/${{ secrets.BENCHMARKING_PEM }}"
           ssh-keyscan -H ${{ needs.provision-servers.outputs.benchmark_server_ip }} >> "$HOME/.ssh/known_hosts"
 
-      # ─── DENSE: fetch single timestamped result file ──────────────────
+      # ─── DENSE: fetch single timestamped result file ────────────────── 
       - name: Fetch Result JSON — Dense
         id: fetch_dense
         if: needs.validate-command.outputs.mode == 'dense'
@@ -1251,4 +1256,3 @@ jobs:
                 body,
               });
             }
-

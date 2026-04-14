@@ -1,0 +1,43 @@
+spring:
+  application:
+    name: spring-ai-rag
+  profiles:
+    active: ${APP_PROFILE:dev}
+
+  ai:
+    openai:
+      api-key: ${OPENAI_API_KEY}
+      embedding:
+        options:
+          model: text-embedding-3-small
+    vectorstore:
+      milvus:
+        client:
+          host: "localhost"
+          port: 19530
+          username: "root"
+          password: "milvus"
+        databaseName: "default"
+        collectionName: "vector_store"
+        embeddingDimension: 1536
+        indexType: IVF_FLAT
+        metricType: COSINE
+        initialize-schema: true
+
+  sfg:
+    aiapp:
+      vectorStorePath:
+        - classpath:/vectorstore.json
+      documentsToLoad:
+        - classpath:/towvehicles.txt
+        # Sportsman 212 - Weight 3,458 lbs
+        - https://yamahaoutboards.com/outboards/350-150-hp/in-line-4/f150-(i4)/pb_spt_open_212_f150xb_9-10-2020-occ
+        # Sportsman 232 - Weight 5,001  lbs
+        - https://yamahaoutboards.com/outboards/350-150-hp/v6-4-2l/f300-(4-2l)/pb_spt_open-232_f300xsb2_6-29-2023_occ
+        # Sportsman 322 - Weight 12,469 lbs
+        - https://yamahaoutboards.com/outboards/xto-offshore/v8-5-6l/xf425/pb_spt_open-322_tw_lxf425usb2_8-26-2021_occ
+        # Scout 380 LXF - Weight 19,443 lbs
+        - https://yamahaoutboards.com/outboards/xto-offshore/v8-5-6l/xf425/pb_sct_380lxf_tr_xf425_8-30-2018_occ
+
+
+

@@ -1,0 +1,18 @@
+spring:
+  output:
+    ansi:
+      enabled: ALWAYS
+
+  jackson:
+    deserialization:
+      FAIL_ON_UNKNOWN_PROPERTIES: false
+
+logging:
+  level:
+    org.springframework: INFO
+    org.springframework.web: DEBUG
+  pattern:
+    console: "%clr(%d{yy-MM-dd E HH:mm:ss.SSS}){blue} %clr(%-5p) %clr(%logger{0}){blue} %clr(%m){yellow}%n"
+    file: "%d{yyyy-MM-dd} %time %level %logger{36} - %msg%n"
+
+

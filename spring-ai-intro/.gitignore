@@ -14,7 +14,7 @@ target/
 !**/src/main/**/target/
 !**/src/test/**/target/
 >>>>>>> main
-spring-ai-rag/volumes/
+
 ### STS ###
 .apt_generated
 .classpath

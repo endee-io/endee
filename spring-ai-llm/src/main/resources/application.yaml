@@ -1,0 +1,5 @@
+spring:
+  application:
+    name: spring-ai-llm
+  profiles:
+    active: ${APP_PROFILE:dev}

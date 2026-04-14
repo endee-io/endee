@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>403 Forbidden - Acesso Negado</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f8f9fa;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+
+        .error-container {
+            text-align: center;
+            padding: 20px;
+            background-color: #fff;
+            border-radius: 5px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+
+        h1 {
+            color: #dc3545;
+        }
+
+        p {
+            color: #6c757d;
+        }
+
+        .dependency {
+            margin-top: 20px;
+        }
+
+        .dependency a {
+            text-decoration: none;
+            color: blue;
+        }
+    </style>
+</head>
+<body>
+<div class="error-container">
+    <h1>403 Forbidden - Acesso Negado</h1>
+    <p>Desculpe, você não tem permissão para acessar esta página.</p>
+
+    <div class="dependency">
+        <p>Para resolver o problema, você pode adicionar a seguinte dependência do Spring Boot:</p>
+        <code>
+            &lt;dependency&gt;<br>
+            &nbsp;&nbsp;&lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;<br>
+            &nbsp;&nbsp;&lt;artifactId&gt;spring-boot-starter-security&lt;/artifactId&gt;<br>
+            <br>
+            &lt;/dependency&gt;
+        </code>
+        <p><a href="https://mvnrepository.com/artifact/org.springframework.security/spring-security-web" target="_blank">Clique aqui para mais informações</a></p>
+    </div>
+</div>
+</body>
+</html>

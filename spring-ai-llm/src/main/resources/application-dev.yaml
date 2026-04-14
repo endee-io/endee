@@ -1,0 +1,54 @@
+spring:
+  output:
+    ansi:
+      enabled: ALWAYS
+
+  ai:
+    #OpenAI
+    openai:
+      api-key: ${OPENAI_API_KEY}
+      embedding:
+        options:
+          model: text-embedding-3-small
+    #Anthropic
+    anthropic:
+      api-key: ${ANTHROPIC_API_KEY}
+      chat:
+        options:
+          mode: "claude-3-5-sonnet-20241022"
+#    openai:
+#      api-key: ${DEEPSEEK_API_KEY}
+#      base_url: https://api.deepseek.com
+#      chat_model: deepseek-chat
+    vertex:
+      ai:
+        gemini:
+          projectId: ${GEMINI_PROJECT_ID}
+          location: us-east4
+        chat:
+          options:
+            model: gemini-1.5-pro-001
+            temperature: 0.5
+        transport: REST
+
+evaluation:
+  geturl: http://172.17.0.1:8000/
+
+logging:
+  level:
+    org.springframework: INFO
+    org.springframework.web: DEBUG
+  pattern:
+    console: "%clr(%d{yy-MM-dd E HH:mm:ss.SSS}){blue} %clr(%-5p) %clr(%logger{0}){blue} %clr(%m){yellow}%n"
+    file: "%d{yyyy-MM-dd} %time %level %logger{36} - %msg%n"
+
+server:
+  error:
+    whitelabel:
+      enabled: false
+    path: error
+
+  data:
+    mongodb:
+      uri: mongodb://root:s3cr3txX!@localhost:27017
+    database: llm

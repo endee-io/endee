@@ -1,0 +1,249 @@
+
+# ==================== BIRD VIEW OF THIS FILE =========================
+# PR opened
+#    ↓
+# CI workflow runs (lint, unit tests)
+#    ↓ passes
+# This workflow wakes up
+#    ↓
+# "Was it a PR? Did CI pass? Can I find the PR?"
+#    ↓ yes to all
+# Posts a comment on the PR with benchmark menu
+# Sets a yellow pending status on the commit
+
+name: Benchmark Menu
+
+# ========================= TRIGGER EVENT =========================
+on:
+
+  # ---- TRIGGER WHEN PREVIOUS WORKFLOW COMPLETED ( PREVIOUS WORKFLOW WAS CONTINUOUS INTEGRATION)  
+  workflow_run:
+    workflows: [ Continuous Integration ]
+    types: [ completed ]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  statuses: write 
+# ========================= JOBS =========================
+jobs:
+
+  # ---- JOB 1: FIGURE OUT WHICH PR CAUSED THIS CI RUN
+  # WHEN WORKFLOW_RUN TRIGGER EVENT IS FIRES, WE GET INTO DETACHED CONTEXT. SO WE LOST CONTEXT OF THE PR TRIGGERED CI.
+  # WE NEED TO FIGURE OUT WHICH PR CAUSED THIS CI RUN.
+
+  resolve-pr:
+    name: Retrieve PR Information
+    runs-on: ubuntu-latest
+    if: |
+      github.event.workflow_run.conclusion == 'success' && 
+      github.event.workflow_run.event == 'pull_request'
+    
+    outputs:
+      # PR NUMBER IS PULL REQUEST NUMBER UNIQUE IDENTIFIER
+      # HEAD SHA IS THE SPECIFIC HASH OF THE LAS COMMIT IN SOURCE BRANCH
+      # HEAD REF IS THE NAME OF THE SOURCE BRANCH BEING MERGED
+      pr_number: ${{ steps.find-pr.outputs.pr_number }}
+      head_sha: ${{ steps.find-pr.outputs.head_sha }}
+      head_ref: ${{ steps.find-pr.outputs.head_ref }}
+
+    steps:
+      - name: Find PR for this CI run 
+        # USES CONTAIN SOME FUNCTIONS IT'S LIKE IMPORT AND WITH IS HOW YOU CALL THAT WITH ARGUMENTS
+        id: find-pr
+        # GITHUB-SCRIPT@V7 IS SPECIAL ACTION IT NEEDS SCRIPT AND RUNS IT AS JAVASCRIPT
+        # ALSO WITH PRE-INJECTED ARGUMENTS THAT IS GITHUB, CONTEXT, AND CORE
+        # GITHUB: AUTHENTICATED GITHUB API CLIENT
+        # CONTEXT: INFO ABOUT CURRENT WORKFLOW RUN, REPO AND EVENT PAYLOAD
+                # context
+                #     ├── repo
+                #     │     ├── owner        → 'my-org'
+                #     │     └── repo         → 'my-repo'
+                #     │
+                #     ├── payload            → the raw webhook event that triggered the workflow
+                #     │     └── workflow_run            (specific to your workflow_run event)
+                #     │           ├── head_sha          → full commit SHA
+                #     │           ├── head_branch       → branch name
+                #     │           ├── conclusion        → 'success' | 'failure' | null
+                #     │           ├── html_url          → link to the CI run
+                #     │           └── id                → run ID
+                #     │
+                #     ├── eventName          → 'workflow_run' | 'pull_request' | 'push' etc.
+                #     ├── sha                → commit SHA of the current workflow
+                #     ├── ref                → 'refs/heads/main'
+                #     ├── workflow           → name of the current workflow
+                #     ├── runId              → unique ID of this run
+                #     ├── runNumber          → incrementing number (1, 2, 3...)
+                #     │
+                #     ├── actor              → username who triggered the workflow
+                #     ├── job                → current job id
+                #     │
+                #     └── issue              → (available on PR/issue events)
+                #           ├── owner
+                #           ├── repo
+                #           └── number       → PR or issue number
+        # CORE: UTILITY FUNCTIONS FOR WORKFLOW ACTIONS LIKE SETOUTPUT, INFO AND WARNING LOGGING
+          # CORE IS BRIDGE BETWEEN WORKFLOW AND SCRIPT WHICH WILL RUN IN THE GITHUB ACTIONS RUNNER SO THAT WE ABLE TO SEE IT'S OUTPUT 
+                # core
+                #   │   
+                #   ├── OUTPUTS
+                #   │     └── setOutput(name, value)     → sends value out to workflow outputs
+                #   │
+                #   ├── LOGGING
+                #   │     ├── info('message')            → plain white log line
+                #   │     ├── warning('message')         → yellow job continues
+                #   │     ├── error('message')           → red   job continues
+                #   │     ├── debug('message')           → only visible if debug mode is on
+                #   │     └── notice('message')          → blue   highlighted in log
+                #   │
+                #   ├── FAILURE CONTROL
+                #   │     └── setFailed('message')       → marks step failed + stops job
+                #   │
+                #   ├── INPUT READING
+                #   │     └── getInput('name')           → reads a `with:` input if action has one
+                #   │
+                #   ├── ENVIRONMENT
+                #   │     ├── exportVariable(name, val)  → sets an env variable for next steps
+                #   │     └── addPath(path)              → adds to PATH for next steps
+                #   │
+                #   ├── MASKING
+                #   │     └── setSecret('value')         → masks a value in all logs (shows as ***)
+                #   │
+                #   └── GROUPING (log formatting)
+                #         ├── startGroup('title')        → collapses log lines under a title
+                #         └── endGroup()                 → closes the group
+
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const headSha = context.payload.workflow_run.head_sha;
+            const headRef = context.payload.workflow_run.head_branch;
+
+            core.setOutput('head_sha', headSha);
+            core.setOutput('head_ref', headRef);
+
+            // FIND THE OPEN PR WHOSE HEAD MATCHES THIS SHA 
+            const { data: prs } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              head: `${context.repo.owner}:${headRef}`,
+            });
+
+            const pr = prs.find(p => p.head.sha === headSha);
+            if (!pr) {
+              core.warning(`No Open PR Found for SHA ${headSha} - skipping`);
+              core.setOutput('pr_number', '');
+              return
+            }
+            core.info(`Found PR #${pr.number}`);
+            core.setOutput('pr_number', String(pr.number));
+
+
+  # ========================= POST BENCHMARK OPTIONS COMMENT ( CI PASSED, PR FOUND)  =========================
+
+  post-menu:
+    name: Benchmark Options
+    # NEEDS DO TWO THING- A) CONTROLS EXECUTION - RESOLVE-PR RUN FIRST THEN POST-MENU OTHERWISE BOTH RUN SIMULTANEOUSLY
+    # B) GIVE ACCESS TO THAT JOB'S OUTPUT:  `needs.resolve-pr.outputs.*` inside `post-menu`. Without declaring `needs`, WE CANNOT ANOTHER JOB'S OUTPUTS — the reference would be empty.
+    # needs.resolve-pr
+    # ├── result              → 'success' | 'failure' | 'skipped' | 'cancelled'
+    # └── outputs
+    #       ├── pr_number     → '42'
+    #       ├── head_sha      → 'abc123...'
+    #       └── head_ref      → 'feature/my-branch'
+    needs: resolve-pr
+    runs-on: ubuntu-latest
+    if: needs.resolve-pr.outputs.pr_number != ''
+
+    steps:
+      - name: Post or Update Benchmark Menu comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const prNumber = Number('${{ needs.resolve-pr.outputs.pr_number }}');
+            const sha = '${{ needs.resolve-pr.outputs.head_sha }}';
+            const branch = '${{ needs.resolve-pr.outputs.head_ref }}';
+            const ciRunUrl = context.payload.workflow_run.html_url;
+
+            const body = [
+              `## VectorDB Benchmark - Ready To Run`,
+              ``,
+              `> **CI Passed** ([lint + unit tests] (${ciRunUrl})) - benchmark options unlocked.`,
+              ``,
+              `Post one of the command below. Only members with **write access** can trigger runs.`,
+              ``,
+              `--------`, 
+              ``,
+              `### Available Modes`,
+              ``,
+              `| Mode | Command | What runs |`,
+              `|------|---------|-----------|`,
+              `| Dense  | \`/correctness_benchmarking dense\`  | HNSW insert throughput · query P50/P95/P99 · recall@10 · concurrent QPS |`,
+              `| Hybrid | \`/correctness_benchmarking hybrid\` | Dense + sparse BM25 fusion · same suite + fusion latency overhead |`,
+              ``,
+              `---`,
+              ``,
+              `### Infrastructure`,
+              ``,
+              `| Server | Role | Instance |`,
+              `|--------|------|----------|`,
+              `| Endee Server | Endee VectorDB — code from this branch | \`t2.large\` |`,
+              `| Benchmark Server | Benchmark runner | \`t3a.large\` |`,
+              ``,
+              `Both servers start on demand and are **always terminated** after the run — pass or fail.`,
+              ``,
+              `---`,
+              ``,
+              `### How Correctness Benchmarking Works`,
+              `\`\`\``,
+              `1. Post /correctness_benchmarking <mode>`,
+              `2. Endee Server Create  →  this branch's code deployed  →  Endee starts in chosen mode`,
+              `3. Benchmark Server Create  →  benchmark suite transferred`,
+              `4. Benchmark Server runs correctness benchmarking against Endee Server`,
+              `5. Results posted back here  →  pass/fail + full metrics table`,
+              `6. Both servers terminated   →  always, even on failure`,
+              `\`\`\``,
+              ``,
+              `> After a new push, CI must pass again before this menu reappears.`,
+            ].join('\n');
+
+            // UPSERT: UPDATE EXISTING COMMENT OR CREATE NEW ONE
+            // FETCH ALL COMMENTS FOR THIS PR
+            const { data: comments } = await github.rest.issues.listComments({
+              owner, repo, issue_number: prNumber
+            });
+            // When GitHub Actions runs a workflow, it acts on behalf of a special built-in account called github-actions[bot]
+            const existing = comments.find(c => 
+              c.user.login === 'github-actions[bot]' &&
+              c.body.includes('VectorDB Benchmark')
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+              
+              owner, repo, comment_id: existing.id, body
+              });
+              core.info(`Updated existing comment #${existing.id}`);
+            } else {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: prNumber, body,
+                });
+                core.info(`Created New Benchmark Menu Comment`);
+            }
+
+      - name: Set benchmark commit status -> pending
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.repos.createCommitStatus({
+              owner:       context.repo.owner,
+              repo:        context.repo.repo,
+              sha:         '${{ needs.resolve-pr.outputs.head_sha }}',
+              state:       'pending',
+              description: 'CI passed — waiting for /benchmark command',
+              context:     'ci/vectordb-benchmark',
+            });

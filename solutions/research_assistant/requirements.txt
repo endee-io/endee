@@ -1,0 +1,4 @@
+sentence-transformers
+requests
+datasets
+pandas

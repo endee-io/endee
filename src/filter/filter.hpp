@@ -472,45 +472,7 @@ public:
     }
 
     void add_filters_from_json(ndd::idInt numeric_id, const std::string& filter_json) {
-        try {
-            auto j = nlohmann::json::parse(filter_json);
-            for(const auto& [field, value] : j.items()) {
-                FieldType type = FieldType::Unknown;
-                if(value.is_boolean()) {
-                    type = FieldType::Bool;
-                } else if(value.is_number()) {
-                    type = FieldType::Number;
-                } else if(value.is_string()) {
-                    type = FieldType::String;
-                }
-
-                if(type == FieldType::Unknown) {
-                    LOG_DEBUG("Unsupported filter type for field '" << field << "'");
-                    continue;
-                }
-
-                if(!register_field_type(field, type)) {
-                    LOG_ERROR(1205, index_id_, "Type mismatch for field '" << field << "'");
-                    continue;
-                }
-
-                if(value.is_string()) {
-                    add_to_filter(field, value.get<std::string>(), numeric_id);
-                } else if(value.is_number()) {
-                    uint32_t sortable_val;
-                    if(value.is_number_integer()) {
-                        sortable_val = ndd::filter::int_to_sortable(value.get<int>());
-                    } else {
-                        sortable_val = ndd::filter::float_to_sortable(value.get<float>());
-                    }
-                    numeric_index_->put(field, numeric_id, sortable_val);
-                } else if(value.is_boolean()) {
-                    add_to_filter(field, value.get<bool>() ? "1" : "0", numeric_id);
-                }
-            }
-        } catch(const std::exception& e) {
-            LOG_ERROR(1206, index_id_, "Error adding filters: " << e.what());
-        }
+        add_filters_from_json_batch({{numeric_id, filter_json}});
     }
 
     void remove_filters_from_json(ndd::idInt numeric_id, const std::string& filter_json) {

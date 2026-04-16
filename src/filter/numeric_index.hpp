@@ -53,6 +53,14 @@ namespace ndd {
 
         // --- Bucket Structure (Hybrid) ---
         struct Bucket {
+            /**
+             * XXX: Ideally this bucket should be page size
+             * bounded. Currently it is difficult to do that
+             * here because the size of summary_bitmap depends
+             * on the kind of userspace filter upserts and not
+             * the number of them.
+             */
+
             static constexpr size_t MAX_SIZE = 1024;
             static constexpr uint32_t MAX_DELTA = 65535;
 
@@ -350,6 +358,11 @@ namespace ndd {
                             rc = mdbx_cursor_get(cursor, &key, &data, MDBX_PREV);
                     }
                 } else if (rc == MDBX_NOTFOUND) {
+                    /**
+                     * The only possible bucket that could still contain
+                     * value is the very last bucket in the database.
+                     * Hence jumping there.
+                     */
                    rc = mdbx_cursor_get(cursor, &key, &data, MDBX_LAST);
                 }
 

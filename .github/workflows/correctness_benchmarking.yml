@@ -1,6 +1,6 @@
 name: VectorDB - Run Correctness Benchmark
 
-# ============ TRIGGER: PR COMMENT CONTAINING /correctness_benchmarking =================== 
+# ============ TRIGGER: PR COMMENT CONTAINING /correctness_benchmarking ===================
 on:
   issue_comment:
     types: [ created ]

@@ -25,7 +25,7 @@ The system prioritizes **Pre-Filtering** followed by an adaptive search executio
 *Optimized for range queries, high compression, and sequential access.*
 
 ### 2.1. Storage Architecture (Hybrid Bucket)
-The database (LMDB) acts as a coarse-grained B+ Tree.
+The database (LMDB) acts as a coarse-grained B+ Tree. NumericIndex opens two MDBX named databases: "numeric_forward" and "numeric_inverted"
 *   **Key:** `[FieldID] + [Base_Value_32bit]`.
     *   Floats are mapped to lexicographically ordered integers to preserve sort order.
     *   Keys are stored in Big-Endian to support native cursor iteration.

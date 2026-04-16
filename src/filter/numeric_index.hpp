@@ -261,18 +261,6 @@ namespace ndd {
                 }
             }
 
-            void put(const std::string& field, ndd::idInt id, uint32_t value) {
-                MDBX_txn* txn;
-                mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
-                try {
-                    put_internal(txn, field, id, value);
-                    mdbx_txn_commit(txn);
-                } catch(...) {
-                    mdbx_txn_abort(txn);
-                    throw;
-                }
-            }
-
             void put_batch(const std::vector<NumericBatchEntry>& entries) {
                 if(entries.empty()) {
                     return;

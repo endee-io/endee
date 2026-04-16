@@ -181,10 +181,7 @@ namespace ndd {
                     return;
                 }
                 ndd::RoaringBitmap bitmap = get_bitmap_internal(key);
-                //TODO: use addMany instead of add
-                for(const auto& id : ids) {
-                    bitmap.add(id);
-                }
+                bitmap.addMany(ids.size(), ids.data());
                 store_bitmap_internal(key, bitmap);
             }
 

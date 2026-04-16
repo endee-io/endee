@@ -261,6 +261,12 @@ namespace ndd {
                 }
             }
 
+            /**
+             * TODO:
+             * 1. comprehensive error print and return.
+             * If there is an error here, there should be a way to reverse
+             * vector add operation.
+             */
             void put_batch(const std::vector<NumericBatchEntry>& entries) {
                 if(entries.empty()) {
                     return;

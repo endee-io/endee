@@ -14,6 +14,17 @@
 namespace ndd {
     namespace filter {
 
+        struct NumericBatchEntry {
+            std::string field;
+            ndd::idInt id;
+            uint32_t value;
+
+            NumericBatchEntry(std::string field_in, ndd::idInt id_in, uint32_t value_in) :
+                field(std::move(field_in)),
+                id(id_in),
+                value(value_in) {}
+        };
+
         // --- Sortable Key Utilities ---
         inline uint32_t float_to_sortable(float f) {
             uint32_t i;
@@ -255,6 +266,24 @@ namespace ndd {
                 mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
                 try {
                     put_internal(txn, field, id, value);
+                    mdbx_txn_commit(txn);
+                } catch(...) {
+                    mdbx_txn_abort(txn);
+                    throw;
+                }
+            }
+
+            void put_batch(const std::vector<NumericBatchEntry>& entries) {
+                if(entries.empty()) {
+                    return;
+                }
+
+                MDBX_txn* txn;
+                mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
+                try {
+                    for(const auto& entry : entries) {
+                        put_internal(txn, entry.field, entry.id, entry.value);
+                    }
                     mdbx_txn_commit(txn);
                 } catch(...) {
                     mdbx_txn_abort(txn);

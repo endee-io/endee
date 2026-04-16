@@ -401,6 +401,9 @@ public:
 
         // Create a map to collect IDs for each filter
         std::unordered_map<std::string, std::vector<ndd::idInt>> filter_to_ids;
+        filter_to_ids.reserve(id_filter_pairs.size());
+        std::vector<ndd::filter::NumericBatchEntry> pending_numeric;
+        pending_numeric.reserve(id_filter_pairs.size());
 
         // Group IDs by filter
         for(const auto& [numeric_id, filter_json] : id_filter_pairs) {
@@ -429,20 +432,19 @@ public:
 
                     if(value.is_string()) {
                         std::string filter_key = format_filter_key(field, value.get<std::string>());
-                        filter_to_ids[filter_key].push_back(numeric_id);
+                        filter_to_ids[filter_key].emplace_back(numeric_id);
                     } else if(value.is_number()) {
-                        // Use Numeric Index for numbers
                         uint32_t sortable_val;
                         if(value.is_number_integer()) {
                             sortable_val = ndd::filter::int_to_sortable(value.get<int>());
                         } else {
                             sortable_val = ndd::filter::float_to_sortable(value.get<float>());
                         }
-                        numeric_index_->put(field, numeric_id, sortable_val);
+                        pending_numeric.emplace_back(field, numeric_id, sortable_val);
                     } else if(value.is_boolean()) {
                         std::string filter_key =
                                 format_filter_key(field, value.get<bool>() ? "1" : "0");
-                        filter_to_ids[filter_key].push_back(numeric_id);
+                        filter_to_ids[filter_key].emplace_back(numeric_id);
                     } else {
                         LOG_WARN(1203,
                                        index_id_,
@@ -454,6 +456,17 @@ public:
             } catch(const std::exception& e) {
                 LOG_ERROR(1204, index_id_, "Error parsing filter JSON: " << e.what());
             }
+        }
+
+        /**
+         * XXX: For transactional correctness of filter adds, all the filters
+         * should be added in a single transaction.
+         * For now, they are being added in two different transactions.
+         * one for numeric_index and other for labels.
+         */
+
+        if(!pending_numeric.empty()) {
+            numeric_index_->put_batch(pending_numeric);
         }
 
         // Process each filter with its batch of IDs

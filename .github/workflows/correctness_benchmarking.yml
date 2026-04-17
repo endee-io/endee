@@ -78,7 +78,7 @@ jobs:
             core.setOutput('head_ref',  pr.head.ref);
             core.info(`Mode: ${mode}  SHA: ${pr.head.sha}`);
 
-      - name: Check Commenter has write access 
+      - name: Check Commenter has admin access 
         id: authz 
         # steps is a GitHub Actions context object that lets you access outputs and metadata from previous steps within the same job.
         if: steps.parse.outputs.mode != ''
@@ -98,7 +98,7 @@ jobs:
               await github.rest.issues.createComment({
                 owner: context.repo.owner, repo: context.repo.repo,
                 issue_number: context.issue.number,
-                body: `@${context.payload.comment.user.login} — only collaborators with **write** access can trigger benchmarks (your level: \`${level}\`).`,
+                body: `@${context.payload.comment.user.login} — only collaborators with **admin** access can trigger benchmarks (your level: \`${level}\`).`,
               });
               core.setFailed('Unauthorized');
             }
@@ -155,8 +155,10 @@ jobs:
             const sha       = '${{ needs.validate-command.outputs.head_sha }}'.slice(0,7);
             const actor     = context.payload.comment.user.login;
             const modeLabel = {dense:'Dense', hybrid:'Hybrid'}[mode];
+            const runId = '${{ github.run_id }}';
  
             const body = [
+              `<!-- run-id: ${runId} -->`,
               `## VectorDB Benchmark — ${modeLabel} — Starting`,
               ``,
               `Triggered by @${actor} · Commit \`${sha}\``,
@@ -176,7 +178,7 @@ jobs:
               issue_number: context.issue.number,
             });
             const menu = comments.find(c =>
-              c.body.includes('VectorDB Benchmark') &&
+              c.body.includes(`<!-- run-id: ${runId} -->`) &&
               c.user.login === 'github-actions[bot]'
             );
             if (menu) {
@@ -347,7 +349,9 @@ jobs:
             const sha       = '${{ needs.validate-command.outputs.head_sha }}'.slice(0,7);
             const actor     = context.payload.comment.user.login;
             const modeLabel = {dense:'Dense', hybrid:'Hybrid'}[mode];
+            const runId = '${{ github.run_id }}';
             const body = [
+              `<!-- run-id: ${runId} -->`,
               `## VectorDB Benchmark — ${modeLabel} — Running`,
               ``,
               `Triggered by @${actor} · Commit \`${sha}\``,
@@ -555,7 +559,9 @@ jobs:
             const sha       = '${{ needs.validate-command.outputs.head_sha }}'.slice(0,7);
             const actor     = context.payload.comment.user.login;
             const modeLabel = {dense:'Dense', hybrid:'Hybrid'}[mode];
+            const runId = '${{ github.run_id }}';
             const body = [
+              `<!-- run-id: ${runId} -->`,
               `## VectorDB Benchmark — ${modeLabel} — Running`,
               ``,
               `Triggered by @${actor} · Commit \`${sha}\``,
@@ -571,12 +577,12 @@ jobs:
             const { data: cs } = await github.rest.issues.listComments({
               owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number,
             });
-            const sc = cs.find(c => c.body.includes('VectorDB Benchmark —') && c.user.login === 'github-actions[bot]');
+            const sc = cs.find(c => c.body.includes(`<!-- run-id: ${runId} -->`)  && c.user.login === 'github-actions[bot]');
             if (sc) await github.rest.issues.updateComment({
               owner: context.repo.owner, repo: context.repo.repo, comment_id: sc.id, body,
             });
  
-  # ──────────────────────────────────────────────────────────
+  # ────────────────────────────────────────────────────────── 
   # JOB 3: Run benchmark on Benchmark server with the chosen mode 
   # ──────────────────────────────────────────────────────────
   run-benchmark:
@@ -879,7 +885,10 @@ jobs:
     name: Post Results 
     needs: [ validate-command, provision-servers, run-benchmark]
     runs-on: ubuntu-latest 
-    if: always()
+    if: |
+      always() &&
+      needs.validate-command.outputs.mode != '' && 
+      needs.validate-command.outputs.authorized == 'true'
 
     steps:
       # ─── SETUP SSH ─────────────────────────────────────────────────── 
@@ -1079,8 +1088,10 @@ jobs:
             // ── BUILD FINAL COMMENT ───────────────────────────────────
             const modeLabel   = { dense: 'Dense', hybrid: 'Hybrid' }[mode] ?? mode;
             const statusLabel = passed ? 'Passed' : 'Failed';
+            const runId = '${{ github.run_id }}';
 
             const body = [
+              `<!-- run-id: ${runId} -->`,
               `## VectorDB Benchmark — ${modeLabel} — ${statusLabel}`,
               ``,
               `Triggered by @${actor} · Commit \`${sha}\``,
@@ -1102,7 +1113,7 @@ jobs:
               issue_number: context.issue.number,
             });
             const existing = comments.find(c =>
-              c.body.includes('VectorDB Benchmark —') &&
+              c.body.includes(`<!-- run-id: ${runId} -->`) &&
               c.user.login === 'github-actions[bot]'
             );
             if (existing) {
@@ -1130,12 +1141,15 @@ jobs:
 
   #================================================================
   # JOB 5: TEARDOWN - TERMINATE BOTH SERVERS ALWAYS 
-  #================================================================
+  #================================================================ 
   teardown:
     name: Teardown Servers 
     needs: [validate-command, provision-servers, deploy-endee, run-benchmark, report-results]
     runs-on: ubuntu-latest
-    if: always()
+    if: |
+      always() && 
+      needs.validate-command.outputs.mode != '' &&
+      needs.validate-command.outputs.authorized == 'true' 
 
     steps:
       - name: Configure AWS credentials
@@ -1184,6 +1198,7 @@ jobs:
             const benchResult  = '${{ needs.run-benchmark.result }}';   // success | failure | cancelled
             const passed       = benchResult === 'success';
             const statusLabel  = passed ? 'Passed' : 'Failed';
+            const runId = '${{ github.run_id }}';
 
             // ── FIND THE EXISTING BOT COMMENT ─────────────────────────
             const { data: comments } = await github.rest.issues.listComments({
@@ -1192,7 +1207,7 @@ jobs:
               issue_number: context.issue.number,
             });
             const existing = comments.find(c =>
-              c.body.includes('VectorDB Benchmark —') &&
+              c.body.includes(`<!-- run-id: ${runId} -->`) &&
               c.user.login === 'github-actions[bot]'
             );
 
@@ -1237,6 +1252,7 @@ jobs:
             } else {
               // Fallback: no existing comment — create a minimal one
               const body = [
+                `<!-- run-id: ${runId} -->`,
                 `## VectorDB Benchmark — ${modeLabel} — ${statusLabel}`,
                 ``,
                 `Triggered by @${actor} · Commit \`${sha}\``,

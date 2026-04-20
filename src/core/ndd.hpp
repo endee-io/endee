@@ -1949,8 +1949,8 @@ inline void IndexManager::executeBackupJob(const std::string& index_id, const st
         std::string user_temp_dir = backup_store_.getUserTempDir(username);
         std::filesystem::create_directories(user_temp_dir);
         std::string source_dir = data_dir_ + "/" + index_id;
-        std::string backup_tar_final = user_backup_dir + "/" + backup_name + ".tar";
-        std::string backup_tar_temp = user_temp_dir + "/.tmp_" + backup_name + ".tar";
+        std::string backup_tar_final = user_backup_dir + "/" + backup_name + ".tar.zst";
+        std::string backup_tar_temp = user_temp_dir + "/.tmp_" + backup_name + ".tar.zst";
 
         if(std::filesystem::exists(backup_tar_final)) {
             throw std::runtime_error("Backup already exists: " + backup_name);
@@ -2070,8 +2070,8 @@ inline void IndexManager::executeBackupJob(const std::string& index_id, const st
         std::string user_backup_dir = backup_store_.getUserBackupDir(username);
         std::string user_temp_dir = backup_store_.getUserTempDir(username);
         std::string source_dir = data_dir_ + "/" + index_id;
-        std::string backup_tar_final = user_backup_dir + "/" + backup_name + ".tar";
-        std::string backup_tar_temp = user_temp_dir + "/.tmp_" + backup_name + ".tar";
+        std::string backup_tar_final = user_backup_dir + "/" + backup_name + ".tar.zst";
+        std::string backup_tar_temp = user_temp_dir + "/.tmp_" + backup_name + ".tar.zst";
         std::string metadata_file_in_index = source_dir + "/metadata.json";
 
         if(std::filesystem::exists(backup_tar_temp)) {
@@ -2099,7 +2099,7 @@ inline std::pair<bool, std::string> IndexManager::restoreBackup(const std::strin
     }
 
     std::string backup_dir_root = backup_store_.getUserBackupDir(username);
-    std::string backup_tar = backup_dir_root + "/" + backup_name + ".tar";
+    std::string backup_tar = backup_dir_root + "/" + backup_name + ".tar.zst";
     std::string user_temp_dir = backup_store_.getUserTempDir(username);
     std::filesystem::create_directories(user_temp_dir);
     std::string backup_extract_dir = user_temp_dir + "/" + backup_name;
@@ -2202,7 +2202,7 @@ inline std::pair<bool, std::string> IndexManager::createBackupAsync(const std::s
 
     std::string user_backup_dir = backup_store_.getUserBackupDir(username);
     std::filesystem::create_directories(user_backup_dir);
-    std::string backup_tar = user_backup_dir + "/" + backup_name + ".tar";
+    std::string backup_tar = user_backup_dir + "/" + backup_name + ".tar.zst";
     if (std::filesystem::exists(backup_tar)) {
         return {false, "Backup already exists: " + backup_name};
     }

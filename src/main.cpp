@@ -564,7 +564,7 @@ int main(int argc, char** argv) {
                     }
 
                     std::string backup_file =
-                            settings::DATA_DIR + "/backups/" + settings::DEFAULT_USERNAME + "/" + backup_name + ".tar";
+                            settings::DATA_DIR + "/backups/" + settings::DEFAULT_USERNAME + "/" + backup_name + ".tar.zst";
 
                     if(!std::filesystem::exists(backup_file)) {
                         LOG_WARN(1058, settings::DEFAULT_USERNAME, "Backup download requested for missing backup " << backup_name);
@@ -574,7 +574,7 @@ int main(int argc, char** argv) {
 
                     crow::response response;
                     response.set_static_file_info_unsafe(backup_file);
-                    response.set_header("Content-Type", "application/x-tar");
+                    response.set_header("Content-Type", "application/zstd");
                     response.set_header("Content-Disposition",
                                         "attachment; filename=\"" + backup_name + ".tar\"");
                     response.set_header("Cache-Control", "no-cache");
@@ -608,11 +608,11 @@ int main(int argc, char** argv) {
                             if(content_disposition.params.count("filename")) {
                                 backup_name = content_disposition.params.at("filename");
                                 // check if backup name ends with .tar
-                                if(backup_name.ends_with(".tar")) {
-                                    backup_name = backup_name.substr(0, backup_name.size() - 4);
+                                if(backup_name.ends_with(".tar.zst")) {
+                                    backup_name = backup_name.substr(0, backup_name.size() - 8);
                                 } else {
                                     LOG_WARN(1059, ctx.username, "Backup upload used invalid file extension");
-                                    return json_error(400, "Invalid backup file extension. Expected .tar file");
+                                    return json_error(400, "Invalid backup file extension. Expected .tar.zst file");
                                 }
                             }
                             file_content = part.body;
@@ -641,7 +641,7 @@ int main(int argc, char** argv) {
                     // Check if backup already exists
                     std::string user_backup_dir = settings::DATA_DIR + "/backups/" + ctx.username;
                     std::filesystem::create_directories(user_backup_dir);
-                    std::string backup_path = user_backup_dir + "/" + backup_name + ".tar";
+                    std::string backup_path = user_backup_dir + "/" + backup_name + ".tar.zst";
                     if(std::filesystem::exists(backup_path)) {
                         LOG_WARN(1063, ctx.username, "Backup upload conflicts with existing backup " << backup_name);
                         return json_error(409,

@@ -10,7 +10,7 @@ Backups are stored as `.tar` archives in per-user directories: `{DATA_DIR}/backu
 IndexManager (ndd.hpp)
 ├── BackupStore backup_store_ (direct member)
 ├── 3 orchestration methods (inline, defined after class):
-│   executeBackupJob, createBackupAsync, restoreBackup
+│   executeBackupJob, createBackupAsync, restoreBackup, uploadBackup
 ├── 5 forwarding methods:
 │   listBackups, deleteBackup, getActiveBackup, getBackupInfo, validateBackupName
 └── Handles: saveIndexInternal, getIndexEntry, metadata_manager_, loadIndex
@@ -115,6 +115,9 @@ GET /backups/{name}/download
 ```
 POST /backups/upload (multipart)
 → parse multipart → validate .tar extension + name → check no duplicate → write to disk
+→ read metadata.json from inside .tar (via libarchive, no full extraction)
+→ store index config in backup registry (original_index, timestamp, size_mb, params)
+→ fallback to timestamp + tar file size if metadata.json is missing or unparseable
 → 201 OK
 
 NOTE: Upload currently buffers entire file in RAM (Crow multipart parser limitation).

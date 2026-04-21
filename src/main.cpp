@@ -720,7 +720,6 @@ int main(int argc, char** argv) {
                 if (!meta) {
                     return json_error(404, "Index not found");
                 }
-
                 // Parse parameters with current values as defaults
                 size_t new_M = body.has("M") ? (size_t)body["M"].i() : meta->M;
                 size_t new_ef_con = body.has("ef_con") ? (size_t)body["ef_con"].i() : meta->ef_con;
@@ -739,19 +738,17 @@ int main(int argc, char** argv) {
                         + " and " + std::to_string(settings::MAX_EF_CONSTRUCT));
                 }
 
-                // Get actual vector count for response
-                size_t actual_element_count = 0;
-                try {
-                    actual_element_count = index_manager.getElementCount(index_id);
-                } catch (...) {}
+                // Use live count — meta->total_elements can be stale if not yet flushed to disk
+                size_t actual_element_count = index_manager.getElementCount(index_id);
+                if (actual_element_count == 0) {
+                    return json_error(400, "Cannot rebuild an empty index");
+                }
 
                 try {
-                    auto [success, message] = index_manager.rebuildIndexAsync(
-                        index_id, new_M, new_ef_con);
+                    auto result = index_manager.rebuildIndexAsync(index_id, new_M, new_ef_con);
 
-                    if (!success) {
-                        int code = (message.find("already in progress") != std::string::npos) ? 409 : 400;
-                        return json_error(code, message);
+                    if (!result.success) {
+                        return json_error(result.http_code, result.message);
                     }
 
                     crow::json::wvalue response;

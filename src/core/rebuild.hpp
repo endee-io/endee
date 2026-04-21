@@ -14,6 +14,13 @@
 
 #include "settings.hpp"
 #include "log.hpp"
+#include "json/nlohmann_json.hpp"
+
+struct RebuildResult {
+    bool success;
+    int http_code;
+    std::string message;
+};
 
 struct ActiveRebuild {
     std::string index_id;
@@ -57,8 +64,8 @@ public:
                     std::filesystem::remove(entry.path());
                 }
             }
-        } catch (const std::exception&) {
-            // Silently ignore cleanup errors on startup
+        } catch (const std::exception& e) {
+            LOG_WARN(2053, "rebuild", "Failed to cleanup temp files on startup: " << e.what());
         }
     }
 
@@ -131,6 +138,38 @@ public:
                 t.join();
             }
         }
+    }
+
+    void attachRebuildThread(const std::string& username, std::jthread&& thread) {
+        std::lock_guard<std::mutex> lock(rebuild_state_mutex_);
+        auto it = active_rebuilds_.find(username);
+        if (it != active_rebuilds_.end()) {
+            it->second->thread = std::move(thread);
+        }
+    }
+
+    nlohmann::json getProgress(const std::string& username, const std::string& index_id) const {
+        auto state = getActiveRebuild(username);
+        if (state && state->index_id == index_id) {
+            size_t processed = state->vectors_processed.load();
+            size_t total = state->total_vectors.load();
+            double percent = total > 0 ? (100.0 * processed / total) : 0.0;
+            nlohmann::json result = {
+                {"status", state->status},
+                {"vectors_processed", processed},
+                {"total_vectors", total},
+                {"percent_complete", percent},
+                {"started_at", formatTime(state->started_at)}
+            };
+            if (state->status == "completed" || state->status == "failed") {
+                result["completed_at"] = formatTime(state->completed_at);
+            }
+            if (state->status == "failed" && !state->error_message.empty()) {
+                result["error"] = state->error_message;
+            }
+            return result;
+        }
+        return {{"status", "idle"}};
     }
 
     std::shared_ptr<ActiveRebuild> getActiveRebuild(const std::string& username) const {

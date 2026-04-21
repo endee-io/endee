@@ -1924,6 +1924,10 @@ public:
     std::pair<bool, std::string> validateBackupName(const std::string& backup_name) const {
         return backup_store_.validateBackupName(backup_name);
     }
+
+    std::pair<bool, std::string> uploadBackup(const std::string& backup_name,
+                                                const std::string& username,
+                                                const std::string& file_content);
 };
 
 // ========== IndexManager backup implementations ==========
@@ -2215,4 +2219,65 @@ inline std::pair<bool, std::string> IndexManager::createBackupAsync(const std::s
     LOG_INFO(2046, index_id, "Backup started: " << backup_name);
 
     return {true, backup_name};
+}
+
+inline std::pair<bool, std::string> IndexManager::uploadBackup(const std::string& backup_name, const std::string& username, const std::string& file_content) {
+    std::string user_backup_dir = backup_store_.getUserBackupDir(username);
+    std::filesystem::create_directories(user_backup_dir);
+    std::string backup_path = user_backup_dir + "/" + backup_name + ".tar";
+    if(std::filesystem::exists(backup_path)) {
+        LOG_WARN(1063, username, "Backup upload conflicts with existing backup " << backup_name);
+        
+        return {false, "Backup with name '" + backup_name +"' already exits"};
+    }
+
+    // Write the file
+    std::ofstream out(backup_path, std::ios::binary);
+    if(!out.is_open()) {
+        return {false, "Failed to create backup file"};
+    }
+
+    out.write(file_content.data(), file_content.size());
+    out.close();
+
+    if(!out.good()) {
+        // Clean up partial file on error
+        std::filesystem::remove(backup_path);
+        return {false, "Failed to write backup file"};
+    }
+
+    nlohmann::json backup_json;
+
+    // Read the metadata.json from the tar file
+    {
+        struct archive* a = archive_read_new();
+        archive_read_support_format_all(a);
+        archive_read_support_filter_all(a);
+
+        if (archive_read_open_filename(a, backup_path.c_str(), 10240) == ARCHIVE_OK) {
+            struct archive_entry* entry;
+            while (archive_read_next_header(a, &entry) == ARCHIVE_OK) {
+                std::string_view path = archive_entry_pathname(entry);
+                if (path.ends_with("metadata.json")) {
+                    std::string content;
+                    char buf[4096];
+                    la_ssize_t n;
+                    while ((n = archive_read_data(a, buf, sizeof(buf))) > 0)
+                        content.append(buf, n);
+                    try {
+                        backup_json = nlohmann::json::parse(content);
+                    } catch (...) {}
+                    break;
+                }
+                archive_read_data_skip(a);
+            }
+        }
+        archive_read_free(a);
+    }
+
+    nlohmann::json backup_db = backup_store_.readBackupJson(username);
+    backup_db[backup_name] = backup_json;
+    backup_store_.writeBackupJson(username, backup_db);
+
+    return {true, "Backup uploaded successfully"};
 }

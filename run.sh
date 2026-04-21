@@ -8,6 +8,7 @@ error() { printf "[ERROR] %s\n" "$*" >&2; }
 NDD_DATA_DIR="./data"
 BINARY_FILE=""
 NDD_AUTH_TOKEN=""
+NDD_MIN_DRAM_MB=2048
 
 
 print_help() {
@@ -58,7 +59,7 @@ main() {
 
     # run the binary with the arguments passed to this script
     if [[ -n "$BINARY_FILE" ]]; then
-        eval "NDD_DATA_DIR=$NDD_DATA_DIR NDD_AUTH_TOKEN=$NDD_AUTH_TOKEN $BINARY_FILE"
+        eval "NDD_DATA_DIR=$NDD_DATA_DIR NDD_AUTH_TOKEN=$NDD_AUTH_TOKEN NDD_MIN_DRAM_MB=$NDD_MIN_DRAM_MB $BINARY_FILE"
     fi
 }
 

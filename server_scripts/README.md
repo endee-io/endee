@@ -11,14 +11,14 @@ This directory contains modular shell scripts for setting up a new server. Each 
 ## Scripts Overview
 
 | Script | Description | Parameters |
-|--------|-------------|------------|
-| `install-docker.sh` | Installs Docker and Docker Compose | None |
-| `install-nginx.sh` | Installs and configures Nginx web server | None |
-| `setup-ssl.sh` | Sets up Let's Encrypt SSL certificate | domain [www-domain] |
-| `mount-external-disk.sh` | Prepares external disk mounting (requires manual steps) | None |
+|--------|-------------|------------||
 | `install-git.sh` | Installs Git | None |
-| `clone-repo.sh` | Clones a Git repository | repository-url |
-| `setup-ssh-keys.sh` | Generates SSH keys for Git authentication | email |
+| `clone-repo.sh` | Clones a Git repository using a GitHub token | github-username/repo, github-token |
+| `mount-external-disk.sh` | Prepares external disk mounting | None |
+| `generate_fstab.sh` | Generates fstab | None |
+| `install-docker.sh` | Installs Docker and Docker Compose | None |
+| `install-nginx.sh` | Installs and configures Nginx web server | domain |
+| `setup-ssl.sh` | Sets up Let's Encrypt SSL certificate | domain [www-domain]
 | `ops-agent.sh` | Installs Google Cloud Ops Agent for monitoring and logging | instance-name |
 
 ## Usage
@@ -31,28 +31,26 @@ chmod +x *.sh
 ### Run individual scripts
 
 ```bash
-# Install Docker
-./install-docker.sh
+# Install Git
+./install-git.sh
 
-# Install Nginx
-./install-nginx.sh
-
-# Setup SSL (replace with your domain)
-./setup-ssl.sh example.com www.example.com
+# Clone repository using a GitHub token
+./clone-repo.sh your-username/your-repo ghp_xxxxxxxxxxxx
 
 # Mount external disk (follow the manual instructions printed)
 ./mount-external-disk.sh
 
-# Install Git
-./install-git.sh
+# Generate fstab
+./generate_fstab.sh
 
-# Clone repository (replace with your repo URL)
-./clone-repo.sh https://github.com/your-username/your-repo.git
-# OR using SSH:
-./clone-repo.sh git@github.com:your-username/your-repo.git
+# Install Docker
+./install-docker.sh
 
-# Setup SSH keys (replace with your email)
-./setup-ssh-keys.sh your.email@example.com
+# Install Nginx (replace with your domain)
+./install-nginx.sh dev.endee.io
+
+# Setup SSL (replace with your domain)
+./setup-ssl.sh dev.endee.io
 
 # Install Google Cloud Ops Agent (for GCP instances only)
 ./ops-agent.sh your-instance-name
@@ -60,13 +58,14 @@ chmod +x *.sh
 
 ## Typical Setup Order
 
-1. **Install Docker** - `./install-docker.sh`
-2. **Install Nginx** - `./install-nginx.sh`
-3. **Setup SSL** - `./setup-ssl.sh your-domain.com`
-4. **Mount External Disk** - `./mount-external-disk.sh` (follow manual steps)
-5. **Install Git** - `./install-git.sh`
-6. **Setup SSH Keys** - `./setup-ssh-keys.sh your@email.com`
-7. **Clone Repository** - `./clone-repo.sh git@github.com:user/repo.git`
+1. **Install Git** - `./install-git.sh`
+2. **Clone Repository** - `./clone-repo.sh your-org/repo ghp_xxxxxxxxxxxx`
+3. **Mount External Disk** - `./mount-external-disk.sh`
+4. **Generate fstab** - `generate_fstab.sh`
+5. **Install Docker** - `./install-docker.sh`
+6. **Install Nginx** - `./install-nginx.sh your-domain.com`
+7. **Setup SSL** - `./setup-ssl.sh your-domain.com`
+8. **Install Google Cloud Ops Agent** - `./ops-agent.sh your-instance-name`
 
 ## Google Cloud Ops Agent (GCP Only)
 
@@ -104,10 +103,10 @@ gcloud auth login
 
 ## Notes
 
-- **SSL Setup**: Requires a valid domain pointing to your server
+- **Clone Repo**: Uses a GitHub Personal Access Token (PAT) embedded in the HTTPS URL. The token is stored in the remote URL so `git pull` works without re-entering credentials
+- **GitHub Token**: Create at https://github.com/settings/tokens/new — use a Fine-grained token with **Contents: read-only**, or a Classic token with the **repo** scope
 - **External Disk Mount**: Includes manual steps for disk partitioning. Follow the printed instructions carefully
-- **Clone Repo**: Use HTTPS URL for first-time setup, SSH URL after setting up SSH keys
-- **SSH Keys**: Copy the displayed public key to your Git provider (GitHub/GitLab/Bitbucket)
+- **SSL Setup**: Requires a valid domain pointing to your server
 - **Ops Agent**: GCP-only script. Requires gcloud CLI and user authentication
 
 ## Checking Service Status

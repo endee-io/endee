@@ -1,11 +1,11 @@
 #!/bin/bash
 set -e
 
-# Usage: ./ops.sh <INSTANCE_NAME>
-# Example: ./ops.sh my-instance-name
+# Usage: ./ops.sh <INSTANCE_NAME> <PROJECT_ID>
+# Example: ./ops.sh dev-server nd-exp-478509
 
 # Project Configuration
-PROJECT_ID="nd-exp-478509"
+PROJECT_ID=$2
 INSTANCE_NAME=$1
 
 if [[ -z "$INSTANCE_NAME" ]]; then

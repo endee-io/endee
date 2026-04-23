@@ -2,7 +2,7 @@
 
 `BackupStore` is a standalone utility class owned by `IndexManager` as a direct member (`BackupStore backup_store_`). It has no dependency on IndexManager — it handles tar operations, backup JSON, file paths, and active backup tracking. `IndexManager` orchestrates the backup flow (save, lock, metadata) and delegates file-level operations to `BackupStore`. All backup API calls go through `IndexManager` — `BackupStore` is not exposed to `main.cpp`.
 
-Backups are stored as `.tar` archives in per-user directories: `{DATA_DIR}/backups/{username}/`. Temp files use a centralized `{DATA_DIR}/backups/.tmp/{username}/` directory. Active backup state is tracked in-memory with mutex protection (`backup_state_mutex_`).
+Backups are stored as `.tar` archives in per-user directories: `{DATA_DIR}/backups/{username}/`. Temp files use a centralized `{DATA_DIR}/backups/.tmp/{username}/` directory. Active backup state is tracked in-memory with mutex protection (`active_user_backups_mutex_`).
 
 ## Architecture
 
@@ -10,7 +10,7 @@ Backups are stored as `.tar` archives in per-user directories: `{DATA_DIR}/backu
 IndexManager (ndd.hpp)
 ├── BackupStore backup_store_ (direct member)
 ├── 3 orchestration methods (inline, defined after class):
-│   executeBackupJob, createBackupAsync, restoreBackup, uploadBackup
+│   executeBackupJob, createBackupAsync, restoreBackupAsync, uploadBackup
 ├── 5 forwarding methods:
 │   listBackups, deleteBackup, getActiveBackup, getBackupInfo, validateBackupName
 └── Handles: saveIndexInternal, getIndexEntry, metadata_manager_, loadIndex
@@ -19,9 +19,9 @@ BackupStore (src/storage/backup_store.hpp — standalone, no IndexManager depend
 ├── Archive: createBackupTar(), extractBackupTar()
 ├── Helpers: getUserBackupDir(), getUserTempDir(), readBackupJson(), writeBackupJson(), cleanupTempDir()
 ├── Active backup: setActiveBackup(), clearActiveBackup(), hasActiveBackup(), getActiveBackup()
-│   (all protected by backup_state_mutex_)
+│   (all protected by active_user_backups_mutex_; tracks both Creation and Restoration operations)
 ├── Public methods: validateBackupName(), listBackups(), deleteBackup(), getBackupInfo()
-└── Owns: data_dir_, active_user_backups_, backup_state_mutex_ (mutable)
+└── Owns: data_dir_, active_user_backups_, active_user_backups_mutex_ (mutable)
 ```
 
 ## API Endpoints
@@ -32,7 +32,7 @@ BackupStore (src/storage/backup_store.hpp — standalone, no IndexManager depend
 | GET | `/api/v1/backups` | List all backup files |
 | GET | `/api/v1/backups/active` | Check active backup for current user |
 | GET | `/api/v1/backups/{name}/info` | Get backup metadata (read from .tar) |
-| POST | `/api/v1/backups/{name}/restore` | Restore backup to new index |
+| POST | `/api/v1/backups/{name}/restore` | Restore backup to new index (async, 202) |
 | DELETE | `/api/v1/backups/{name}` | Delete a backup file |
 | GET | `/api/v1/backups/{name}/download` | Download backup (streaming) |
 | POST | `/api/v1/backups/upload` | Upload a backup file |
@@ -49,7 +49,7 @@ operation_mutex (mutex, per-index)
 └── Write operations block until mutex is available
 ```
 
-**Simple approach:** No atomic flags or file locks. The backup thread holds `operation_mutex` while saving and creating the tar. Write operations that arrive during backup simply block on the mutex until the backup releases it. One active backup per user is enforced via in-memory map protected by `backup_state_mutex_` for thread-safe access.
+**Simple approach:** No atomic flags or file locks. The backup thread holds `operation_mutex` while saving and creating the tar. Write operations that arrive during backup simply block on the mutex until the backup releases it. One active operation per user is enforced via in-memory map protected by `active_user_backups_mutex_` — this covers both backup creation and restore operations, so a user cannot run a backup and a restore concurrently.
 
 **Write path during backup:**
 
@@ -92,15 +92,29 @@ addVectors/deleteVectors/updateFilters/deleteByFilter/deleteIndex
   (blocks if backup holds operation_mutex — resumes after backup completes)
 ```
 
-### Restore Backup
+### Restore Backup (Async)
 
 ```
-POST /backups/{name}/restore
-→ validate name → check tar exists → check target index does NOT exist
-→ extract tar to backups/.tmp/{username}/ → read metadata.json → copy files to target dir
-→ register in MetadataManager → cleanup temp dir → loadIndex()
-→ 201 OK
+POST /backups/{name}/restore → validate name → check backup exists in backup registry
+→ check target index does NOT exist → check active_user_backups_[username] empty (one per user)
+→ insert into active_user_backups_ map (BackupOperation::Restoration)
+→ spawn jthread → return 202 { backup_name, target_index, status: "in_progress" }
 ```
+
+**Background thread** (`restoreBackup`):
+
+```
+→ extract tar to backups/.tmp/{username}/{backup_name}/
+→ validate archive structure (expect exactly 1 directory)
+→ read metadata.json → copy files to target dir → remove metadata.json from target
+→ register in MetadataManager
+→ [LOCK indices_mutex_] loadIndex() [UNLOCK]
+→ cleanup temp dir → erase from active_user_backups_
+```
+
+**On failure**: cleanup temp dir → erase from active_user_backups_ → log error (not returned to client).
+
+**Status polling**: client polls `GET /api/v1/backups/active` to check if restore is still in progress.
 
 ### Download (Streaming)
 
@@ -138,11 +152,11 @@ GET /backups/{name}/info
 
 | # | Check | Where |
 |---|-------|-------|
-| 1 | **One backup per user** — `active_user_backups_` map rejects if user already has active backup | createBackupAsync |
+| 1 | **One operation per user** — `active_user_backups_` map rejects if user already has an active backup or restore | createBackupAsync, restoreBackupAsync |
 | 2 | **Write blocking** — writes block on `operation_mutex` until backup completes | addVectors, deleteVectors, updateFilters, deleteByFilter, deleteIndex |
 | 3 | **Name validation** — alphanumeric, underscores, hyphens only; max 200 chars | validateBackupName |
 | 4 | **Duplicate prevention** — checks if .tar file already exists on disk | createBackupAsync, upload |
 | 5 | **Disk space** — requires 2x index size available | executeBackupJob |
 | 6 | **Atomic tar** — writes to `backups/.tmp/{username}/` first, then renames to final location | executeBackupJob |
 | 7 | **Crash recovery** — on startup: `cleanupTempDir()` deletes entire `backups/.tmp/` directory | BackupStore constructor |
-| 8 | **Restore safety** — target must not exist, metadata must be valid, cleanup on failure | restoreBackup |
+| 8 | **Restore safety** — target must not exist, metadata must be valid; cleanup (temp dir + active status) on failure in background thread | restoreBackupAsync, restoreBackup |

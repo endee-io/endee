@@ -3,7 +3,6 @@
 #include <string>
 #include <unordered_map>
 #include <memory>
-#include <atomic>
 #include <mutex>
 #include <shared_mutex>
 #include <thread>
@@ -21,19 +20,14 @@
 #include "hnsw/hnswlib.h"
 #include "vector_storage.hpp"
 #include "../quant/common.hpp"
-
-struct RebuildResult {
-    bool success;
-    int http_code;
-    std::string message;
-};
+#include "utils/types.hpp"
 
 struct ActiveRebuild {
     std::string index_id;
     std::string status{"in_progress"};  // "in_progress", "completed", "failed"
     std::string error_message;
-    std::atomic<size_t> vectors_processed{0};
-    std::atomic<size_t> total_vectors{0};
+    size_t vectors_processed{0};
+    size_t total_vectors{0};
     std::chrono::system_clock::time_point started_at;
     std::chrono::system_clock::time_point completed_at;
     std::jthread thread;  // jthread: built-in stop_token + auto-join on destruction
@@ -103,9 +97,15 @@ public:
         }
         try {
             std::string temp_filename = std::string(settings::DEFAULT_SUBINDEX) + ".idx.temp";
+            std::string ts_prefix     = std::string(settings::DEFAULT_SUBINDEX) + ".idx.";
             for (const auto& entry : std::filesystem::recursive_directory_iterator(data_dir)) {
-                if (entry.is_regular_file() &&
-                    entry.path().filename().string() == temp_filename) {
+                if (!entry.is_regular_file()) continue;
+                const std::string fname = entry.path().filename().string();
+                bool is_temp = (fname == temp_filename);
+                bool is_ts   = fname.size() > ts_prefix.size()
+                               && fname.substr(0, ts_prefix.size()) == ts_prefix
+                               && std::all_of(fname.begin() + ts_prefix.size(), fname.end(), ::isdigit);
+                if (is_temp || is_ts) {
                     std::filesystem::remove(entry.path());
                 }
             }
@@ -122,8 +122,8 @@ public:
         auto state = std::make_shared<ActiveRebuild>();
         state->index_id = index_id;
         state->status = "in_progress";
-        state->total_vectors.store(total_vectors);
-        state->vectors_processed.store(0);
+        state->total_vectors = total_vectors;
+        state->vectors_processed = 0;
         state->started_at = std::chrono::system_clock::now();
         state->thread = std::move(thread);
         active_rebuilds_[username] = state;
@@ -193,37 +193,38 @@ public:
         }
     }
 
+    void updateProgress(const std::string& username, size_t processed) {
+        std::lock_guard<std::mutex> lock(rebuild_state_mutex_);
+        auto it = active_rebuilds_.find(username);
+        if (it != active_rebuilds_.end()) {
+            it->second->vectors_processed = processed;
+        }
+    }
+
     nlohmann::json getProgress(const std::string& username, const std::string& index_id) const {
-        auto state = getActiveRebuild(username);
-        if (state && state->index_id == index_id) {
-            size_t processed = state->vectors_processed.load();
-            size_t total = state->total_vectors.load();
+        std::lock_guard<std::mutex> lock(rebuild_state_mutex_);
+        auto it = active_rebuilds_.find(username);
+        if (it != active_rebuilds_.end() && it->second->index_id == index_id) {
+            const auto& state = *it->second;
+            size_t processed = state.vectors_processed;
+            size_t total = state.total_vectors;
             double percent = total > 0 ? (100.0 * processed / total) : 0.0;
             nlohmann::json result = {
-                {"status", state->status},
+                {"status", state.status},
                 {"vectors_processed", processed},
                 {"total_vectors", total},
                 {"percent_complete", percent},
-                {"started_at", formatTime(state->started_at)}
+                {"started_at", formatTime(state.started_at)}
             };
-            if (state->status == "completed" || state->status == "failed") {
-                result["completed_at"] = formatTime(state->completed_at);
+            if (state.status == "completed" || state.status == "failed") {
+                result["completed_at"] = formatTime(state.completed_at);
             }
-            if (state->status == "failed" && !state->error_message.empty()) {
-                result["error"] = state->error_message;
+            if (state.status == "failed" && !state.error_message.empty()) {
+                result["error"] = state.error_message;
             }
             return result;
         }
         return {{"status", "idle"}};
-    }
-
-    std::shared_ptr<ActiveRebuild> getActiveRebuild(const std::string& username) const {
-        std::lock_guard<std::mutex> lock(rebuild_state_mutex_);
-        auto it = active_rebuilds_.find(username);
-        if (it != active_rebuilds_.end()) {
-            return it->second;
-        }
-        return nullptr;
     }
 
     // Format state as JSON fields
@@ -293,8 +294,7 @@ public:
                     });
 
                 total_processed += batch.size();
-                auto state = getActiveRebuild(p.username);
-                if (state) state->vectors_processed.store(total_processed);
+                updateProgress(p.username, total_processed);
 
                 if (++batches_since_checkpoint >= CHECKPOINT_INTERVAL) {
                     new_alg->saveIndex(p.temp_path);
@@ -314,8 +314,8 @@ public:
             p.wire_fetchers(fresh_alg.get(), p.vector_storage);
 
             // Both files are deleted here on success. If the server crashes before reaching this
-            // point, the timestamped file (default.idx.<ts>) may be left on disk — it is safe
-            // to delete manually on next startup as it does not affect index correctness.
+            // point, the timestamped file (default.idx.<ts>) will be removed on next startup
+            // by cleanupTempFiles — it does not affect index correctness.
             if (std::filesystem::exists(p.temp_path)) std::filesystem::remove(p.temp_path);
             if (std::filesystem::exists(p.timestamped_path)) std::filesystem::remove(p.timestamped_path);
 

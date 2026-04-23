@@ -1914,10 +1914,14 @@ public:
 
     // ========== Rebuild operations ==========
 
-    // Orchestration method (defined below after class)
-    RebuildResult rebuildIndexAsync(const std::string& index_id,
-                                    size_t new_M,
-                                    size_t new_ef_con);
+    // Return codes:
+    //   0: rebuild started successfully
+    //   1: index not found
+    //   2: rebuild or backup already in progress for this user
+    //   3: no configuration changes specified / invalid parameters
+    OperationResult rebuildIndexAsync(const std::string& index_id,
+                                      size_t new_M,
+                                      size_t new_ef_con);
 
     bool hasActiveRebuild(const std::string& username) const {
         return rebuild_.hasActiveRebuild(username);
@@ -2320,12 +2324,12 @@ inline std::pair<bool, std::string> IndexManager::uploadBackup(const std::string
 
 // ========== IndexManager rebuild implementations ==========
 
-inline RebuildResult IndexManager::rebuildIndexAsync(const std::string& index_id,
-                                                      size_t new_M,
-                                                      size_t new_ef_con) {
+inline OperationResult IndexManager::rebuildIndexAsync(const std::string& index_id,
+                                                        size_t new_M,
+                                                        size_t new_ef_con) {
     auto meta = metadata_manager_->getMetadata(index_id);
     if (!meta) {
-        return {false, 404, "Index not found"};
+        return {1, "Index not found"};
     }
 
     std::string username;
@@ -2333,14 +2337,14 @@ inline RebuildResult IndexManager::rebuildIndexAsync(const std::string& index_id
     if (pos != std::string::npos) {
         username = index_id.substr(0, pos);
     } else {
-        return {false, 400, "Invalid index ID format"};
+        return {3, "Invalid index ID format"};
     }
 
     if (backup_store_.hasActiveBackup(username)) {
-        return {false, 409, "Backup already in progress for user: " + username};
+        return {2, "Backup already in progress for user: " + username};
     }
     if (rebuild_.hasActiveRebuild(username)) {
-        return {false, 409, "Rebuild already in progress for user: " + username};
+        return {2, "Rebuild already in progress for user: " + username};
     }
 
     // Pre-fetch entry now — captured by lambdas so the thread never calls getIndexEntry
@@ -2348,7 +2352,7 @@ inline RebuildResult IndexManager::rebuildIndexAsync(const std::string& index_id
     size_t current_count = entry->alg->getElementsCount();
 
     if (new_M == meta->M && new_ef_con == meta->ef_con) {
-        return {false, 400, "No configuration changes specified"};
+        return {3, "No configuration changes specified"};
     }
 
     std::string base_path = data_dir_ + "/" + index_id;
@@ -2400,5 +2404,5 @@ inline RebuildResult IndexManager::rebuildIndexAsync(const std::string& index_id
     rebuild_.attachRebuildThread(username, std::move(t));
 
     LOG_INFO(2050, index_id, "Rebuild started: M=" << new_M << " ef_con=" << new_ef_con);
-    return {true, 202, "Rebuild started"};
+    return {0, "Rebuild started"};
 }

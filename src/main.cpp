@@ -747,9 +747,9 @@ int main(int argc, char** argv) {
                 try {
                     auto result = index_manager.rebuildIndexAsync(index_id, new_M, new_ef_con);
 
-                    if (!result.success) {
-                        return json_error(result.http_code, result.message);
-                    }
+                    if (result.code == 1) return json_error(404, result.message);
+                    if (result.code == 2) return json_error(409, result.message);
+                    if (result.code == 3) return json_error(400, result.message);
 
                     crow::json::wvalue response;
                     response["status"] = "rebuilding";

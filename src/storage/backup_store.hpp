@@ -308,7 +308,7 @@ public:
         std::lock_guard<std::mutex> lock(active_user_backups_mutex_);
         auto it = active_user_backups_.find(username);
         if (it != active_user_backups_.end()) {
-            return make_pair(it->second.backup_name, backupOperationToString(it->second.operation));
+            return std::make_pair(it->second.backup_name, backupOperationToString(it->second.operation));
         }
         return std::nullopt;
     }

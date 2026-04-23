@@ -1,0 +1,197 @@
+name: Release Notes Syncing
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release tag to build (e.g. v1.0.0)'
+        required: true
+        type: string
+
+  
+jobs:
+
+  create-and-build:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - name: avx2
+            instance_type: c6i.large
+            binary_file_name: ndd-avx2
+          - name: avx512
+            instance_type: c6i.large
+            binary_file_name: ndd-avx2
+          - name: neon
+            instance_type: c6g.large
+            binary_file_name: ndd-neon
+          - name: sve2
+            instance_type: c7g.large
+            binary_file_name: ndd-neon
+        
+    steps:
+
+      - name: Checkout PR commit 
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag_name }}
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ vars.AWS_REGION }}
+      
+      - name: Launch Endee Server
+        id: launch 
+        shell: bash
+        run: |
+          ARCH_NAME="${{ matrix.arch.name }}"
+          INSTANCE_TYPE="${{ matrix.arch.instance_type }}"
+
+          if [[ "$ARCH_NAME" == "avx2" ]] || [[ "$ARCH_NAME" == "avx512" ]]; then
+            AMI_ID="${{ vars.AMI_ID }}"
+          else
+            AMI_ID="${{ vars.ARM_AMI_ID }}"
+          fi
+
+          ENDEE_INSTANCE_ID=$(aws ec2 run-instances \
+            --region ${{ vars.AWS_REGION }} \
+            --image-id "$AMI_ID" \
+            --instance-type "$INSTANCE_TYPE" \
+            --key-name ${{ secrets.ENDEE_PEM }} \
+            --security-group-ids ${{ secrets.VECTORDBBENCH_SERVER_GROUP_ID }} \
+            --subnet-id ${{ secrets.AWS_SUBNET_ID }} \
+            --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":30,"VolumeType":"gp3"}}]' \
+            --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$ARCH_NAME}]" \
+            --query 'Instances[0].InstanceId' \
+            --output text)
+
+          echo "InstanceID: $ENDEE_INSTANCE_ID"
+          echo "instance_id=$ENDEE_INSTANCE_ID" >> $GITHUB_OUTPUT
+
+          aws ec2 wait instance-running \
+            --instance-ids $ENDEE_INSTANCE_ID
+
+          IP=$(aws ec2 describe-instances \
+            --instance-ids $ENDEE_INSTANCE_ID \
+            --query 'Reservations[0].Instances[0].PublicIpAddress' \
+            --output text)
+
+          echo "IP: $IP"
+          echo "ip=$IP" >> $GITHUB_OUTPUT
+
+      - name: Write PEM file
+        run: |
+          mkdir -p "$HOME/.ssh"
+          echo "${{ secrets.ENDEE_SSH_PRIVATE_KEY }}" > "$HOME/.ssh/${{ secrets.ENDEE_PEM }}"
+          chmod 400 "$HOME/.ssh/${{ secrets.ENDEE_PEM }}"
+          echo "PEM file created"
+      
+      - name: Wait for SSH to be ready 
+        shell: bash
+        run: |
+          ENDEE_SSH_READY=false
+          ENDEE_IP="${{ steps.launch.outputs.ip }}"
+          ENDEE_PEM_FILE="$HOME/.ssh/${{ secrets.ENDEE_PEM }}"
+
+          for i in {1..20}; do
+            if ssh -i "$ENDEE_PEM_FILE" -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes ubuntu@"$ENDEE_IP" "echo ok" 2>/dev/null; then
+              echo "SSH ready on ${{ matrix.arch.name }} @ $ENDEE_IP"
+              ENDEE_SSH_READY=true
+              break
+            fi
+            echo "Attempt $i/20 failed, retrying in 10 seconds..."
+            sleep 10
+          done
+
+          if [ "$ENDEE_SSH_READY" = false ]; then
+            echo "Failed to SSH to Endee Server"
+            exit 1
+          fi
+
+      - name: Build Endee Binary
+        run: |
+          ssh -o StrictHostKeyChecking=no -i "$HOME/.ssh/${{ secrets.ENDEE_PEM }}" ubuntu@${{ steps.launch.outputs.ip }} << 'EOF'
+            set -euo pipefail
+            sudo apt-get update -y
+            sudo apt-get install -y git build-essential
+            cd ~
+            git clone https://github.com/endee-io/endee.git
+            cd endee
+            ulimit -n 5000
+            chmod +x ./install.sh
+            ARCH="${{ matrix.arch.name }}"
+            if [[ "$ARCH" == "avx2" ]] || [[ "$ARCH" == "avx512" ]]; then
+              ./install.sh --release --avx2
+            else
+              ./install.sh --release --neon
+            fi
+          EOF
+
+      - name: Download binary
+        run: |
+          # verify path exists first
+          ssh -o StrictHostKeyChecking=no -i "$HOME/.ssh/${{ secrets.ENDEE_PEM }}" \
+            ubuntu@${{ steps.launch.outputs.ip }} \
+            "find /home/ubuntu -name '${{ matrix.arch.binary_file_name }}' 2>/dev/null"
+
+          scp -o StrictHostKeyChecking=no -i "$HOME/.ssh/${{ secrets.ENDEE_PEM }}" \
+            ubuntu@${{ steps.launch.outputs.ip }}:"/home/ubuntu/endee/build/${{ matrix.arch.binary_file_name }}" \
+            ./ndd-${{ matrix.arch.name }}
+
+      - name: Upload binary as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ndd-${{ matrix.arch.name }}
+          path: ./ndd-${{ matrix.arch.name }}
+      
+          
+      - name: Terminate instance
+        if: always()
+        run: |
+          aws ec2 terminate-instances \
+            --instance-ids ${{ steps.launch.outputs.instance_id }}
+
+  # ← separate job, runs AFTER all 4 builds finish
+  push-binaries:
+    runs-on: ubuntu-latest
+    needs: create-and-build      # waits for all 4 matrix jobs to complete
+
+    steps:
+      - name: Download all binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: ./binaries        # downloads all 4 artifacts here
+
+      - name: Push all binaries to ndd-repo
+        run: |
+          git clone https://x-access-token:${{ secrets.PAT }}@github.com/Endee-Pro/ndd-docker.git
+          cd ndd-docker
+
+          git checkout main
+          mkdir -p build
+
+          # copy all 4 binaries at once
+          cp ../binaries/ndd-avx2/ndd-avx2   ./build/ndd-avx2
+          cp ../binaries/ndd-avx512/ndd-avx512 ./build/ndd-avx512
+          cp ../binaries/ndd-neon/ndd-neon   ./build/ndd-neon
+          cp ../binaries/ndd-sve2/ndd-sve2   ./build/ndd-sve2
+
+          # UPDATE TAG IN DOCKERFILE 
+          sed -i 's/LABEL version=".*"/LABEL version="${{ github.event.inputs.tag_name }}"/' ./Dockerfile
+
+          git config user.email "actions@github.com"
+          git config user.name "GitHub Actions"
+
+          git add .
+
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Add binaries from release ${{ github.event.inputs.tag_name }}"
+            git push -u origin omnish/release-note-sync
+          fi

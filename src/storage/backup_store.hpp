@@ -19,9 +19,29 @@
 #include "settings.hpp"
 #include "log.hpp"
 
+enum class BackupOperation {
+    Creation,
+    Restoration
+};
+
+inline std::string backupOperationToString(BackupOperation op) {
+    switch (op) {
+        case BackupOperation::Creation:    return "creation";
+        case BackupOperation::Restoration: return "restoration";
+    }
+    return "";
+}
+
+struct ActiveBackupStatus {
+    std::string index_id;
+    std::string backup_name;
+    std::string operation;
+};
+
 struct ActiveBackup {
     std::string index_id;
     std::string backup_name;
+    BackupOperation operation;
     std::jthread thread;       // jthread: built-in stop_token + auto-join on destruction
 };
 
@@ -189,9 +209,9 @@ public:
     // Active backup tracking
 
     void setActiveBackup(const std::string& username, const std::string& index_id,
-                         const std::string& backup_name, std::jthread&& thread) {
+                         const std::string& backup_name, const BackupOperation& operation ,std::jthread&& thread) {
         std::lock_guard<std::mutex> lock(active_user_backups_mutex_);
-        active_user_backups_[username] = {index_id, backup_name, std::move(thread)};
+        active_user_backups_[username] = {index_id, backup_name, operation, std::move(thread)};
     }
 
     void clearActiveBackup(const std::string& username) {
@@ -292,11 +312,15 @@ public:
 
     // Active backup query
 
-    std::optional<std::pair<std::string, std::string>> getActiveBackup(const std::string& username) {
+    std::optional<ActiveBackupStatus> getActiveBackup(const std::string& username) {
         std::lock_guard<std::mutex> lock(active_user_backups_mutex_);
         auto it = active_user_backups_.find(username);
         if (it != active_user_backups_.end()) {
-            return std::make_pair(it->second.index_id, it->second.backup_name);
+            return ActiveBackupStatus{
+                it->second.index_id,
+                it->second.backup_name,
+                backupOperationToString(it->second.operation)
+            };
         }
         return std::nullopt;
     }

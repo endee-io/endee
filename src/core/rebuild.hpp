@@ -5,16 +5,22 @@
 #include <memory>
 #include <atomic>
 #include <mutex>
+#include <shared_mutex>
 #include <thread>
 #include <chrono>
 #include <filesystem>
+#include <functional>
 #include <iomanip>
 #include <sstream>
+#include <stop_token>
 #include <vector>
 
 #include "settings.hpp"
 #include "log.hpp"
 #include "json/nlohmann_json.hpp"
+#include "hnsw/hnswlib.h"
+#include "vector_storage.hpp"
+#include "../quant/common.hpp"
 
 struct RebuildResult {
     bool success;
@@ -31,6 +37,45 @@ struct ActiveRebuild {
     std::chrono::system_clock::time_point started_at;
     std::chrono::system_clock::time_point completed_at;
     std::jthread thread;  // jthread: built-in stop_token + auto-join on destruction
+};
+
+// Parameters passed to Rebuild::executeJob. IndexManager-specific operations are
+// provided as callbacks so rebuild.hpp does not need to include ndd.hpp.
+struct RebuildJobParams {
+    // Identity
+    std::string index_id;
+    std::string username;
+    size_t new_M;
+    size_t new_ef_con;
+
+    // Current graph config (read from entry->alg by IndexManager before thread spawn)
+    hnswlib::SpaceType space_type;
+    size_t dim;
+    ndd::quant::QuantizationLevel quant_level;
+    int32_t checksum;
+    size_t max_elements;
+
+    // Storage for vector iteration
+    std::shared_ptr<VectorStorage> vector_storage;
+
+    // File paths
+    std::string temp_path;
+    std::string timestamped_path;
+    std::string index_path;
+
+    // Threading
+    size_t num_parallel_inserts;
+
+    // Mutex pointer — executeJob acquires this for the whole job duration
+    std::shared_mutex* operation_mutex;
+
+    // Callbacks for IndexManager-specific actions (avoids circular ndd.hpp include)
+    std::function<void()> save_current_index;
+    std::function<void(std::unique_ptr<hnswlib::HierarchicalNSW<float>>)> swap_alg;
+    std::function<void(size_t new_M, size_t new_ef_con)> update_metadata;
+    std::function<void()> clear_dirty;
+    std::function<void(hnswlib::HierarchicalNSW<float>*, std::shared_ptr<VectorStorage>)> wire_fetchers;
+    std::function<void(size_t, size_t, std::function<void(size_t)>)> parallel_add;
 };
 
 class Rebuild {
@@ -199,5 +244,92 @@ public:
             ).count()
         );
         return index_dir + "/vectors/" + settings::DEFAULT_SUBINDEX + ".idx." + ts;
+    }
+
+    // Owns all rebuild execution. Called directly from the jthread lambda spawned in
+    // rebuildIndexAsync. IndexManager-specific operations come in via p callbacks.
+    void executeJob(const RebuildJobParams& p, std::stop_token st) {
+        try {
+            std::unique_lock<std::shared_mutex> op_lock(*p.operation_mutex);
+
+            // Phase 1 — save current state before rebuilding
+            p.save_current_index();
+
+            // Phase 2 — build new HNSW with updated M/ef_con
+            auto new_alg = std::make_unique<hnswlib::HierarchicalNSW<float>>(
+                p.max_elements, p.space_type, p.dim, p.new_M, p.new_ef_con,
+                settings::RANDOM_SEED, p.quant_level, p.checksum);
+
+            // MUST wire fetchers before addPoint — searchBaseLayer needs this for base-layer-only nodes
+            p.wire_fetchers(new_alg.get(), p.vector_storage);
+
+            auto cursor = p.vector_storage->getCursor();
+            const size_t batch_size = settings::RECOVERY_BATCH_SIZE;
+            size_t total_processed = 0;
+            size_t batches_since_checkpoint = 0;
+            constexpr size_t CHECKPOINT_INTERVAL = 5;
+
+            while (cursor.hasNext()) {
+                if (st.stop_requested()) {
+                    if (std::filesystem::exists(p.temp_path))
+                        std::filesystem::remove(p.temp_path);
+                    failActiveRebuild(p.username, "Rebuild interrupted by server shutdown");
+                    return;
+                }
+
+                std::vector<std::pair<ndd::idInt, std::vector<uint8_t>>> batch;
+                batch.reserve(batch_size);
+                while (cursor.hasNext() && batch.size() < batch_size) {
+                    auto [label, vec_bytes] = cursor.next();
+                    if (!vec_bytes.empty())
+                        batch.emplace_back(label, std::move(vec_bytes));
+                }
+                if (batch.empty()) break;
+
+                p.parallel_add(batch.size(), p.num_parallel_inserts,
+                    [&](size_t i) {
+                        const auto& [label, vec_bytes] = batch[i];
+                        new_alg->addPoint<true>(vec_bytes.data(), label);
+                    });
+
+                total_processed += batch.size();
+                auto state = getActiveRebuild(p.username);
+                if (state) state->vectors_processed.store(total_processed);
+
+                if (++batches_since_checkpoint >= CHECKPOINT_INTERVAL) {
+                    new_alg->saveIndex(p.temp_path);
+                    batches_since_checkpoint = 0;
+                }
+            }
+
+            // Phase 3 — save final, copy to canonical path, load fresh from disk
+            new_alg->saveIndex(p.timestamped_path);
+            std::filesystem::copy_file(p.timestamped_path, p.index_path,
+                std::filesystem::copy_options::overwrite_existing);
+
+            // Cannot call reloadIndex() here — we hold operation_mutex and reloadIndex acquires
+            // indices_mutex_, while deleteIndex holds indices_mutex_ then acquires operation_mutex.
+            // Calling reloadIndex here would deadlock with a concurrent delete on the same index.
+            auto fresh_alg = std::make_unique<hnswlib::HierarchicalNSW<float>>(p.index_path, 0);
+            p.wire_fetchers(fresh_alg.get(), p.vector_storage);
+
+            // Both files are deleted here on success. If the server crashes before reaching this
+            // point, the timestamped file (default.idx.<ts>) may be left on disk — it is safe
+            // to delete manually on next startup as it does not affect index correctness.
+            if (std::filesystem::exists(p.temp_path)) std::filesystem::remove(p.temp_path);
+            if (std::filesystem::exists(p.timestamped_path)) std::filesystem::remove(p.timestamped_path);
+
+            p.swap_alg(std::move(fresh_alg));
+            p.update_metadata(p.new_M, p.new_ef_con);
+            p.clear_dirty();
+
+            LOG_INFO(2051, p.index_id, "Rebuild completed: " << total_processed << " vectors rebuilt");
+            completeActiveRebuild(p.username);
+
+        } catch (const std::exception& e) {
+            LOG_ERROR(2052, p.index_id, "Rebuild failed: " << e.what());
+            if (std::filesystem::exists(p.temp_path)) std::filesystem::remove(p.temp_path);
+            failActiveRebuild(p.username, e.what());
+        }
     }
 };

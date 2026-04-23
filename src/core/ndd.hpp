@@ -223,46 +223,6 @@ private:
     BackupStore backup_store_;
     Rebuild rebuild_;
     void executeBackupJob(const std::string& index_id, const std::string& backup_name, std::stop_token st);
-    void executeRebuildJob(const std::string& index_id, const std::string& username,
-                           size_t new_M, size_t new_ef_con, std::stop_token st);
-
-    // Shared parallel addPoint utility — static chunk partition (same as addVectors).
-    // ProcessFn signature: void(size_t index)
-    template <typename ProcessFn>
-    static void parallelAddPoints(size_t count, size_t max_threads, ProcessFn&& process) {
-        if (count == 0) return;
-        size_t num_threads = std::min(max_threads, count);
-        const size_t chunk_size = (count + num_threads - 1) / num_threads;  // Ceiling division
-        std::vector<std::thread> threads;
-        threads.reserve(num_threads);
-
-        for (size_t t = 0; t < num_threads; ++t) {
-            threads.emplace_back([&, t]() {
-                size_t start_idx = t * chunk_size;
-                size_t end_idx = std::min(start_idx + chunk_size, count);
-                for (size_t i = start_idx; i < end_idx; ++i) {
-                    process(i);
-                }
-            });
-        }
-
-        for (auto& th : threads) {
-            th.join();
-        }
-    }
-
-    // Wires vector fetchers on an HNSW graph. Must be called before addPoint — searchBaseLayer
-    // during graph construction needs fetchers to compute distances for base-layer-only nodes.
-    static void wireVectorFetchers(hnswlib::HierarchicalNSW<float>* alg,
-                                   std::shared_ptr<VectorStorage> vs) {
-        alg->setVectorFetcher([vs](ndd::idInt label, uint8_t* buffer) {
-            return vs->get_vector(label, buffer);
-        });
-        alg->setVectorFetcherBatch([vs](const ndd::idInt* labels, uint8_t* buffers,
-                                        bool* success, size_t count) -> size_t {
-            return vs->get_vectors_batch_into(labels, buffers, success, count);
-        });
-    }
 
     std::unique_ptr<WriteAheadLog> createWAL(const std::string& index_id) {
         const std::string wal_dir = data_dir_ + "/" + index_id;
@@ -1936,11 +1896,10 @@ public:
         return backup_store_.validateBackupName(backup_name);
     }
 
-<<<<<<< HEAD
     std::pair<bool, std::string> uploadBackup(const std::string& backup_name,
                                                 const std::string& username,
                                                 const std::string& file_content);
-=======
+
     // Metadata access
     std::optional<IndexMetadata> getMetadata(const std::string& index_id) {
         return metadata_manager_->getMetadata(index_id);
@@ -1968,7 +1927,42 @@ public:
                                       const std::string& index_id) const {
         return rebuild_.getProgress(username, index_id);
     }
->>>>>>> e66b946 (Rebuild index with new config (#136))
+
+    // Shared parallel addPoint utility — static chunk partition (same as addVectors).
+    // ProcessFn signature: void(size_t index)
+    template <typename ProcessFn>
+    static void parallelAddPoints(size_t count, size_t max_threads, ProcessFn&& process) {
+        if (count == 0) return;
+        size_t num_threads = std::min(max_threads, count);
+        const size_t chunk_size = (count + num_threads - 1) / num_threads;
+        std::vector<std::thread> threads;
+        threads.reserve(num_threads);
+        for (size_t t = 0; t < num_threads; ++t) {
+            threads.emplace_back([&, t]() {
+                size_t start_idx = t * chunk_size;
+                size_t end_idx = std::min(start_idx + chunk_size, count);
+                for (size_t i = start_idx; i < end_idx; ++i) {
+                    process(i);
+                }
+            });
+        }
+        for (auto& th : threads) {
+            th.join();
+        }
+    }
+
+    // Wires vector fetchers on an HNSW graph. Must be called before addPoint — searchBaseLayer
+    // during graph construction needs fetchers to compute distances for base-layer-only nodes.
+    static void wireVectorFetchers(hnswlib::HierarchicalNSW<float>* alg,
+                                   std::shared_ptr<VectorStorage> vs) {
+        alg->setVectorFetcher([vs](ndd::idInt label, uint8_t* buffer) {
+            return vs->get_vector(label, buffer);
+        });
+        alg->setVectorFetcherBatch([vs](const ndd::idInt* labels, uint8_t* buffers,
+                                        bool* success, size_t count) -> size_t {
+            return vs->get_vectors_batch_into(labels, buffers, success, count);
+        });
+    }
 };
 
 // ========== IndexManager backup implementations ==========
@@ -2327,15 +2321,13 @@ inline std::pair<bool, std::string> IndexManager::uploadBackup(const std::string
 // ========== IndexManager rebuild implementations ==========
 
 inline RebuildResult IndexManager::rebuildIndexAsync(const std::string& index_id,
-                                                                    size_t new_M,
-                                                                    size_t new_ef_con) {
-    // Validate index exists
+                                                      size_t new_M,
+                                                      size_t new_ef_con) {
     auto meta = metadata_manager_->getMetadata(index_id);
     if (!meta) {
         return {false, 404, "Index not found"};
     }
 
-    // Extract username for backup check
     std::string username;
     size_t pos = index_id.find('/');
     if (pos != std::string::npos) {
@@ -2344,7 +2336,6 @@ inline RebuildResult IndexManager::rebuildIndexAsync(const std::string& index_id
         return {false, 400, "Invalid index ID format"};
     }
 
-    // Check for active backup or rebuild
     if (backup_store_.hasActiveBackup(username)) {
         return {false, 409, "Backup already in progress for user: " + username};
     }
@@ -2352,170 +2343,62 @@ inline RebuildResult IndexManager::rebuildIndexAsync(const std::string& index_id
         return {false, 409, "Rebuild already in progress for user: " + username};
     }
 
-    // Load entry to get current element count
+    // Pre-fetch entry now — captured by lambdas so the thread never calls getIndexEntry
     auto entry = getIndexEntry(index_id);
     size_t current_count = entry->alg->getElementsCount();
 
-    // Ensure at least one parameter differs
     if (new_M == meta->M && new_ef_con == meta->ef_con) {
         return {false, 400, "No configuration changes specified"};
     }
 
-    // Register state FIRST with empty thread — hasActiveRebuild() now returns true immediately,
-    // blocking any concurrent rebuild requests before the thread is even spawned.
+    std::string base_path = data_dir_ + "/" + index_id;
+    std::string vector_storage_dir = base_path + "/vectors";
+
+    RebuildJobParams params{
+        .index_id           = index_id,
+        .username           = username,
+        .new_M              = new_M,
+        .new_ef_con         = new_ef_con,
+        .space_type         = entry->alg->getSpaceType(),
+        .dim                = entry->alg->getDimension(),
+        .quant_level        = entry->alg->getQuantLevel(),
+        .checksum           = entry->alg->getChecksum(),
+        .max_elements       = entry->alg->getMaxElements(),
+        .vector_storage     = entry->vector_storage,
+        .temp_path          = Rebuild::getTempPath(base_path),
+        .timestamped_path   = Rebuild::getTimestampedPath(base_path),
+        .index_path         = vector_storage_dir + "/" + settings::DEFAULT_SUBINDEX + ".idx",
+        .num_parallel_inserts = settings::NUM_PARALLEL_INSERTS,
+        .operation_mutex    = &entry->operation_mutex,
+        .save_current_index = [this, entry]() { saveIndexInternal(*entry); },
+        .swap_alg           = [entry](auto fresh) { entry->alg = std::move(fresh); },
+        .update_metadata    = [this, index_id, entry](size_t nm, size_t nef) {
+            auto m = metadata_manager_->getMetadata(index_id);
+            if (m) {
+                m->M = nm;
+                m->ef_con = nef;
+                m->total_elements = entry->alg->getElementsCount();
+                metadata_manager_->storeMetadata(index_id, *m);
+            }
+        },
+        .clear_dirty        = [entry]() { entry->is_dirty = false; },
+        .wire_fetchers      = [](auto* alg, auto vs) { IndexManager::wireVectorFetchers(alg, vs); },
+        .parallel_add       = [](size_t n, size_t t, std::function<void(size_t)> fn) {
+            IndexManager::parallelAddPoints(n, t, std::move(fn));
+        },
+    };
+
+    // Register state FIRST with empty thread — hasActiveRebuild() returns true immediately
     rebuild_.setActiveRebuild(username, index_id, current_count, std::jthread{});
 
-    // THEN spawn thread
-    std::jthread t([this, index_id, username, new_M, new_ef_con](std::stop_token st) {
-        executeRebuildJob(index_id, username, new_M, new_ef_con, st);
+    // Spawn thread — lambda calls rebuild_.executeJob directly (execution lives in Rebuild)
+    std::jthread t([this, params = std::move(params)](std::stop_token st) mutable {
+        rebuild_.executeJob(params, st);
     });
 
     // Move real thread into the already-registered state
     rebuild_.attachRebuildThread(username, std::move(t));
 
-    LOG_INFO(2050, index_id, "Rebuild started: M=" << new_M
-                              << " ef_con=" << new_ef_con);
-
+    LOG_INFO(2050, index_id, "Rebuild started: M=" << new_M << " ef_con=" << new_ef_con);
     return {true, 202, "Rebuild started"};
-}
-
-// executeRebuildJob lives in IndexManager (not Rebuild) because it needs direct access to
-// CacheEntry, parallelAddPoints, and saveIndexInternal. Rebuild is a state-tracker only —
-// moving execution here would create a circular dependency with IndexManager.
-inline void IndexManager::executeRebuildJob(const std::string& index_id,
-                                             const std::string& username,
-                                             size_t new_M, size_t new_ef_con,
-                                             std::stop_token st) {
-    std::string base_path = data_dir_ + "/" + index_id;
-    std::string temp_path = rebuild_.getTempPath(base_path);
-    std::string timestamped_path = rebuild_.getTimestampedPath(base_path);
-    std::string vector_storage_dir = base_path + "/vectors";
-    std::string index_path = vector_storage_dir + "/" + settings::DEFAULT_SUBINDEX + ".idx";
-
-    try {
-        auto entry = getIndexEntry(index_id);
-
-        // Hold operation_mutex for entire rebuild — writes timeout, searches continue
-        std::unique_lock<std::shared_mutex> operation_lock(entry->operation_mutex);
-
-        // Phase 1 — Save current state
-        saveIndexInternal(*entry);
-
-        // Read current config from the existing HNSW graph
-        auto space_type = entry->alg->getSpaceType();
-        size_t dim = entry->alg->getDimension();
-        auto quant_level = entry->alg->getQuantLevel();
-        int32_t checksum = entry->alg->getChecksum();
-        size_t max_elements = entry->alg->getMaxElements();
-
-        // Phase 2 — Build new HNSW (same max_elements as current index)
-        auto new_alg = std::make_unique<hnswlib::HierarchicalNSW<float>>(
-            max_elements, space_type, dim, new_M, new_ef_con,
-            settings::RANDOM_SEED, quant_level, checksum);
-
-        // MUST wire fetchers before addPoint — searchBaseLayer needs this for base-layer-only nodes
-        wireVectorFetchers(new_alg.get(), entry->vector_storage);
-
-        // Iterate VectorStore and re-insert all vectors
-        auto cursor = entry->vector_storage->getCursor();
-        const size_t batch_size = settings::RECOVERY_BATCH_SIZE;
-        size_t total_processed = 0;
-        size_t batches_since_checkpoint = 0;
-        constexpr size_t CHECKPOINT_INTERVAL = 5;  // Save temp every 5 batches
-
-        while (cursor.hasNext()) {
-            if (st.stop_requested()) {
-                if (std::filesystem::exists(temp_path)) {
-                    std::filesystem::remove(temp_path);
-                }
-                rebuild_.failActiveRebuild(username, "Rebuild interrupted by server shutdown");
-                return;
-            }
-
-            // Collect batch
-            std::vector<std::pair<ndd::idInt, std::vector<uint8_t>>> batch;
-            batch.reserve(batch_size);
-            while (cursor.hasNext() && batch.size() < batch_size) {
-                auto [label, vec_bytes] = cursor.next();
-                if (!vec_bytes.empty()) {
-                    batch.emplace_back(label, std::move(vec_bytes));
-                }
-            }
-
-            if (batch.empty()) {
-                break;
-            }
-
-            // Multi-threaded insert (shared utility with addVectors)
-            parallelAddPoints(batch.size(), settings::NUM_PARALLEL_INSERTS,
-                [&](size_t i) {
-                    const auto& [label, vec_bytes] = batch[i];
-                    new_alg->addPoint<true>(vec_bytes.data(), label);
-                });
-
-            total_processed += batch.size();
-
-            // Update progress
-            auto state = rebuild_.getActiveRebuild(username);
-            if (state) {
-                state->vectors_processed.store(total_processed);
-            }
-
-            // Periodic checkpoint save
-            batches_since_checkpoint++;
-            if (batches_since_checkpoint >= CHECKPOINT_INTERVAL) {
-                new_alg->saveIndex(temp_path);
-                batches_since_checkpoint = 0;
-            }
-        }
-
-        // Phase 3 — Save final + Copy + Swap
-
-        // Save new graph to timestamped file 
-        new_alg->saveIndex(timestamped_path);
-
-        // Copy to canonical name (overwrites old default.idx on disk)
-        std::filesystem::copy_file(timestamped_path, index_path,
-            std::filesystem::copy_options::overwrite_existing);
-
-        // Cannot call reloadIndex() here — we hold operation_mutex and reloadIndex acquires
-        // indices_mutex_, while deleteIndex holds indices_mutex_ then acquires operation_mutex.
-        // Calling reloadIndex here would deadlock with a concurrent delete on the same index.
-        auto fresh_alg = std::make_unique<hnswlib::HierarchicalNSW<float>>(index_path, 0);
-        wireVectorFetchers(fresh_alg.get(), entry->vector_storage);
-        entry->alg = std::move(fresh_alg);
-
-        // Both files are deleted here on success. If the server crashes before reaching this
-        // point, the timestamped file (default.idx.<ts>) may be left on disk — it is safe
-        // to delete manually on next startup as it does not affect index correctness.
-        if (std::filesystem::exists(temp_path)) {
-            std::filesystem::remove(temp_path);
-        }
-        if (std::filesystem::exists(timestamped_path)) {
-            std::filesystem::remove(timestamped_path);
-        }
-
-        // Update metadata with new config
-        auto meta = metadata_manager_->getMetadata(index_id);
-        if (meta) {
-            meta->M = new_M;
-            meta->ef_con = new_ef_con;
-            meta->total_elements = entry->alg->getElementsCount();
-            metadata_manager_->storeMetadata(index_id, *meta);
-        }
-
-        entry->is_dirty = false;  // We just saved the new graph
-
-        LOG_INFO(2051, index_id, "Rebuild completed: " << total_processed << " vectors rebuilt");
-        rebuild_.completeActiveRebuild(username);
-
-    } catch (const std::exception& e) {
-        LOG_ERROR(2052, index_id, "Rebuild failed: " << e.what());
-
-        // Cleanup temp file on error
-        if (std::filesystem::exists(temp_path)) {
-            std::filesystem::remove(temp_path);
-        }
-        rebuild_.failActiveRebuild(username, e.what());
-    }
 }

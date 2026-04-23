@@ -2142,10 +2142,6 @@ inline void IndexManager::restoreBackup(const std::string& backup_name,
                                                                   const std::string& target_index_name,
                                                                   const std::string& username,
                                                                   std::stop_token st) {
-    // std::pair<bool, std::string> result = backup_store_.validateBackupName(backup_name);
-    // if(!result.first) {
-    //     return result;
-    // }
 
     std::string backup_dir_root = backup_store_.getUserBackupDir(username);
     std::string backup_tar = backup_dir_root + "/" + backup_name + ".tar";
@@ -2154,14 +2150,6 @@ inline void IndexManager::restoreBackup(const std::string& backup_name,
     std::string backup_extract_dir = user_temp_dir + "/" + backup_name;
     std::string target_index_id = username + "/" + target_index_name;
     std::string target_dir = data_dir_ + "/" + target_index_id;
-
-    // if(!std::filesystem::exists(backup_tar)) {
-    //     return {false, "Backup not found: " + backup_name};
-    // }
-
-    // if(metadata_manager_->getMetadata(target_index_id).has_value()) {
-    //     return {false, "Target index already exists"};
-    // }
 
     try {
         std::string error_msg;

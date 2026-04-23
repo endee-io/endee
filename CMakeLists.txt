@@ -254,6 +254,7 @@ message(STATUS "Binary name: ${NDD_BINARY_NAME}")
 set(NDD_CORE_SOURCES
     src/sparse/inverted_index.cpp
     src/utils/system_sanity/system_sanity.cpp
+    src/core/rebuild.cpp
 )
 
 # Build non-main project sources separately so they can be compiled in parallel

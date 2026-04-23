@@ -198,6 +198,7 @@ struct PersistenceConfig {
 
 #include "../storage/backup_store.hpp"
 #include "rebuild.hpp"
+#include "utils/types.hpp"
 
 class IndexManager {
 private:

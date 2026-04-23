@@ -1888,7 +1888,7 @@ public:
         return backup_store_.deleteBackup(backup_name, username);
     }
 
-    std::optional<ActiveBackupStatus> getActiveBackup(const std::string& username) {
+    std::optional<std::pair<std::string, std::string>> getActiveBackup(const std::string& username) {
         return backup_store_.getActiveBackup(username);
     }
 
@@ -2249,7 +2249,7 @@ inline std::pair<bool, std::string> IndexManager::createBackupAsync(const std::s
     std::jthread t([this, index_id, backup_name](std::stop_token st) {
         executeBackupJob(index_id, backup_name, st);
     });
-    backup_store_.setActiveBackup(username, index_id, backup_name, BackupOperation::Creation, std::move(t));
+    backup_store_.setActiveBackup(username, backup_name, BackupOperation::Creation, std::move(t));
 
     LOG_INFO(2046, index_id, "Backup started: " << backup_name);
 
@@ -2281,8 +2281,7 @@ inline std::pair<bool, std::string> IndexManager::restoreBackupAsync(const std::
         restoreBackup(backup_name, target_index_name, username,st);
     });
     
-    const std::string index_id = username + "/" + target_index_name;
-    backup_store_.setActiveBackup(username,index_id, backup_name, BackupOperation::Restoration, std::move(t));
+    backup_store_.setActiveBackup(username, backup_name, BackupOperation::Restoration, std::move(t));
 
     LOG_INFO(2059, username, "Restoration started for backup: " << backup_name <<", target_index: " << target_index_name);
 

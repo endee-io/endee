@@ -663,9 +663,8 @@ int main(int argc, char** argv) {
                     crow::json::wvalue response;
                     if (active) {
                         response["active"] = true;
-                        response["backup_name"] = active->backup_name;
-                        response["index_id"] = active->index_id;
-                        response["operation"] = active->operation;
+                        response["backup_name"] = active->first;
+                        response["operation"] = active->second;
                     } else {
                         response["active"] = false;
                     }

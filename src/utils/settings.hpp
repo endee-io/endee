@@ -75,7 +75,7 @@ namespace settings {
     constexpr size_t MINIMUM_REQUIRED_FS_BYTES = (10 * GB);
 
     // System sanity check thresholds
-    constexpr size_t DEFAULT_MINIMUM_REQUIRED_DRAM_MB = (4 * 1024); //GB in MB
+    constexpr size_t DEFAULT_MINIMUM_REQUIRED_DRAM_MB = (2 * 1024); //GB in MB
     constexpr size_t MINIMUM_OPEN_FILES = 5000;
     constexpr size_t DEFAULT_MINIMUM_CPU_CORES = 2;
 
@@ -111,7 +111,7 @@ namespace settings {
     constexpr size_t DEFAULT_MAX_ELEMENTS = 100'000;
     constexpr size_t DEFAULT_MAX_ELEMENTS_INCREMENT = 100'000;
     constexpr size_t DEFAULT_MAX_ELEMENTS_INCREMENT_TRIGGER = 50'000;
-    constexpr size_t DEFAULT_VECTOR_CACHE_PERCENTAGE = 15;
+    constexpr size_t DEFAULT_VECTOR_CACHE_PERCENTAGE = 50;
     constexpr size_t DEFAULT_VECTOR_CACHE_MIN_BITS = 17; // Minimum 128K entries in cache
     const std::string DEFAULT_SERVER_ID = "unknown";
 

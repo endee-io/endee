@@ -1,0 +1,9 @@
+blank_issues_enabled: false
+
+contact_links:
+  - name: Documentation
+    url: https://docs.endee.io/
+    about: Check the docs before opening an issue.
+  - name: Discussions
+    url: https://github.com/endee-io/endee/discussions
+    about: For questions and general discussion.

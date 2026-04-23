@@ -638,30 +638,9 @@ int main(int argc, char** argv) {
                         return json_error(400, result.second);
                     }
 
-                    // Check if backup already exists
-                    std::string user_backup_dir = settings::DATA_DIR + "/backups/" + ctx.username;
-                    std::filesystem::create_directories(user_backup_dir);
-                    std::string backup_path = user_backup_dir + "/" + backup_name + ".tar";
-                    if(std::filesystem::exists(backup_path)) {
-                        LOG_WARN(1063, ctx.username, "Backup upload conflicts with existing backup " << backup_name);
-                        return json_error(409,
-                                          "Backup with name '" + backup_name + "' already exists");
-                    }
-
-                    // Write the file
-                    std::ofstream out(backup_path, std::ios::binary);
-                    if(!out.is_open()) {
-                        return json_error_500(
-                                ctx.username, req.url, "Failed to create backup file");
-                    }
-                    out.write(file_content.data(), file_content.size());
-                    out.close();
-
-                    if(!out.good()) {
-                        // Clean up partial file on error
-                        std::filesystem::remove(backup_path);
-                        return json_error_500(
-                                ctx.username, req.url, "Failed to write backup file");
+                    std::pair<bool, std::string> uploadStatus = index_manager.uploadBackup(backup_name, ctx.username, file_content);
+                    if(!uploadStatus.first) {
+                        return json_error(500, uploadStatus.second);
                     }
 
                     return crow::response(201, "Backup uploaded successfully");

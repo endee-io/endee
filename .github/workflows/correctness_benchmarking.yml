@@ -1,6 +1,6 @@
 name: VectorDB - Run Correctness Benchmark
 
-# ============ TRIGGER: PR COMMENT CONTAINING /correctness_benchmarking =================== 
+# ============ TRIGGER: PR COMMENT CONTAINING /correctness_benchmarking ===================
 on:
   issue_comment:
     types: [ created ]
@@ -78,7 +78,7 @@ jobs:
             core.setOutput('head_ref',  pr.head.ref);
             core.info(`Mode: ${mode}  SHA: ${pr.head.sha}`);
 
-      - name: Check Commenter has write access 
+      - name: Check Commenter has admin access 
         id: authz 
         # steps is a GitHub Actions context object that lets you access outputs and metadata from previous steps within the same job.
         if: steps.parse.outputs.mode != ''
@@ -91,14 +91,14 @@ jobs:
               username: context.payload.comment.user.login,
             });
             const level   = perm.permission;
-            const allowed = ['admin', 'write'].includes(level);
+            const allowed = ['admin'].includes(level);
             core.setOutput('authorized', String(allowed));
  
             if (!allowed) {
               await github.rest.issues.createComment({
                 owner: context.repo.owner, repo: context.repo.repo,
                 issue_number: context.issue.number,
-                body: `@${context.payload.comment.user.login} — only collaborators with **write** access can trigger benchmarks (your level: \`${level}\`).`,
+                body: `@${context.payload.comment.user.login} — only collaborators with **admin** access can trigger benchmarks (your level: \`${level}\`).`,
               });
               core.setFailed('Unauthorized');
             }
@@ -155,8 +155,10 @@ jobs:
             const sha       = '${{ needs.validate-command.outputs.head_sha }}'.slice(0,7);
             const actor     = context.payload.comment.user.login;
             const modeLabel = {dense:'Dense', hybrid:'Hybrid'}[mode];
+            const runId = '${{ github.run_id }}';
  
             const body = [
+              `<!-- run-id: ${runId} -->`,
               `## VectorDB Benchmark — ${modeLabel} — Starting`,
               ``,
               `Triggered by @${actor} · Commit \`${sha}\``,
@@ -176,7 +178,7 @@ jobs:
               issue_number: context.issue.number,
             });
             const menu = comments.find(c =>
-              c.body.includes('VectorDB Benchmark') &&
+              c.body.includes(`<!-- run-id: ${runId} -->`) &&
               c.user.login === 'github-actions[bot]'
             );
             if (menu) {
@@ -219,6 +221,7 @@ jobs:
             --key-name ${{ secrets.ENDEE_PEM }} \
             --security-group-ids ${{ secrets.VECTORDBBENCH_SERVER_GROUP_ID }} \
             --subnet-id ${{ secrets.AWS_SUBNET_ID }} \
+            --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":30,"VolumeType":"gp3"}}]' \
             --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$ENDEE_INSTANCE_NAME}]" \
             --query 'Instances[0].InstanceId' \
             --output text)
@@ -346,7 +349,9 @@ jobs:
             const sha       = '${{ needs.validate-command.outputs.head_sha }}'.slice(0,7);
             const actor     = context.payload.comment.user.login;
             const modeLabel = {dense:'Dense', hybrid:'Hybrid'}[mode];
+            const runId = '${{ github.run_id }}';
             const body = [
+              `<!-- run-id: ${runId} -->`,
               `## VectorDB Benchmark — ${modeLabel} — Running`,
               ``,
               `Triggered by @${actor} · Commit \`${sha}\``,
@@ -501,6 +506,15 @@ jobs:
               sudo systemctl enable docker 
 
               echo "DOCKER INSTALLED: \$(docker --version)"
+
+              # Download docker compose binary directly
+              sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-\$(uname -s)-\$(uname -m)" -o /usr/local/bin/docker-compose
+
+              # Give execute permission
+              sudo chmod +x /usr/local/bin/docker-compose
+
+              mkdir -p ~/.docker/cli-plugins
+              cp /usr/local/bin/docker-compose ~/.docker/cli-plugins/docker-compose
             fi
 
             # # RUN WITHOUT SUDO — ADD username TO DOCKER GROUP
@@ -519,11 +533,12 @@ jobs:
             arc=\$(grep -o 'avx2\|avx512\|neon\|sve2' /proc/cpuinfo | sort -u)
             echo "ARCHITECTURE: \$arc"
 
-            
+            # UPDATE ULIMIT OF OS 
+            ulimit -n 5000
 
             # BUILD ENDEE IMAGE
             echo "BUILDING ENDEE IMAGE"
-            sudo docker build --ulimit nofile=100000:100000 --build-arg BUILD_ARCH="\$arc" --build-arg DEBUG=true -t endee-oss:latest -f ./infra/Dockerfile .
+            sudo docker build --build-arg BUILD_ARCH="\$arc" --build-arg DEBUG=true -t endee-oss:latest -f ./infra/Dockerfile .
 
             # DOWN THE EXISTING CONTAINER IF EXISTS
             echo "DOWNING THE EXISTING CONTAINER IF EXISTS"
@@ -531,18 +546,7 @@ jobs:
 
             # RUN THE ENDEE CONTAINER
             echo "RUNNING ENDEE CONTAINER"
-            sudo docker run -d -p 8080:8080 -v endee-data:/data -e NDD_AUTH_TOKEN="" --name endee-server endee-oss:latest
-
-            # CHECK IF THE CONTAINER IS RUNNING
-            echo "CHECKING IF THE CONTAINER IS RUNNING"
-            if sudo docker ps | grep -q endee-server; then
-              echo "ENDEE CONTAINER IS RUNNING"
-            else
-              echo "ENDEE CONTAINER IS NOT RUNNING"
-              exit 1
-            fi
-
-
+            sudo docker-compose up -d
 
             
           ENDSSH
@@ -555,7 +559,9 @@ jobs:
             const sha       = '${{ needs.validate-command.outputs.head_sha }}'.slice(0,7);
             const actor     = context.payload.comment.user.login;
             const modeLabel = {dense:'Dense', hybrid:'Hybrid'}[mode];
+            const runId = '${{ github.run_id }}';
             const body = [
+              `<!-- run-id: ${runId} -->`,
               `## VectorDB Benchmark — ${modeLabel} — Running`,
               ``,
               `Triggered by @${actor} · Commit \`${sha}\``,
@@ -571,12 +577,12 @@ jobs:
             const { data: cs } = await github.rest.issues.listComments({
               owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number,
             });
-            const sc = cs.find(c => c.body.includes('VectorDB Benchmark —') && c.user.login === 'github-actions[bot]');
+            const sc = cs.find(c => c.body.includes(`<!-- run-id: ${runId} -->`)  && c.user.login === 'github-actions[bot]');
             if (sc) await github.rest.issues.updateComment({
               owner: context.repo.owner, repo: context.repo.repo, comment_id: sc.id, body,
             });
  
-  # ──────────────────────────────────────────────────────────
+  # ────────────────────────────────────────────────────────── 
   # JOB 3: Run benchmark on Benchmark server with the chosen mode 
   # ──────────────────────────────────────────────────────────
   run-benchmark:
@@ -879,7 +885,10 @@ jobs:
     name: Post Results 
     needs: [ validate-command, provision-servers, run-benchmark]
     runs-on: ubuntu-latest 
-    if: always()
+    if: |
+      always() &&
+      needs.validate-command.outputs.mode != '' && 
+      needs.validate-command.outputs.authorized == 'true'
 
     steps:
       # ─── SETUP SSH ─────────────────────────────────────────────────── 
@@ -1079,8 +1088,10 @@ jobs:
             // ── BUILD FINAL COMMENT ───────────────────────────────────
             const modeLabel   = { dense: 'Dense', hybrid: 'Hybrid' }[mode] ?? mode;
             const statusLabel = passed ? 'Passed' : 'Failed';
+            const runId = '${{ github.run_id }}';
 
             const body = [
+              `<!-- run-id: ${runId} -->`,
               `## VectorDB Benchmark — ${modeLabel} — ${statusLabel}`,
               ``,
               `Triggered by @${actor} · Commit \`${sha}\``,
@@ -1102,7 +1113,7 @@ jobs:
               issue_number: context.issue.number,
             });
             const existing = comments.find(c =>
-              c.body.includes('VectorDB Benchmark —') &&
+              c.body.includes(`<!-- run-id: ${runId} -->`) &&
               c.user.login === 'github-actions[bot]'
             );
             if (existing) {
@@ -1130,12 +1141,15 @@ jobs:
 
   #================================================================
   # JOB 5: TEARDOWN - TERMINATE BOTH SERVERS ALWAYS 
-  #================================================================
+  #================================================================ 
   teardown:
     name: Teardown Servers 
     needs: [validate-command, provision-servers, deploy-endee, run-benchmark, report-results]
     runs-on: ubuntu-latest
-    if: always()
+    if: |
+      always() && 
+      needs.validate-command.outputs.mode != '' &&
+      needs.validate-command.outputs.authorized == 'true' 
 
     steps:
       - name: Configure AWS credentials
@@ -1184,6 +1198,7 @@ jobs:
             const benchResult  = '${{ needs.run-benchmark.result }}';   // success | failure | cancelled
             const passed       = benchResult === 'success';
             const statusLabel  = passed ? 'Passed' : 'Failed';
+            const runId = '${{ github.run_id }}';
 
             // ── FIND THE EXISTING BOT COMMENT ─────────────────────────
             const { data: comments } = await github.rest.issues.listComments({
@@ -1192,7 +1207,7 @@ jobs:
               issue_number: context.issue.number,
             });
             const existing = comments.find(c =>
-              c.body.includes('VectorDB Benchmark —') &&
+              c.body.includes(`<!-- run-id: ${runId} -->`) &&
               c.user.login === 'github-actions[bot]'
             );
 
@@ -1237,6 +1252,7 @@ jobs:
             } else {
               // Fallback: no existing comment — create a minimal one
               const body = [
+                `<!-- run-id: ${runId} -->`,
                 `## VectorDB Benchmark — ${modeLabel} — ${statusLabel}`,
                 ``,
                 `Triggered by @${actor} · Commit \`${sha}\``,
@@ -1256,4 +1272,3 @@ jobs:
                 body,
               });
             }
-

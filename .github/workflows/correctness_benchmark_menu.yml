@@ -1,4 +1,3 @@
-
 # ==================== BIRD VIEW OF THIS FILE =========================
 # PR opened
 #    ↓
@@ -141,7 +140,7 @@ jobs:
             core.setOutput('pr_number', String(pr.number));
 
 
-  # ========================= POST BENCHMARK OPTIONS COMMENT ( CI PASSED, PR FOUND)  =========================
+  # ========================= POST BENCHMARK OPTIONS COMMENT ( CI PASSED, PR FOUND)  ========================= 
 
   post-menu:
     name: Benchmark Options
@@ -170,6 +169,7 @@ jobs:
             const ciRunUrl = context.payload.workflow_run.html_url;
 
             const body = [
+              `<!-- benchmark-menu -->`,
               `## VectorDB Benchmark - Ready To Run`,
               ``,
               `> **CI Passed** ([lint + unit tests] (${ciRunUrl})) - benchmark options unlocked.`,
@@ -219,7 +219,7 @@ jobs:
             // When GitHub Actions runs a workflow, it acts on behalf of a special built-in account called github-actions[bot]
             const existing = comments.find(c => 
               c.user.login === 'github-actions[bot]' &&
-              c.body.includes('VectorDB Benchmark')
+              c.body.includes('<!-- benchmark-menu -->')
             );
 
             if (existing) {

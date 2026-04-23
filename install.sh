@@ -197,7 +197,7 @@ distro_factory() {
 # ****************************************
 
 add_frontend() {
-    VERSION="v1.6.0"
+    VERSION="v1.6.1"
     log "Pulling frontend version ${VERSION}"
     mkdir -p $script_dir/frontend
     cd $script_dir/frontend

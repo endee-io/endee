@@ -22,9 +22,15 @@
 #include "../quant/common.hpp"
 #include "utils/types.hpp"
 
+enum class RebuildStatus : unsigned char {
+    IN_PROGRESS = 0,
+    COMPLETED   = 1,
+    FAILED      = 2
+};
+
 struct ActiveRebuild {
     std::string index_id;
-    std::string status{"in_progress"};  // "in_progress", "completed", "failed"
+    RebuildStatus status{RebuildStatus::IN_PROGRESS};
     std::string error_message;
     size_t vectors_processed{0};
     size_t total_vectors{0};
@@ -78,6 +84,15 @@ private:
     std::unordered_map<std::string, std::shared_ptr<ActiveRebuild>> active_rebuilds_;
     mutable std::mutex rebuild_state_mutex_;
 
+    static std::string statusToString(RebuildStatus s) {
+        switch (s) {
+            case RebuildStatus::IN_PROGRESS: return "in_progress";
+            case RebuildStatus::COMPLETED:   return "completed";
+            case RebuildStatus::FAILED:      return "failed";
+            default:                         return "unknown";
+        }
+    }
+
     static std::string timeToISO8601(std::chrono::system_clock::time_point tp) {
         auto time_t_val = std::chrono::system_clock::to_time_t(tp);
         std::tm tm_val{};
@@ -110,22 +125,21 @@ public:
                 }
             }
         } catch (const std::exception& e) {
-            LOG_WARN(2053, "rebuild", "Failed to cleanup temp files on startup: " << e.what());
+            LOG_WARN(1803, "rebuild", "Failed to cleanup temp files on startup: " << e.what());
         }
     }
 
     // State tracking — per user
 
     void setActiveRebuild(const std::string& username, const std::string& index_id,
-                          size_t total_vectors, std::jthread&& thread) {
+                          size_t total_vectors) {
         std::lock_guard<std::mutex> lock(rebuild_state_mutex_);
         auto state = std::make_shared<ActiveRebuild>();
         state->index_id = index_id;
-        state->status = "in_progress";
+        state->status = RebuildStatus::IN_PROGRESS;
         state->total_vectors = total_vectors;
         state->vectors_processed = 0;
         state->started_at = std::chrono::system_clock::now();
-        state->thread = std::move(thread);
         active_rebuilds_[username] = state;
     }
 
@@ -137,7 +151,7 @@ public:
             if (it->second->thread.joinable()) {
                 it->second->thread.detach();
             }
-            it->second->status = "completed";
+            it->second->status = RebuildStatus::COMPLETED;
             it->second->completed_at = std::chrono::system_clock::now();
         }
     }
@@ -150,7 +164,7 @@ public:
             if (it->second->thread.joinable()) {
                 it->second->thread.detach();
             }
-            it->second->status = "failed";
+            it->second->status = RebuildStatus::FAILED;
             it->second->error_message = error;
             it->second->completed_at = std::chrono::system_clock::now();
         }
@@ -159,8 +173,8 @@ public:
     bool hasActiveRebuild(const std::string& username) const {
         std::lock_guard<std::mutex> lock(rebuild_state_mutex_);
         auto it = active_rebuilds_.find(username);
-        // Only "in_progress" blocks a new rebuild
-        return it != active_rebuilds_.end() && it->second->status == "in_progress";
+        // Only IN_PROGRESS blocks a new rebuild
+        return it != active_rebuilds_.end() && it->second->status == RebuildStatus::IN_PROGRESS;
     }
 
     // Join all in-progress rebuild threads on shutdown. Mirrors BackupStore::joinAllThreads:
@@ -210,16 +224,16 @@ public:
             size_t total = state.total_vectors;
             double percent = total > 0 ? (100.0 * processed / total) : 0.0;
             nlohmann::json result = {
-                {"status", state.status},
+                {"status", statusToString(state.status)},
                 {"vectors_processed", processed},
                 {"total_vectors", total},
                 {"percent_complete", percent},
                 {"started_at", formatTime(state.started_at)}
             };
-            if (state.status == "completed" || state.status == "failed") {
+            if (state.status == RebuildStatus::COMPLETED || state.status == RebuildStatus::FAILED) {
                 result["completed_at"] = formatTime(state.completed_at);
             }
-            if (state.status == "failed" && !state.error_message.empty()) {
+            if (state.status == RebuildStatus::FAILED && !state.error_message.empty()) {
                 result["error"] = state.error_message;
             }
             return result;
@@ -323,11 +337,11 @@ public:
             p.update_metadata(p.new_M, p.new_ef_con);
             p.clear_dirty();
 
-            LOG_INFO(2051, p.index_id, "Rebuild completed: " << total_processed << " vectors rebuilt");
+            LOG_INFO(1801, p.index_id, "Rebuild completed: " << total_processed << " vectors rebuilt");
             completeActiveRebuild(p.username);
 
         } catch (const std::exception& e) {
-            LOG_ERROR(2052, p.index_id, "Rebuild failed: " << e.what());
+            LOG_ERROR(1802, p.index_id, "Rebuild failed: " << e.what());
             if (std::filesystem::exists(p.temp_path)) std::filesystem::remove(p.temp_path);
             failActiveRebuild(p.username, e.what());
         }

@@ -2393,7 +2393,7 @@ inline OperationResult IndexManager::rebuildIndexAsync(const std::string& index_
     };
 
     // Register state FIRST with empty thread — hasActiveRebuild() returns true immediately
-    rebuild_.setActiveRebuild(username, index_id, current_count, std::jthread{});
+    rebuild_.setActiveRebuild(username, index_id, current_count);
 
     // Spawn thread — lambda calls rebuild_.executeJob directly (execution lives in Rebuild)
     std::jthread t([this, params = std::move(params)](std::stop_token st) mutable {
@@ -2403,6 +2403,6 @@ inline OperationResult IndexManager::rebuildIndexAsync(const std::string& index_
     // Move real thread into the already-registered state
     rebuild_.attachRebuildThread(username, std::move(t));
 
-    LOG_INFO(2050, index_id, "Rebuild started: M=" << new_M << " ef_con=" << new_ef_con);
+    LOG_INFO(1800, index_id, "Rebuild started: M=" << new_M << " ef_con=" << new_ef_con);
     return {0, "Rebuild started"};
 }

@@ -32,8 +32,9 @@ namespace ndd {
                 return 1.0f;
             }
 
-#if defined(USE_AVX512)
-            inline std::vector<uint8_t> quantize_avx512(const std::vector<float>& input) {
+#if NDD_HAS_AVX512_VARIANTS
+            NDD_TARGET_AVX512F inline std::vector<uint8_t>
+            quantize_avx512(const std::vector<float>& input) {
                 if(input.empty()) {
                     return std::vector<uint8_t>();
                 }
@@ -182,7 +183,12 @@ namespace ndd {
 
             // Quantize FP32 vector to Binary (packed bits)
             inline std::vector<uint8_t> quantize(const std::vector<float>& input) {
-#if defined(USE_AVX512)
+#if defined(NDD_RUNTIME_X86_DISPATCH) && (defined(__x86_64__) || defined(_M_X64))
+                if(ndd::cpu::use_avx512f()) {
+                    return quantize_avx512(input);
+                }
+                return quantize_avx2(input);
+#elif defined(USE_AVX512)
                 return quantize_avx512(input);
 #elif defined(USE_AVX2)
                 return quantize_avx2(input);
@@ -213,8 +219,9 @@ namespace ndd {
 #endif
             }
 
-#if defined(USE_AVX512)
-            inline std::vector<float> dequantize_avx512(const uint8_t* buffer, size_t dimension) {
+#if NDD_HAS_AVX512_VARIANTS
+            NDD_TARGET_AVX512F inline std::vector<float> dequantize_avx512(const uint8_t* buffer,
+                                                                            size_t dimension) {
                 std::vector<float> output(dimension);
 
                 size_t i = 0;
@@ -370,7 +377,12 @@ namespace ndd {
 
             // Dequantize Binary to FP32
             inline std::vector<float> dequantize(const uint8_t* buffer, size_t dimension) {
-#if defined(USE_AVX512)
+#if defined(NDD_RUNTIME_X86_DISPATCH) && (defined(__x86_64__) || defined(_M_X64))
+                if(ndd::cpu::use_avx512f()) {
+                    return dequantize_avx512(buffer, dimension);
+                }
+                return dequantize_avx2(buffer, dimension);
+#elif defined(USE_AVX512)
                 return dequantize_avx512(buffer, dimension);
 #elif defined(USE_AVX2)
                 return dequantize_avx2(buffer, dimension);
@@ -397,7 +409,44 @@ namespace ndd {
             }
 
             // Hamming distance implementation
-            inline float Hamming(const void* v1, const void* v2, const void* params) {
+#if NDD_HAS_AVX512_VARIANTS
+            NDD_TARGET_AVX512VPOPCNTDQ inline float HammingAVX512(const void* v1,
+                                                                  const void* v2,
+                                                                  const void* params) {
+                const size_t dim = *static_cast<const size_t*>(params);
+                const uint64_t* p1 = static_cast<const uint64_t*>(v1);
+                const uint64_t* p2 = static_cast<const uint64_t*>(v2);
+
+                size_t num_uint64 = (dim + 63) / 64;
+                float dist = 0;
+                size_t i = 0;
+
+                __m512i acc = _mm512_setzero_si512();
+
+                for(; i + 8 <= num_uint64; i += 8) {
+                    __m512i d1 = _mm512_loadu_si512((const __m512i*)&p1[i]);
+                    __m512i d2 = _mm512_loadu_si512((const __m512i*)&p2[i]);
+                    __m512i x = _mm512_xor_si512(d1, d2);
+                    __m512i p = _mm512_popcnt_epi64(x);
+                    acc = _mm512_add_epi64(acc, p);
+                }
+
+                if(i < num_uint64) {
+                    __mmask8 mask = (__mmask8)((1 << (num_uint64 - i)) - 1);
+                    __m512i d1 = _mm512_maskz_loadu_epi64(mask, &p1[i]);
+                    __m512i d2 = _mm512_maskz_loadu_epi64(mask, &p2[i]);
+                    __m512i x = _mm512_xor_si512(d1, d2);
+                    __m512i p = _mm512_popcnt_epi64(x);
+                    acc = _mm512_add_epi64(acc, p);
+                    i = num_uint64;
+                }
+
+                dist += _mm512_reduce_add_epi64(acc);
+                return dist;
+            }
+#endif
+
+            inline float HammingBaseline(const void* v1, const void* v2, const void* params) {
                 // params is expected to be a pointer to a struct where the first member is size_t
                 // dim e.g. hnswlib::DistParams
                 const size_t dim = *static_cast<const size_t*>(params);
@@ -610,6 +659,15 @@ namespace ndd {
                 }
 
                 return dist;
+            }
+
+            inline float Hamming(const void* v1, const void* v2, const void* params) {
+#if defined(NDD_RUNTIME_X86_DISPATCH) && (defined(__x86_64__) || defined(_M_X64))
+                if(ndd::cpu::use_avx512vpopcntdq()) {
+                    return HammingAVX512(v1, v2, params);
+                }
+#endif
+                return HammingBaseline(v1, v2, params);
             }
 
             // Wrappers

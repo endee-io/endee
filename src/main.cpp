@@ -37,6 +37,7 @@
 #include "core/ndd.hpp"
 #include "auth.hpp"
 #include "quant/common.hpp"
+#include "utils/cpu_compat_check/cpu_runtime_dispatch.hpp"
 #include "system_sanity/system_sanity.hpp"
 
 using ndd::quant::quantLevelToString;
@@ -257,9 +258,14 @@ int main(int argc, char** argv) {
     // Health check endpoint (no auth required)
     // CROW_ROUTE(app, "/api/v1/health").methods("GET"_method)([](const crow::request& req) {
     CROW_ROUTE(app, "/api/v1/health").methods("GET"_method)([]() {
+        crow::json::wvalue::list cpu_flags;
+        for(const auto& flag : ndd::cpu::get_active_cpu_flags()) {
+            cpu_flags.emplace_back(flag);
+        }
         crow::json::wvalue response(
                 {{"status", "ok"},
-                {"timestamp", (std::int64_t)std::chrono::system_clock::now().time_since_epoch().count()}});
+                {"timestamp", (std::int64_t)std::chrono::system_clock::now().time_since_epoch().count()},
+                {"cpu_flags", cpu_flags}});
         PRINT_LOG_TIME();
         ndd::printSparseSearchDebugStats();
         ndd::printSparseUpdateDebugStats();

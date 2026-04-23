@@ -8,6 +8,8 @@
 #include <vector>
 #include <mutex>
 
+#include "../utils/cpu_compat_check/cpu_runtime_dispatch.hpp"
+
 #if defined(USE_AVX512) || defined(USE_AVX2)
 #    include <immintrin.h>
 #endif
@@ -191,7 +193,7 @@ namespace ndd {
 
             // Forward declarations for SIMD implementations
             inline float find_abs_max_scalar(const float* data, size_t size);
-#if defined(USE_AVX512)
+#if NDD_HAS_AVX512_VARIANTS
             inline float find_abs_max_avx512(const float* data, size_t size);
 #endif
 #if defined(USE_AVX2)
@@ -206,7 +208,12 @@ namespace ndd {
 
             // Find absolute maximum value in a vector (for scaling)
             inline float find_abs_max(const float* data, size_t size) {
-#if defined(USE_AVX512)
+#if defined(NDD_RUNTIME_X86_DISPATCH) && (defined(__x86_64__) || defined(_M_X64))
+                if(ndd::cpu::use_avx512f()) {
+                    return find_abs_max_avx512(data, size);
+                }
+                return find_abs_max_avx2(data, size);
+#elif defined(USE_AVX512)
                 return find_abs_max_avx512(data, size);
 #elif defined(USE_SVE2)
                 return find_abs_max_sve(data, size);
@@ -228,9 +235,9 @@ namespace ndd {
                 return abs_max;
             }
 
-#if defined(USE_AVX512)
+#if NDD_HAS_AVX512_VARIANTS
             // AVX512 optimized absolute maximum finding - MAXIMUM register utilization
-            inline float find_abs_max_avx512(const float* data, size_t size) {
+            NDD_TARGET_AVX512F inline float find_abs_max_avx512(const float* data, size_t size) {
                 if(size == 0) {
                     return 0.0f;
                 }

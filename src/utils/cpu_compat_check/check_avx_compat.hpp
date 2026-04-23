@@ -13,6 +13,7 @@ static const uint32_t CPUID_SUBLEAF_0 = 0;
 
 static const uint32_t EBX_AVX2_BIT = 5;
 static const uint32_t EBX_AVX512F_BIT = 16;
+static const uint32_t EBX_AVX512DQ_BIT = 17;
 static const uint32_t EBX_AVX512BW_BIT = 30;
 static const uint32_t ECX_AVX512VNNI_BIT = 11;
 static const uint32_t ECX_AVX512VPOPCNTDQ_BIT = 14;
@@ -24,32 +25,32 @@ static const uint32_t EDX_AVX512FP16_BIT = 23;
  * Always return false if these functions are called
  */
 
-int check_avx2_support(void) {
+inline int check_avx2_support(void) {
     LOG_ERROR(1710, "Unexpected AVX compatibility probe call to " << __func__);
     return false;
 }
 
-int check_avx512_support(void) {
+inline int check_avx512_support(void) {
     LOG_ERROR(1711, "Unexpected AVX compatibility probe call to " << __func__);
     return false;
 }
 
-int check_avx512_fp16_support(void) {
+inline int check_avx512_fp16_support(void) {
     LOG_ERROR(1712, "Unexpected AVX compatibility probe call to " << __func__);
     return false;
 }
 
-int check_avx512_vnni_support(void) {
+inline int check_avx512_vnni_support(void) {
     LOG_ERROR(1713, "Unexpected AVX compatibility probe call to " << __func__);
     return false;
 }
 
-int check_avx512_bw_support(void) {
+inline int check_avx512_bw_support(void) {
     LOG_ERROR(1714, "Unexpected AVX compatibility probe call to " << __func__);
     return false;
 }
 
-int check_avx512_vpopcntdq_support(void) {
+inline int check_avx512_vpopcntdq_support(void) {
     LOG_ERROR(1715, "Unexpected AVX compatibility probe call to " << __func__);
     return false;
 }
@@ -172,6 +173,12 @@ static int cpu_has_avx512f(void) {
     return ((ebx >> EBX_AVX512F_BIT) & 1);
 }
 
+static int cpu_has_avx512dq(void) {
+    uint32_t eax, ebx, ecx, edx;
+    cpuid_ex(CPUID_EXT_FEATURES_LEAF, CPUID_SUBLEAF_0, &eax, &ebx, &ecx, &edx);
+    return ((ebx >> EBX_AVX512DQ_BIT) & 1);
+}
+
 /**
  * True if CPU has AVX512f and fp16
  */
@@ -290,7 +297,7 @@ static void run_one_avx512vpopcntdq_instruction(void) {
  * /////////////////////////////////////////////////////////////////
  */
 
-int check_avx2_support(void) {
+inline int check_avx2_support(void) {
     int ret = false;
 
     if(!cpu_has_avx2()) {
@@ -316,7 +323,7 @@ exit:
  * Returns true if AVX-512 is supported and usable (AVX-512F + OS state).
  * Should PASS on CPUs with AVX-512 but WITHOUT AVX512_FP16.
  */
-int check_avx512_support(void) {
+inline int check_avx512_support(void) {
     int ret = false;
 
     if(!cpu_has_avx512f()) {
@@ -338,7 +345,7 @@ exit:
     return ret;
 }
 
-int check_avx512_fp16_support(void) {
+inline int check_avx512_fp16_support(void) {
     int ret = false;
 
     if(!is_intel_cpu()) {
@@ -365,7 +372,7 @@ exit:
     return ret;
 }
 
-int check_avx512_vnni_support(void) {
+inline int check_avx512_vnni_support(void) {
     int ret = false;
 
     if(!cpu_has_avx512f()) {
@@ -392,7 +399,7 @@ exit:
     return ret;
 }
 
-int check_avx512_bw_support(void) {
+inline int check_avx512_bw_support(void) {
     int ret = false;
 
     if(!cpu_has_avx512f()) {
@@ -419,7 +426,7 @@ exit:
     return ret;
 }
 
-int check_avx512_vpopcntdq_support(void) {
+inline int check_avx512_vpopcntdq_support(void) {
     int ret = false;
 
     if(!cpu_has_avx512f()) {
@@ -453,11 +460,11 @@ exit:
  * (P-cores), and AMD Zen 5.
  */
 
-bool is_avx2_compatible() {
+inline bool is_avx2_compatible() {
     return check_avx2_support();
 }
 
-bool is_avx512_compatible() {
+inline bool is_avx512_compatible() {
     return check_avx2_support() && check_avx512_support() && check_avx512_fp16_support()
            && check_avx512_vnni_support() && check_avx512_bw_support()
            && check_avx512_vpopcntdq_support();

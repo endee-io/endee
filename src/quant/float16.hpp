@@ -176,9 +176,9 @@ namespace ndd {
             }
 #endif
 
-#if defined(USE_AVX512)
+#if NDD_HAS_AVX512_VARIANTS
             // AVX512 optimized vector conversion FP16->FP32
-            inline std::vector<float>
+            NDD_TARGET_AVX512FP16 inline std::vector<float>
             convert_vector_f16_f32_avx512(const std::vector<uint16_t>& input) {
                 std::vector<float> output;
                 output.resize(input.size());
@@ -225,7 +225,7 @@ namespace ndd {
             }
 
             // AVX512 optimized vector conversion FP32->FP16
-            inline std::vector<uint16_t>
+            NDD_TARGET_AVX512FP16 inline std::vector<uint16_t>
             convert_vector_f32_f16_avx512(const std::vector<float>& input) {
                 std::vector<uint16_t> output;
                 output.resize(input.size());
@@ -278,7 +278,11 @@ namespace ndd {
                 return convert_vector_f16_f32_neon(input);
 #endif
 
-#if defined(USE_AVX512)
+#if defined(NDD_RUNTIME_X86_DISPATCH) && (defined(__x86_64__) || defined(_M_X64))
+                if(ndd::cpu::use_avx512fp16()) {
+                    return convert_vector_f16_f32_avx512(input);
+                }
+#elif defined(USE_AVX512)
                 return convert_vector_f16_f32_avx512(input);
 #endif
 
@@ -296,7 +300,11 @@ namespace ndd {
                 return convert_vector_f32_f16_neon(input);
 #endif
 
-#if defined(USE_AVX512)
+#if defined(NDD_RUNTIME_X86_DISPATCH) && (defined(__x86_64__) || defined(_M_X64))
+                if(ndd::cpu::use_avx512fp16()) {
+                    return convert_vector_f32_f16_avx512(input);
+                }
+#elif defined(USE_AVX512)
                 return convert_vector_f32_f16_avx512(input);
 #endif
 

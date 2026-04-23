@@ -13,6 +13,7 @@
  */
 
 #include "inverted_index.hpp"
+#include "utils/cpu_compat_check/cpu_runtime_dispatch.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -793,11 +794,70 @@ namespace ndd {
     // SIMD helpers
     // =========================================================================
 
+#if NDD_HAS_AVX512_VARIANTS
+    namespace {
+        NDD_TARGET_AVX512F size_t find_doc_id_simd_avx512(const uint32_t* doc_ids,
+                                                          size_t size,
+                                                          size_t start_idx,
+                                                          uint32_t target) {
+            size_t idx = start_idx;
+            const size_t simd_width = 16;
+            __m512i target_vec = _mm512_set1_epi32((int)target);
+
+            while(idx + simd_width <= size) {
+                __m512i data_vec = _mm512_loadu_si512(doc_ids + idx);
+                __mmask16 mask = _mm512_cmpge_epu32_mask(data_vec, target_vec);
+
+                if(mask != 0) {
+                    return idx + __builtin_ctz(mask);
+                }
+                idx += simd_width;
+            }
+
+            while(idx < size && doc_ids[idx] < target) {
+                ++idx;
+            }
+            return idx;
+        }
+
+        NDD_TARGET_AVX512BW size_t find_next_live_simd_avx512(const uint8_t* values,
+                                                              size_t size,
+                                                              size_t start_idx) {
+            size_t idx = start_idx;
+            const size_t simd_width = 64;
+            __m512i zero_vec = _mm512_setzero_si512();
+
+            while(idx + simd_width <= size) {
+                __m512i data_vec = _mm512_loadu_si512(values + idx);
+                __mmask64 mask = _mm512_cmpneq_epu8_mask(data_vec, zero_vec);
+
+                if(mask != 0) {
+                    return idx + __builtin_ctzll(mask);
+                }
+                idx += simd_width;
+            }
+
+            while(idx < size) {
+                if(values[idx] != 0) {
+                    return idx;
+                }
+                ++idx;
+            }
+            return idx;
+        }
+    }  // namespace
+#endif
+
     size_t InvertedIndex::findDocIdSIMD(const uint32_t* doc_ids,
                                     size_t size,
                                     size_t start_idx,
                                     uint32_t target) const
     {
+#if defined(NDD_RUNTIME_X86_DISPATCH) && (defined(__x86_64__) || defined(_M_X64))
+        if(ndd::cpu::use_avx512f()) {
+            return find_doc_id_simd_avx512(doc_ids, size, start_idx, target);
+        }
+#endif
         size_t idx = start_idx;
 
 #if defined(USE_AVX512)
@@ -881,6 +941,11 @@ namespace ndd {
                                         size_t size,
                                         size_t start_idx) const
     {
+#if defined(NDD_RUNTIME_X86_DISPATCH) && (defined(__x86_64__) || defined(_M_X64))
+        if(ndd::cpu::use_avx512bw()) {
+            return find_next_live_simd_avx512(values, size, start_idx);
+        }
+#endif
         size_t idx = start_idx;
 
 #if defined(USE_AVX512)

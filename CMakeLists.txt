@@ -99,6 +99,7 @@ option(USE_AVX2   "Enable AVX2 (FMA, F16C)" OFF)
 option(USE_SVE2   "Enable SVE2 (INT8/16, FP16)" OFF)
 option(USE_NEON   "Enable NEON (FP16, DotProd)" OFF)
 option(NDD_INV_IDX_STORE_FLOATS "Store raw float 32 values in sparse index (no quantization)" OFF)
+set(NDD_RUNTIME_X86_DISPATCH OFF)
 
 # Check if any SIMD option is selected
 if(NOT USE_AVX512 AND NOT USE_AVX2 AND NOT USE_SVE2 AND NOT USE_NEON)
@@ -108,10 +109,9 @@ if(NOT USE_AVX512 AND NOT USE_AVX2 AND NOT USE_SVE2 AND NOT USE_NEON)
                             "  -DUSE_SVE2=ON  : For ARMv9/SVE2 capable processors (requires SVE2, FP16)\n"
                             "  -DUSE_NEON=ON  : For standard ARMv8/NEON processors (requires FP16, DotProd)")
     else()
-        message(FATAL_ERROR "x86 architecture detected but no SIMD option selected.\n"
-                            "Please specify one of the following flags:\n"
-                            "  -DUSE_AVX512=ON : For processors with AVX512F, BW, VNNI, FP16\n"
-                            "  -DUSE_AVX2=ON   : For processors with AVX2, FMA, F16C")
+        set(NDD_RUNTIME_X86_DISPATCH ON)
+        message(STATUS "x86 architecture detected with no explicit SIMD mode; enabling runtime x86 "
+                       "dispatch with an AVX2 baseline and optional AVX512 variants")
     endif()
 endif()
 
@@ -253,6 +253,7 @@ message(STATUS "Binary name: ${NDD_BINARY_NAME}")
 # Add new src/*.cpp files here when they should be compiled into ndd.
 set(NDD_CORE_SOURCES
     src/sparse/inverted_index.cpp
+    src/utils/cpu_compat_check/cpu_runtime_dispatch.cpp
     src/utils/system_sanity/system_sanity.cpp
 )
 
@@ -341,6 +342,12 @@ elseif(USE_NEON)
     endif()
     target_compile_definitions(ndd_core PRIVATE USE_NEON)
     target_compile_definitions(${NDD_BINARY_NAME} PRIVATE USE_NEON)
+elseif(NDD_RUNTIME_X86_DISPATCH)
+    message(STATUS "SIMD: Runtime x86 dispatch enabled (AVX2 baseline + optional AVX512 variants)")
+    target_compile_options(ndd_core PRIVATE -mavx2 -mfma -mf16c)
+    target_compile_definitions(ndd_core PRIVATE USE_AVX2 NDD_RUNTIME_X86_DISPATCH NDD_COMPILE_AVX512_VARIANTS)
+    target_compile_options(${NDD_BINARY_NAME} PRIVATE -mavx2 -mfma -mf16c)
+    target_compile_definitions(${NDD_BINARY_NAME} PRIVATE USE_AVX2 NDD_RUNTIME_X86_DISPATCH NDD_COMPILE_AVX512_VARIANTS)
 endif()
 
 if(NDD_INV_IDX_STORE_FLOATS)
@@ -393,6 +400,8 @@ elseif(USE_SVE2)
     message(STATUS "SIMD Mode: SVE2")
 elseif(USE_NEON)
     message(STATUS "SIMD Mode: NEON")
+elseif(NDD_RUNTIME_X86_DISPATCH)
+    message(STATUS "SIMD Mode: Runtime x86 dispatch")
 endif()
 message(STATUS "ASIO include dir: ${ASIO_INCLUDE_DIR}")
 message(STATUS "LMDB include dir: ${LMDB_INCLUDE_DIR}")

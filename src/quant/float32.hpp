@@ -17,17 +17,7 @@ namespace hnswlib {
             static std::vector<uint8_t> quantize_to_int8(const void* in, size_t dim) {
                 const float* f_in = static_cast<const float*>(in);
                 std::vector<float> input(f_in, f_in + dim);
-#if defined(USE_SVE2)
-                return ndd::quant::int8::quantize_vector_fp32_to_int8_buffer_sve(input);
-#elif defined(USE_AVX512)
-                return ndd::quant::int8::quantize_vector_fp32_to_int8_buffer_avx512(input);
-#elif defined(USE_AVX2)
-                return ndd::quant::int8::quantize_vector_fp32_to_int8_buffer_avx2(input);
-#elif defined(USE_NEON)
-                return ndd::quant::int8::quantize_vector_fp32_to_int8_buffer_neon(input);
-#else
-                return ndd::quant::int8::quantize_vector_fp32_to_int8_buffer(input);
-#endif
+                return ndd::quant::int8::quantize_vector_fp32_to_int8_buffer_auto(input);
             }
 
             inline std::vector<uint8_t> quantize(const std::vector<float>& input) {
@@ -168,8 +158,10 @@ namespace hnswlib {
             }
 #endif
 
-#if defined(USE_AVX512)
-            static float L2SqrAVX512(const void* pVect1, const void* pVect2, size_t qty) {
+#if NDD_HAS_AVX512_VARIANTS
+            NDD_TARGET_AVX512F static float L2SqrAVX512(const void* pVect1,
+                                                        const void* pVect2,
+                                                        size_t qty) {
                 const float* vec1 = reinterpret_cast<const float*>(pVect1);
                 const float* vec2 = reinterpret_cast<const float*>(pVect2);
 
@@ -198,7 +190,9 @@ namespace hnswlib {
                 return res;
             }
 
-            static float InnerProductAVX512(const void* pVect1, const void* pVect2, size_t qty) {
+            NDD_TARGET_AVX512F static float InnerProductAVX512(const void* pVect1,
+                                                               const void* pVect2,
+                                                               size_t qty) {
                 const float* vec1 = reinterpret_cast<const float*>(pVect1);
                 const float* vec2 = reinterpret_cast<const float*>(pVect2);
 
@@ -418,7 +412,12 @@ namespace hnswlib {
 #endif
 
             static float L2Sqr(const void* pVect1, const void* pVect2, size_t qty) {
-#if defined(USE_AVX512)
+#if defined(NDD_RUNTIME_X86_DISPATCH) && (defined(__x86_64__) || defined(_M_X64))
+                if(ndd::cpu::use_avx512f()) {
+                    return L2SqrAVX512(pVect1, pVect2, qty);
+                }
+                return L2SqrAVX2(pVect1, pVect2, qty);
+#elif defined(USE_AVX512)
                 return L2SqrAVX512(pVect1, pVect2, qty);
 #elif defined(USE_SVE2)
                 return L2SqrSVE(pVect1, pVect2, qty);
@@ -432,7 +431,12 @@ namespace hnswlib {
             }
 
             static float InnerProduct(const void* pVect1, const void* pVect2, size_t qty) {
-#if defined(USE_AVX512)
+#if defined(NDD_RUNTIME_X86_DISPATCH) && (defined(__x86_64__) || defined(_M_X64))
+                if(ndd::cpu::use_avx512f()) {
+                    return InnerProductAVX512(pVect1, pVect2, qty);
+                }
+                return InnerProductAVX2(pVect1, pVect2, qty);
+#elif defined(USE_AVX512)
                 return InnerProductAVX512(pVect1, pVect2, qty);
 #elif defined(USE_SVE2)
                 return InnerProductSVE(pVect1, pVect2, qty);
@@ -478,12 +482,96 @@ namespace hnswlib {
                     128;
 #endif
 
-            static void SimilarityBatchTiled(const void* query,
-                                             const void* const* vectors,
-                                             size_t count,
-                                             const void* params,
-                                             float* out,
-                                             bool l2_metric) {
+            static void SimilarityBatchTiledBaseline(const void* query,
+                                                     const void* const* vectors,
+                                                     size_t count,
+                                                     const void* params,
+                                                     float* out,
+                                                     bool l2_metric);
+
+#if NDD_HAS_AVX512_VARIANTS
+            NDD_TARGET_AVX512F static void SimilarityBatchTiledAVX512(const void* query,
+                                                                      const void* const* vectors,
+                                                                      size_t count,
+                                                                      const void* params,
+                                                                      float* out,
+                                                                      bool l2_metric) {
+                if(count == 0) {
+                    return;
+                }
+
+                const DistParams* dist_params = reinterpret_cast<const DistParams*>(params);
+                const size_t dim = dist_params->dim;
+                const float* query_vec = reinterpret_cast<const float*>(query);
+
+                std::vector<float> dot_acc(count, 0.0f);
+                std::vector<float> vec_sq_acc;
+                if(l2_metric) {
+                    vec_sq_acc.assign(count, 0.0f);
+                }
+
+                float query_sq_acc = 0.0f;
+                const size_t tile = std::min(dim, static_cast<size_t>(1024));
+
+                for(size_t block_start = 0; block_start < dim; block_start += tile) {
+                    const size_t block_len = std::min(tile, dim - block_start);
+                    const float* q_ptr = query_vec + block_start;
+
+                    for(size_t d = 0; d < block_len; ++d) {
+                        query_sq_acc += q_ptr[d] * q_ptr[d];
+                    }
+
+                    for(size_t i = 0; i < count; ++i) {
+                        const float* v_ptr = reinterpret_cast<const float*>(vectors[i]) + block_start;
+                        float dot = dot_acc[i];
+                        float vec_sq = l2_metric ? vec_sq_acc[i] : 0.0f;
+
+                        size_t d = 0;
+                        __m512 dot_vec = _mm512_setzero_ps();
+                        __m512 sq_vec = _mm512_setzero_ps();
+                        for(; d + 16 <= block_len; d += 16) {
+                            __m512 qv = _mm512_loadu_ps(q_ptr + d);
+                            __m512 vv = _mm512_loadu_ps(v_ptr + d);
+                            dot_vec = _mm512_fmadd_ps(qv, vv, dot_vec);
+                            if(l2_metric) {
+                                sq_vec = _mm512_fmadd_ps(vv, vv, sq_vec);
+                            }
+                        }
+                        dot += _mm512_reduce_add_ps(dot_vec);
+                        if(l2_metric) {
+                            vec_sq += _mm512_reduce_add_ps(sq_vec);
+                        }
+
+                        for(; d < block_len; ++d) {
+                            dot += q_ptr[d] * v_ptr[d];
+                            if(l2_metric) {
+                                vec_sq += v_ptr[d] * v_ptr[d];
+                            }
+                        }
+
+                        dot_acc[i] = dot;
+                        if(l2_metric) {
+                            vec_sq_acc[i] = vec_sq;
+                        }
+                    }
+                }
+
+                for(size_t i = 0; i < count; ++i) {
+                    if(l2_metric) {
+                        out[i] = -(query_sq_acc + vec_sq_acc[i] - 2.0f * dot_acc[i]);
+                    } else {
+                        out[i] = dot_acc[i];
+                    }
+                }
+            }
+#endif
+
+            static void SimilarityBatchTiledBaseline(const void* query,
+                                                     const void* const* vectors,
+                                                     size_t count,
+                                                     const void* params,
+                                                     float* out,
+                                                     bool l2_metric) {
                 if(count == 0) {
                     return;
                 }
@@ -613,6 +701,21 @@ namespace hnswlib {
                         out[i] = dot_acc[i];
                     }
                 }
+            }
+
+            static void SimilarityBatchTiled(const void* query,
+                                             const void* const* vectors,
+                                             size_t count,
+                                             const void* params,
+                                             float* out,
+                                             bool l2_metric) {
+#if defined(NDD_RUNTIME_X86_DISPATCH) && (defined(__x86_64__) || defined(_M_X64))
+                if(ndd::cpu::use_avx512f()) {
+                    SimilarityBatchTiledAVX512(query, vectors, count, params, out, l2_metric);
+                    return;
+                }
+#endif
+                SimilarityBatchTiledBaseline(query, vectors, count, params, out, l2_metric);
             }
 
             static void L2SqrSimBatch(const void* query,

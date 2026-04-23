@@ -54,8 +54,8 @@ namespace ndd {
                 return buffer;
             }
 
-#if defined(USE_AVX512)
-            inline std::vector<uint8_t>
+#if NDD_HAS_AVX512_VARIANTS
+            NDD_TARGET_AVX512BW inline std::vector<uint8_t>
             quantize_vector_fp32_to_int8_buffer_avx512(const std::vector<float>& input) {
                 if(input.empty()) {
                     return std::vector<uint8_t>();
@@ -398,7 +398,12 @@ namespace ndd {
             // Auto-select best quantization implementation for INT8 -> uint8_t buffer
             inline std::vector<uint8_t>
             quantize_vector_fp32_to_int8_buffer_auto(const std::vector<float>& input) {
-#if defined(USE_AVX512)
+#if defined(NDD_RUNTIME_X86_DISPATCH) && (defined(__x86_64__) || defined(_M_X64))
+                if(ndd::cpu::use_avx512bw()) {
+                    return quantize_vector_fp32_to_int8_buffer_avx512(input);
+                }
+                return quantize_vector_fp32_to_int8_buffer_avx2(input);
+#elif defined(USE_AVX512)
                 return quantize_vector_fp32_to_int8_buffer_avx512(input);
 #elif defined(USE_SVE2)
                 return quantize_vector_fp32_to_int8_buffer_sve(input);
@@ -411,10 +416,10 @@ namespace ndd {
 #endif
             }
 
-#if defined(USE_AVX512)
+#if NDD_HAS_AVX512_VARIANTS
             // AVX512 optimized dequantization INT8 buffer -> FP32 vector
-            inline std::vector<float> dequantize_int8_buffer_to_fp32_avx512(const uint8_t* buffer,
-                                                                            size_t dimension) {
+            NDD_TARGET_AVX512BW inline std::vector<float>
+            dequantize_int8_buffer_to_fp32_avx512(const uint8_t* buffer, size_t dimension) {
                 std::vector<float> output(dimension);
                 const int8_t* data_ptr = reinterpret_cast<const int8_t*>(buffer);
                 float scale = extract_scale(buffer, dimension);
@@ -558,7 +563,19 @@ namespace ndd {
             // Auto-select best dequantization implementation for INT8 buffer -> FP32 vector
             inline std::vector<float> dequantize_int8_buffer_to_fp32(const uint8_t* buffer,
                                                                      size_t dimension) {
-#if defined(USE_AVX512)
+#if defined(NDD_RUNTIME_X86_DISPATCH) && (defined(__x86_64__) || defined(_M_X64))
+                if(ndd::cpu::use_avx512bw()) {
+                    return dequantize_int8_buffer_to_fp32_avx512(buffer, dimension);
+                }
+                std::vector<float> output(dimension);
+                const int8_t* data_ptr = reinterpret_cast<const int8_t*>(buffer);
+                float scale = extract_scale(buffer, dimension);
+
+                for(size_t i = 0; i < dimension; ++i) {
+                    output[i] = static_cast<float>(data_ptr[i]) * scale;
+                }
+                return output;
+#elif defined(USE_AVX512)
                 return dequantize_int8_buffer_to_fp32_avx512(buffer, dimension);
 #elif defined(USE_SVE2)
                 return dequantize_int8_buffer_to_fp32_sve(buffer, dimension);
@@ -762,8 +779,90 @@ namespace ndd {
                 return -L2Sqr(pVect1v, pVect2v, qty_ptr);
             }
 
+#if NDD_HAS_AVX512_VARIANTS
+            NDD_TARGET_AVX512VNNI static float InnerProductSimAVX512VNNI(const void* pVect1v,
+                                                                          const void* pVect2v,
+                                                                          const void* qty_ptr) {
+                const int8_t* pVect1 = (const int8_t*)pVect1v;
+                const int8_t* pVect2 = (const int8_t*)pVect2v;
+                const auto* params = static_cast<const hnswlib::DistParams*>(qty_ptr);
+                size_t qty = params->dim;
+
+                float scale1 = extract_scale((const uint8_t*)pVect1, qty);
+                float scale2 = extract_scale((const uint8_t*)pVect2, qty);
+
+                int32_t sum = 0;
+                size_t i = 0;
+                __m512i dot_acc0 = _mm512_setzero_si512();
+                __m512i dot_acc1 = _mm512_setzero_si512();
+                __m512i dot_acc2 = _mm512_setzero_si512();
+                __m512i dot_acc3 = _mm512_setzero_si512();
+                __m512i sum2_acc0 = _mm512_setzero_si512();
+                __m512i sum2_acc1 = _mm512_setzero_si512();
+                __m512i sum2_acc2 = _mm512_setzero_si512();
+                __m512i sum2_acc3 = _mm512_setzero_si512();
+                const __m512i sign_flip = _mm512_set1_epi8(static_cast<char>(0x80));
+                const __m512i ones_u8 = _mm512_set1_epi8(static_cast<char>(0x01));
+
+                for(; i + 256 <= qty; i += 256) {
+                    __m512i v1_0 = _mm512_loadu_si512((const __m512i*)(pVect1 + i));
+                    __m512i v2_0 = _mm512_loadu_si512((const __m512i*)(pVect2 + i));
+                    __m512i v1_1 = _mm512_loadu_si512((const __m512i*)(pVect1 + i + 64));
+                    __m512i v2_1 = _mm512_loadu_si512((const __m512i*)(pVect2 + i + 64));
+                    __m512i v1_2 = _mm512_loadu_si512((const __m512i*)(pVect1 + i + 128));
+                    __m512i v2_2 = _mm512_loadu_si512((const __m512i*)(pVect2 + i + 128));
+                    __m512i v1_3 = _mm512_loadu_si512((const __m512i*)(pVect1 + i + 192));
+                    __m512i v2_3 = _mm512_loadu_si512((const __m512i*)(pVect2 + i + 192));
+
+                    __m512i v1_u8_0 = _mm512_xor_si512(v1_0, sign_flip);
+                    __m512i v1_u8_1 = _mm512_xor_si512(v1_1, sign_flip);
+                    __m512i v1_u8_2 = _mm512_xor_si512(v1_2, sign_flip);
+                    __m512i v1_u8_3 = _mm512_xor_si512(v1_3, sign_flip);
+
+                    dot_acc0 = _mm512_dpbusd_epi32(dot_acc0, v1_u8_0, v2_0);
+                    dot_acc1 = _mm512_dpbusd_epi32(dot_acc1, v1_u8_1, v2_1);
+                    dot_acc2 = _mm512_dpbusd_epi32(dot_acc2, v1_u8_2, v2_2);
+                    dot_acc3 = _mm512_dpbusd_epi32(dot_acc3, v1_u8_3, v2_3);
+
+                    sum2_acc0 = _mm512_dpbusd_epi32(sum2_acc0, ones_u8, v2_0);
+                    sum2_acc1 = _mm512_dpbusd_epi32(sum2_acc1, ones_u8, v2_1);
+                    sum2_acc2 = _mm512_dpbusd_epi32(sum2_acc2, ones_u8, v2_2);
+                    sum2_acc3 = _mm512_dpbusd_epi32(sum2_acc3, ones_u8, v2_3);
+                }
+
+                __m512i dot_acc = _mm512_add_epi32(_mm512_add_epi32(dot_acc0, dot_acc1),
+                                                   _mm512_add_epi32(dot_acc2, dot_acc3));
+                __m512i sum2_acc = _mm512_add_epi32(_mm512_add_epi32(sum2_acc0, sum2_acc1),
+                                                    _mm512_add_epi32(sum2_acc2, sum2_acc3));
+
+                for(; i + 64 <= qty; i += 64) {
+                    __m512i v1 = _mm512_loadu_si512((const __m512i*)(pVect1 + i));
+                    __m512i v2 = _mm512_loadu_si512((const __m512i*)(pVect2 + i));
+
+                    __m512i v1_u8 = _mm512_xor_si512(v1, sign_flip);
+                    dot_acc = _mm512_dpbusd_epi32(dot_acc, v1_u8, v2);
+                    sum2_acc = _mm512_dpbusd_epi32(sum2_acc, ones_u8, v2);
+                }
+
+                int32_t dot_u = _mm512_reduce_add_epi32(dot_acc);
+                int32_t sum2 = _mm512_reduce_add_epi32(sum2_acc);
+                sum = dot_u - 128 * sum2;
+
+                for(; i < qty; i++) {
+                    sum += static_cast<int32_t>(pVect1[i]) * static_cast<int32_t>(pVect2[i]);
+                }
+
+                return (static_cast<float>(sum) * scale1) * scale2;
+            }
+#endif
+
             static float
             InnerProductSim(const void* pVect1v, const void* pVect2v, const void* qty_ptr) {
+#if defined(NDD_RUNTIME_X86_DISPATCH) && (defined(__x86_64__) || defined(_M_X64))
+                if(ndd::cpu::use_avx512vnni()) {
+                    return InnerProductSimAVX512VNNI(pVect1v, pVect2v, qty_ptr);
+                }
+#endif
                 const int8_t* pVect1 = (const int8_t*)pVect1v;
                 const int8_t* pVect2 = (const int8_t*)pVect2v;
                 const auto* params = static_cast<const hnswlib::DistParams*>(qty_ptr);

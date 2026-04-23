@@ -19,6 +19,7 @@
 
 #include "utils/settings.hpp"
 #include "utils/log.hpp"
+#include "utils/cpu_compat_check/cpu_runtime_dispatch.hpp"
 #include "utils/cpu_compat_check/check_avx_compat.hpp"
 #include "utils/cpu_compat_check/check_arm_compat.hpp"
 #include "utils/system_sanity/system_sanity.hpp"
@@ -26,7 +27,11 @@
 static bool is_cpu_compatible() {
     bool ret = true;
 
-#if defined(USE_AVX2) && (defined(__x86_64__) || defined(_M_X64))
+#if defined(NDD_RUNTIME_X86_DISPATCH) && (defined(__x86_64__) || defined(_M_X64))
+    ret &= ndd::cpu::initialize_cpu_dispatch();
+#endif
+
+#if defined(USE_AVX2) && !defined(NDD_RUNTIME_X86_DISPATCH) && (defined(__x86_64__) || defined(_M_X64))
     ret &= is_avx2_compatible();
 #endif  //AVX2 checks
 

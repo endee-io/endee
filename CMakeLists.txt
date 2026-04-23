@@ -408,9 +408,12 @@ message(STATUS "LMDB include dir: ${LMDB_INCLUDE_DIR}")
 message(STATUS "OpenSSL include dir: ${OPENSSL_INCLUDE_DIR}")
 
 # Create a symbolic link named 'ndd' pointing to the architecture-specific binary
-add_custom_command(TARGET ${NDD_BINARY_NAME} POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E create_symlink
-            $<TARGET_FILE_NAME:${NDD_BINARY_NAME}>
-            ${CMAKE_CURRENT_BINARY_DIR}/ndd
-    COMMENT "Creating softlink 'ndd' -> ${NDD_BINARY_NAME}"
-)
+# (skipped when binary is already named 'ndd' to avoid a self-referential symlink)
+if(NOT NDD_BINARY_NAME STREQUAL "ndd")
+    add_custom_command(TARGET ${NDD_BINARY_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E create_symlink
+                $<TARGET_FILE_NAME:${NDD_BINARY_NAME}>
+                ${CMAKE_CURRENT_BINARY_DIR}/ndd
+        COMMENT "Creating softlink 'ndd' -> ${NDD_BINARY_NAME}"
+    )
+endif()

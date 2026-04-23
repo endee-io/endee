@@ -286,6 +286,20 @@ namespace ndd {
                 return convert_vector_f16_f32_avx512(input);
 #endif
 
+#if defined(USE_AVX2)
+                {
+                    std::vector<float> output(input.size());
+                    size_t i = 0;
+                    const size_t vec_size = (input.size() / 8) * 8;
+                    for(; i < vec_size; i += 8) {
+                        __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&input[i]));
+                        _mm256_storeu_ps(&output[i], _mm256_cvtph_ps(v));
+                    }
+                    for(; i < input.size(); i++) output[i] = fp16_to_fp32(input[i]);
+                    return output;
+                }
+#endif
+
                 // Fallback scalar implementation
                 std::vector<float> output;
                 output.resize(input.size());
@@ -306,6 +320,21 @@ namespace ndd {
                 }
 #elif defined(USE_AVX512)
                 return convert_vector_f32_f16_avx512(input);
+#endif
+
+#if defined(USE_AVX2)
+                {
+                    std::vector<uint16_t> output(input.size());
+                    size_t i = 0;
+                    const size_t vec_size = (input.size() / 8) * 8;
+                    for(; i < vec_size; i += 8) {
+                        __m256 v = _mm256_loadu_ps(&input[i]);
+                        __m128i h = _mm256_cvtps_ph(v, _MM_FROUND_TO_NEAREST_INT);
+                        _mm_storeu_si128(reinterpret_cast<__m128i*>(&output[i]), h);
+                    }
+                    for(; i < input.size(); i++) output[i] = fp32_to_fp16(input[i]);
+                    return output;
+                }
 #endif
 
                 // Fallback scalar implementation
@@ -354,37 +383,65 @@ namespace ndd {
                     float16x4_t out = vcvt_f16_f32(in);
                     vst1_f16(reinterpret_cast<__fp16*>(&output[i]), out);
                 }
+#else
+#if defined(NDD_RUNTIME_X86_DISPATCH) && (defined(__x86_64__) || defined(_M_X64))
+                if(ndd::cpu::use_avx512fp16()) {
+                    const __m512 s512 = _mm512_set1_ps(scale);
+                    const size_t vec_size512 = (input.size() / 64) * 64;
+                    for(; i < vec_size512; i += 64) {
+                        __m512 in0 = _mm512_mul_ps(_mm512_loadu_ps(&input[i]), s512);
+                        __m512 in1 = _mm512_mul_ps(_mm512_loadu_ps(&input[i + 16]), s512);
+                        __m512 in2 = _mm512_mul_ps(_mm512_loadu_ps(&input[i + 32]), s512);
+                        __m512 in3 = _mm512_mul_ps(_mm512_loadu_ps(&input[i + 48]), s512);
+
+                        _mm256_storeu_ph(&output[i],
+                                _mm512_cvtps_ph(in0, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
+                        _mm256_storeu_ph(&output[i + 16],
+                                _mm512_cvtps_ph(in1, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
+                        _mm256_storeu_ph(&output[i + 32],
+                                _mm512_cvtps_ph(in2, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
+                        _mm256_storeu_ph(&output[i + 48],
+                                _mm512_cvtps_ph(in3, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
+                    }
+                } else
 #elif defined(USE_AVX512)
-                const __m512 s = _mm512_set1_ps(scale);
-                size_t vec_size = (input.size() / 64) * 64;  // 64 floats per iteration (4x unroll)
-                for(; i < vec_size; i += 64) {
-                    __m512 in0 = _mm512_mul_ps(_mm512_loadu_ps(&input[i]), s);
-                    __m512 in1 = _mm512_mul_ps(_mm512_loadu_ps(&input[i + 16]), s);
-                    __m512 in2 = _mm512_mul_ps(_mm512_loadu_ps(&input[i + 32]), s);
-                    __m512 in3 = _mm512_mul_ps(_mm512_loadu_ps(&input[i + 48]), s);
+                {
+                    const __m512 s512 = _mm512_set1_ps(scale);
+                    const size_t vec_size512 = (input.size() / 64) * 64;
+                    for(; i < vec_size512; i += 64) {
+                        __m512 in0 = _mm512_mul_ps(_mm512_loadu_ps(&input[i]), s512);
+                        __m512 in1 = _mm512_mul_ps(_mm512_loadu_ps(&input[i + 16]), s512);
+                        __m512 in2 = _mm512_mul_ps(_mm512_loadu_ps(&input[i + 32]), s512);
+                        __m512 in3 = _mm512_mul_ps(_mm512_loadu_ps(&input[i + 48]), s512);
 
-                    __m256h out0 =
-                            _mm512_cvtps_ph(in0, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
-                    __m256h out1 =
-                            _mm512_cvtps_ph(in1, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
-                    __m256h out2 =
-                            _mm512_cvtps_ph(in2, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
-                    __m256h out3 =
-                            _mm512_cvtps_ph(in3, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
-
-                    _mm256_storeu_ph(&output[i], out0);
-                    _mm256_storeu_ph(&output[i + 16], out1);
-                    _mm256_storeu_ph(&output[i + 32], out2);
-                    _mm256_storeu_ph(&output[i + 48], out3);
+                        _mm256_storeu_ph(&output[i],
+                                _mm512_cvtps_ph(in0, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
+                        _mm256_storeu_ph(&output[i + 16],
+                                _mm512_cvtps_ph(in1, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
+                        _mm256_storeu_ph(&output[i + 32],
+                                _mm512_cvtps_ph(in2, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
+                        _mm256_storeu_ph(&output[i + 48],
+                                _mm512_cvtps_ph(in3, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
+                    }
+                    const size_t remaining_vec_size = (input.size() / 16) * 16;
+                    for(; i < remaining_vec_size; i += 16) {
+                        __m512 in = _mm512_mul_ps(_mm512_loadu_ps(&input[i]), s512);
+                        _mm256_storeu_ph(&output[i],
+                                _mm512_cvtps_ph(in, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
+                    }
                 }
-
-                size_t remaining_vec_size = (input.size() / 16) * 16;
-                for(; i < remaining_vec_size; i += 16) {
-                    __m512 in = _mm512_mul_ps(_mm512_loadu_ps(&input[i]), s);
-                    __m256h out =
-                            _mm512_cvtps_ph(in, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
-                    _mm256_storeu_ph(&output[i], out);
+#endif
+#if defined(USE_AVX2)
+                {
+                    const __m256 s256 = _mm256_set1_ps(scale);
+                    const size_t vec_size256 = (input.size() / 8) * 8;
+                    for(; i < vec_size256; i += 8) {
+                        __m256 v = _mm256_mul_ps(_mm256_loadu_ps(&input[i]), s256);
+                        __m128i h = _mm256_cvtps_ph(v, _MM_FROUND_TO_NEAREST_INT);
+                        _mm_storeu_si128(reinterpret_cast<__m128i*>(&output[i]), h);
+                    }
                 }
+#endif
 #endif
 
                 for(; i < input.size(); i++) {

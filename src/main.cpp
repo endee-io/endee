@@ -521,12 +521,16 @@ int main(int argc, char** argv) {
 
                 try {
                     std::pair<bool, std::string> result =
-                            index_manager.restoreBackup(backup_name, target_index_name, ctx.username);
+                            index_manager.restoreBackupAsync(backup_name, target_index_name, ctx.username);
                     if(!result.first) {
                         LOG_WARN(1023, ctx.username, target_index_name, "Restore-backup request rejected: " << result.second);
                         return json_error(400, result.second);
                     }
-                    return crow::response(201, "Backup restored successfully");
+                    crow::json::wvalue response;
+                    response["backup_name"] = backup_name;
+                    response["target_index"] = result.second;
+                    response["status"] = "in_progress";
+                    return crow::response(202, response.dump());
                 } catch(const std::exception& e) {
                     return json_error_500(ctx.username, target_index_name, req.url, e.what());
                 }

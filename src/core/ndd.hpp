@@ -226,6 +226,9 @@ private:
     Rebuild rebuild_;
     void executeBackupJob(const std::string& index_id, const std::string& backup_name, std::stop_token st);
 
+    void restoreBackup(const std::string& backup_name, const std::string& target_index_name,
+        const std::string& username,std::stop_token st);
+
     std::unique_ptr<WriteAheadLog> createWAL(const std::string& index_id) {
         const std::string wal_dir = data_dir_ + "/" + index_id;
         return std::make_unique<WriteAheadLog>(wal_dir, index_id);
@@ -2160,26 +2163,26 @@ inline void IndexManager::restoreBackup(const std::string& backup_name,
     //     return {false, "Target index already exists"};
     // }
 
-    std::string error_msg;
-    if(!backup_store_.extractBackupTar(backup_tar, backup_extract_dir, error_msg)) {
-        throw std::runtime_error("Failed to extract backup archive: " + error_msg);
-    }
-
-    std::vector<std::string> folders;
-    for(const auto& entry : std::filesystem::directory_iterator(backup_extract_dir)) {
-        if(entry.is_directory()) {
-            folders.push_back(entry.path().string());
-        }
-    }
-
-    if(folders.size() != 1) {
-        std::filesystem::remove_all(backup_extract_dir);
-        throw std::runtime_error("Backup extraction failed - directory not found"; 
-    }
-
-    std::string backup_dir = folders[0];
-
     try {
+        std::string error_msg;
+        if(!backup_store_.extractBackupTar(backup_tar, backup_extract_dir, error_msg)) {
+            throw std::runtime_error("Failed to extract backup archive: " + error_msg);
+        }
+
+        std::vector<std::string> folders;
+        for(const auto& entry : std::filesystem::directory_iterator(backup_extract_dir)) {
+            if(entry.is_directory()) {
+                folders.push_back(entry.path().string());
+            }
+        }
+
+        if(folders.size() != 1) {
+            std::filesystem::remove_all(backup_extract_dir);
+            throw std::runtime_error("Backup extraction failed - directory not found");
+        }
+
+        std::string backup_dir = folders[0];
+
         std::ifstream f(backup_dir + "/metadata.json");
         if(!f.good()) {
             std::filesystem::remove_all(backup_extract_dir);
@@ -2225,7 +2228,7 @@ inline void IndexManager::restoreBackup(const std::string& backup_name,
     } catch(const std::exception& e) {
         std::filesystem::remove_all(backup_extract_dir);
         backup_store_.clearActiveBackup(username);
-        LOG_ERROR(2058, backup_name, "Restoration of backup failed for " << backup_name << ", index name ", << target_index_name <<": " << e.what());
+        LOG_ERROR(2058, backup_name, "Restoration of backup failed for " << backup_name << ", index name " << target_index_name <<": " << e.what());
     }
 }
 
@@ -2269,32 +2272,34 @@ inline std::pair<bool, std::string> IndexManager::restoreBackupAsync(const std::
                                                 const std::string& target_index_name,
                                                 const std::string& username) {
 
-                                                    // Check if any backup is already under creation or restoration
-                                                    if(backup_store_.hasActiveBackup(username)) {
-                                                        return {false, "Backup already in progress for user: " + username};
-                                                    }
+    // Check if any backup is already under creation or restoration
+    if(backup_store_.hasActiveBackup(username)) {
+        return {false, "Backup already in progress for user: " + username};
+    }
 
-                                                    // Check if the backup exists
-                                                    nlohmann::json backup_db = backup_store_.readBackupJson(username);
-                                                    if(!backup_db.contains(backup_name)) {
-                                                        return {false, "Backup not found: " + backup_name}
-                                                    }
-                                                    
-                                                    // Check if an index with target name already exists
-                                                    std::string target_index_id = username + "/" + target_index_name;
-                                                    if(metadata_manager_->getMetaData(target_index_id).has_value()) {
-                                                        return {false, "Target index already exists"};
-                                                    }
+    // Check if the backup exists
+    nlohmann::json backup_db = backup_store_.readBackupJson(username);
+    if(!backup_db.contains(backup_name)) {
+        return {false, "Backup not found: " + backup_name};
+    }
+    
+    // Check if an index with target name already exists
+    std::string target_index_id = username + "/" + target_index_name;
+    if(metadata_manager_->getMetadata(target_index_id).has_value()) {
+        return {false, "Target index already exists"};
+    }
 
-                                                    std::jthread t([this, backup_name, target_index_name](std::stop_token st) {
-                                                        restoreBackup(backup_name, target_index_name, username);
-                                                    })
-                                                    
-                                                    const std::string index_id = username + "/" + target_index_name;
-                                                    backup_store_.setActiveBackup(username,index_id, backup_name, BackupOperation::Restoration, std::move(t));
+    std::jthread t([this, backup_name, target_index_name, username](std::stop_token st) {
+        restoreBackup(backup_name, target_index_name, username,st);
+    });
+    
+    const std::string index_id = username + "/" + target_index_name;
+    backup_store_.setActiveBackup(username,index_id, backup_name, BackupOperation::Restoration, std::move(t));
 
-                                                    LOG_INFO(2059, username, "Restoration started for backup: " << backup_name <<", target_index: " << target_index_name);
-                                                }
+    LOG_INFO(2059, username, "Restoration started for backup: " << backup_name <<", target_index: " << target_index_name);
+
+    return {true, target_index_name};
+}
 
 inline std::pair<bool, std::string> IndexManager::uploadBackup(const std::string& backup_name, const std::string& username, const std::string& file_content) {
     std::string user_backup_dir = backup_store_.getUserBackupDir(username);

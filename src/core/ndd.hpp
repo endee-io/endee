@@ -2253,10 +2253,13 @@ inline std::pair<bool, std::string> IndexManager::createBackupAsync(const std::s
         return {false, "Backup already exists: " + backup_name};
     }
 
+    backup_store_.setActiveBackup(username, backup_name, BackupOperation::Creation);
+
     std::jthread t([this, index_id, backup_name](std::stop_token st) {
         executeBackupJob(index_id, backup_name, st);
     });
-    backup_store_.setActiveBackup(username, backup_name, BackupOperation::Creation, std::move(t));
+    
+    backup_store_.attachBackupThread(username, std::move(t));
 
     LOG_INFO(2046, index_id, "Backup started: " << backup_name);
 
@@ -2284,12 +2287,14 @@ inline std::pair<bool, std::string> IndexManager::restoreBackupAsync(const std::
         return {false, "Target index already exists"};
     }
 
+    backup_store_.setActiveBackup(username, backup_name, BackupOperation::Restoration);
+
     std::jthread t([this, backup_name, target_index_name, username](std::stop_token st) {
         restoreBackup(backup_name, target_index_name, username,st);
     });
-    
-    backup_store_.setActiveBackup(username, backup_name, BackupOperation::Restoration, std::move(t));
 
+    backup_store_.attachBackupThread(username, std::move(t));    
+    
     LOG_INFO(2059, username, "Restoration started for backup: " << backup_name <<", target_index: " << target_index_name);
 
     return {true, target_index_name};

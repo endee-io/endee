@@ -200,10 +200,17 @@ public:
     }
 
     // Active backup tracking
-
-    void setActiveBackup(const std::string& username, const std::string& backup_name, const BackupOperation& operation ,std::jthread&& thread) {
+    void setActiveBackup(const std::string& username, const std::string& backup_name, const BackupOperation& operation) {
         std::lock_guard<std::mutex> lock(active_user_backups_mutex_);
-        active_user_backups_[username] = {backup_name, operation, std::move(thread)};
+        active_user_backups_[username] = ActiveBackup{backup_name, operation, {}};
+    }
+
+    void attachBackupThread(const std::string& username, std::jthread&& thread) {
+        std::lock_guard<std::mutex> lock(active_user_backups_mutex_);
+        auto it = active_user_backups_.find(username);
+        if(it != active_user_backups_.end()) {
+            it->second.thread = std::move(thread);
+        }
     }
 
     void clearActiveBackup(const std::string& username) {

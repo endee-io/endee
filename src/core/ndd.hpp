@@ -2152,13 +2152,6 @@ inline void IndexManager::restoreBackup(const std::string& backup_name,
     std::string target_dir = data_dir_ + "/" + target_index_id;
 
     try {
-        size_t backup_size = std::filesystem::file_size(backup_tar);
-        auto space_info = std::filesystem::space(user_temp_dir);
-        if(space_info.available < backup_size * 2) {
-            throw std::runtime_error("Insufficient disk space: need " +
-                std::to_string(backup_size * 2 / MB) + " MB");
-        }
-
         std::string error_msg;
         if(!backup_store_.extractBackupTar(backup_tar, backup_extract_dir, error_msg)) {
             throw std::runtime_error("Failed to extract backup archive: " + error_msg);
@@ -2285,6 +2278,17 @@ inline std::pair<bool, std::string> IndexManager::restoreBackupAsync(const std::
     std::string target_index_id = username + "/" + target_index_name;
     if(metadata_manager_->getMetadata(target_index_id).has_value()) {
         return {false, "Target index already exists"};
+    }
+
+    // Check disk space before making the backup active
+    std::string backup_tar = backup_store_.getUserBackupDir(username) + "/" + backup_name + ".tar";
+    std::string user_temp_dir = backup_store_.getUserTempDir(username);
+    std::filesystem::create_directories(user_temp_dir);
+    size_t backup_size = std::filesystem::file_size(backup_tar);
+    auto space_info = std::filesystem::space(user_temp_dir);
+    if (space_info.available < backup_size * 2) {
+        return {false, "Insufficient disk space: need " +
+            std::to_string(backup_size * 2 / MB) + " MB"};
     }
 
     backup_store_.setActiveBackup(username, backup_name, BackupOperation::Restoration);

@@ -18,8 +18,9 @@ IndexManager (ndd.hpp)
 BackupStore (src/storage/backup_store.hpp — standalone, no IndexManager dependency)
 ├── Archive: createBackupTar(), extractBackupTar()
 ├── Helpers: getUserBackupDir(), getUserTempDir(), readBackupJson(), writeBackupJson(), cleanupTempDir()
-├── Active backup: setActiveBackup(), clearActiveBackup(), hasActiveBackup(), getActiveBackup()
+├── Active backup: setActiveBackup(), attachBackupThread(), clearActiveBackup(), hasActiveBackup(), getActiveBackup()
 │   (all protected by active_user_backups_mutex_; tracks both Creation and Restoration operations)
+│   setActiveBackup() registers the entry before the thread is spawned; attachBackupThread() moves the jthread in after
 ├── Public methods: validateBackupName(), listBackups(), deleteBackup(), getBackupInfo()
 └── Owns: data_dir_, active_user_backups_, active_user_backups_mutex_ (mutable)
 ```
@@ -69,8 +70,8 @@ If backup holds the mutex, writes block until it completes. Normal write-vs-writ
 ```
 POST /index/X/backup → validateBackupName() → check no duplicate .tar on disk
 → check active_user_backups_[username] empty (one per user)
-→ insert into active_user_backups_ map
-→ spawn detached thread → return 202 { backup_name }
+→ setActiveBackup() — insert entry into active_user_backups_ map (no thread yet)
+→ spawn jthread → attachBackupThread() — move jthread into map entry → return 202 { backup_name }
 ```
 
 **Background thread** (`executeBackupJob`):
@@ -97,8 +98,8 @@ addVectors/deleteVectors/updateFilters/deleteByFilter/deleteIndex
 ```
 POST /backups/{name}/restore → validate name → check backup exists in backup registry
 → check target index does NOT exist → check active_user_backups_[username] empty (one per user)
-→ insert into active_user_backups_ map (BackupOperation::Restoration)
-→ spawn jthread → return 202 { backup_name, target_index, status: "in_progress" }
+→ setActiveBackup() — insert entry into active_user_backups_ map (BackupOperation::Restoration, no thread yet)
+→ spawn jthread → attachBackupThread() — move jthread into map entry → return 202 { backup_name, target_index, status: "in_progress" }
 ```
 
 **Background thread** (`restoreBackup`):

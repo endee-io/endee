@@ -399,11 +399,11 @@ public:
             return;
         }
 
-        // Create a map to collect IDs for each filter
-        std::unordered_map<std::string, std::vector<ndd::idInt>> filter_to_ids;
-        filter_to_ids.reserve(id_filter_pairs.size());
-        std::vector<ndd::filter::NumericBatchEntry> pending_numeric;
-        pending_numeric.reserve(id_filter_pairs.size());
+        // Create a map to collect IDs for each label filter
+        std::unordered_map<std::string, std::vector<ndd::idInt>> label_filter_to_ids;
+        label_filter_to_ids.reserve(id_filter_pairs.size());
+        std::vector<ndd::filter::NumericBatchEntry> numeric_filter_entries;
+        numeric_filter_entries.reserve(id_filter_pairs.size());
 
         // Group IDs by filter
         for(const auto& [numeric_id, filter_json] : id_filter_pairs) {
@@ -432,7 +432,7 @@ public:
 
                     if(value.is_string()) {
                         std::string filter_key = format_filter_key(field, value.get<std::string>());
-                        filter_to_ids[filter_key].emplace_back(numeric_id);
+                        label_filter_to_ids[filter_key].emplace_back(numeric_id);
                     } else if(value.is_number()) {
                         uint32_t sortable_val;
                         if(value.is_number_integer()) {
@@ -440,11 +440,11 @@ public:
                         } else {
                             sortable_val = ndd::filter::float_to_sortable(value.get<float>());
                         }
-                        pending_numeric.emplace_back(field, numeric_id, sortable_val);
+                        numeric_filter_entries.emplace_back(field, numeric_id, sortable_val);
                     } else if(value.is_boolean()) {
                         std::string filter_key =
                                 format_filter_key(field, value.get<bool>() ? "1" : "0");
-                        filter_to_ids[filter_key].emplace_back(numeric_id);
+                        label_filter_to_ids[filter_key].emplace_back(numeric_id);
                     } else {
                         LOG_WARN(1203,
                                        index_id_,
@@ -465,12 +465,12 @@ public:
          * one for numeric_index and other for labels.
          */
 
-        if(!pending_numeric.empty()) {
-            numeric_index_->put_batch(pending_numeric);
+        if(!numeric_filter_entries.empty()) {
+            numeric_index_->put_batch(numeric_filter_entries);
         }
 
         // Process each filter with its batch of IDs
-        for(const auto& [filter_key, ids] : filter_to_ids) {
+        for(const auto& [filter_key, ids] : label_filter_to_ids) {
             add_to_filter_batch(filter_key, ids);
         }
     }

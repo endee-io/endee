@@ -201,6 +201,7 @@ struct PersistenceConfig {
 #include "utils/types.hpp"
 
 class IndexManager {
+    friend class Rebuild;  // executeJob accesses saveIndexInternal + metadata_manager_
 private:
     std::deque<std::string> indices_list_;
     std::unordered_map<std::string, std::shared_ptr<CacheEntry>> indices_;
@@ -2360,37 +2361,15 @@ inline OperationResult IndexManager::rebuildIndexAsync(const std::string& index_
     std::string vector_storage_dir = base_path + "/vectors";
 
     RebuildJobParams params{
-        .index_id           = index_id,
-        .username           = username,
-        .new_M              = new_M,
-        .new_ef_con         = new_ef_con,
-        .space_type         = entry->alg->getSpaceType(),
-        .dim                = entry->alg->getDimension(),
-        .quant_level        = entry->alg->getQuantLevel(),
-        .checksum           = entry->alg->getChecksum(),
-        .max_elements       = entry->alg->getMaxElements(),
-        .vector_storage     = entry->vector_storage,
-        .temp_path          = Rebuild::getTempPath(base_path),
-        .timestamped_path   = Rebuild::getTimestampedPath(base_path),
-        .index_path         = vector_storage_dir + "/" + settings::DEFAULT_SUBINDEX + ".idx",
+        .username             = username,
+        .new_M                = new_M,
+        .new_ef_con           = new_ef_con,
+        .entry                = entry,
+        .manager              = this,
+        .temp_path            = Rebuild::getTempPath(base_path),
+        .timestamped_path     = Rebuild::getTimestampedPath(base_path),
+        .index_path           = vector_storage_dir + "/" + settings::DEFAULT_SUBINDEX + ".idx",
         .num_parallel_inserts = settings::NUM_PARALLEL_INSERTS,
-        .operation_mutex    = &entry->operation_mutex,
-        .save_current_index = [this, entry]() { saveIndexInternal(*entry); },
-        .swap_alg           = [entry](auto fresh) { entry->alg = std::move(fresh); },
-        .update_metadata    = [this, index_id, entry](size_t nm, size_t nef) {
-            auto m = metadata_manager_->getMetadata(index_id);
-            if (m) {
-                m->M = nm;
-                m->ef_con = nef;
-                m->total_elements = entry->alg->getElementsCount();
-                metadata_manager_->storeMetadata(index_id, *m);
-            }
-        },
-        .clear_dirty        = [entry]() { entry->is_dirty = false; },
-        .wire_fetchers      = [](auto* alg, auto vs) { IndexManager::wireVectorFetchers(alg, vs); },
-        .parallel_add       = [](size_t n, size_t t, std::function<void(size_t)> fn) {
-            IndexManager::parallelAddPoints(n, t, std::move(fn));
-        },
     };
 
     // Register state FIRST with empty thread — hasActiveRebuild() returns true immediately

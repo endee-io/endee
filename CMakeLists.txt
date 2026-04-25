@@ -289,6 +289,7 @@ target_include_directories(ndd_core PRIVATE
     ${ASIO_INCLUDE_DIR}
     ${OPENSSL_INCLUDE_DIR}
     ${CURL_INCLUDE_DIRS}
+    ${LIBARCHIVE_INCLUDE_DIR}
 )
 target_include_directories(${NDD_BINARY_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src

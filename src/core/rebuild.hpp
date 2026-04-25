@@ -4,17 +4,16 @@
 #include <unordered_map>
 #include <memory>
 #include <mutex>
-#include <shared_mutex>
 #include <thread>
 #include <chrono>
 #include <vector>
 #include <stop_token>
-#include <functional>
 
 #include "json/nlohmann_json.hpp"
-#include "hnsw/hnswlib.h"
-#include "vector_storage.hpp"
-#include "../quant/common.hpp"
+
+// Forward declarations — full definitions live in ndd.hpp, included by rebuild.cpp.
+struct CacheEntry;
+class IndexManager;
 
 enum class RebuildStatus : unsigned char {
     IN_PROGRESS = 0,
@@ -33,43 +32,20 @@ struct ActiveRebuild {
     std::jthread thread;  // jthread: built-in stop_token + auto-join on destruction
 };
 
-// Parameters passed to Rebuild::executeJob. IndexManager-specific operations are
-// provided as callbacks so rebuild.hpp does not need to include ndd.hpp.
+// Parameters passed to Rebuild::executeJob. `entry` and `manager` give executeJob
+// direct access to graph config, vector storage, mutexes, save/metadata operations.
 struct RebuildJobParams {
-    // Identity
-    std::string index_id;
     std::string username;
     size_t new_M;
     size_t new_ef_con;
 
-    // Current graph config (read from entry->alg by IndexManager before thread spawn)
-    hnswlib::SpaceType space_type;
-    size_t dim;
-    ndd::quant::QuantizationLevel quant_level;
-    int32_t checksum;
-    size_t max_elements;
+    std::shared_ptr<CacheEntry> entry;  // shared_ptr keeps CacheEntry alive for the rebuild duration
+    IndexManager* manager;              // saveIndexInternal, metadata_manager_ (via friend)
 
-    // Storage for vector iteration
-    std::shared_ptr<VectorStorage> vector_storage;
-
-    // File paths
     std::string temp_path;
     std::string timestamped_path;
     std::string index_path;
-
-    // Threading
-    size_t num_parallel_inserts;
-
-    // Mutex pointer — executeJob acquires this for the whole job duration
-    std::shared_mutex* operation_mutex;
-
-    // Callbacks for IndexManager-specific actions (avoids circular ndd.hpp include)
-    std::function<void()> save_current_index;
-    std::function<void(std::unique_ptr<hnswlib::HierarchicalNSW<float>>)> swap_alg;
-    std::function<void(size_t new_M, size_t new_ef_con)> update_metadata;
-    std::function<void()> clear_dirty;
-    std::function<void(hnswlib::HierarchicalNSW<float>*, std::shared_ptr<VectorStorage>)> wire_fetchers;
-    std::function<void(size_t, size_t, std::function<void(size_t)>)> parallel_add;
+    size_t      num_parallel_inserts;
 };
 
 class Rebuild {

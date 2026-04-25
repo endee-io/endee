@@ -7,6 +7,7 @@
 #include "settings.hpp"
 #include "log.hpp"
 #include "utils/types.hpp"
+#include "ndd.hpp"          // CacheEntry, IndexManager (friend access)
 
 std::string Rebuild::statusToString(RebuildStatus s) {
     switch (s) {
@@ -174,21 +175,25 @@ std::string Rebuild::getTimestampedPath(const std::string& index_dir) {
 }
 
 void Rebuild::executeJob(const RebuildJobParams& p, std::stop_token st) {
+    auto& entry = p.entry;     // shared_ptr<CacheEntry>
+    auto* manager = p.manager;
     try {
-        std::unique_lock<std::shared_mutex> op_lock(*p.operation_mutex);
+        std::unique_lock<std::shared_mutex> op_lock(entry->operation_mutex);
 
         // Phase 1 — save current state before rebuilding
-        p.save_current_index();
+        manager->saveIndexInternal(*entry);
 
         // Phase 2 — build new HNSW with updated M/ef_con
+        auto* old_alg = entry->alg.get();
         auto new_alg = std::make_unique<hnswlib::HierarchicalNSW<float>>(
-            p.max_elements, p.space_type, p.dim, p.new_M, p.new_ef_con,
-            settings::RANDOM_SEED, p.quant_level, p.checksum);
+            old_alg->getMaxElements(), old_alg->getSpaceType(), old_alg->getDimension(),
+            p.new_M, p.new_ef_con,
+            settings::RANDOM_SEED, old_alg->getQuantLevel(), old_alg->getChecksum());
 
         // MUST wire fetchers before addPoint — searchBaseLayer needs this for base-layer-only nodes
-        p.wire_fetchers(new_alg.get(), p.vector_storage);
+        IndexManager::wireVectorFetchers(new_alg.get(), entry->vector_storage);
 
-        auto cursor = p.vector_storage->getCursor();
+        auto cursor = entry->vector_storage->getCursor();
         const size_t batch_size = settings::RECOVERY_BATCH_SIZE;
         size_t total_processed = 0;
         size_t batches_since_checkpoint = 0;
@@ -211,7 +216,7 @@ void Rebuild::executeJob(const RebuildJobParams& p, std::stop_token st) {
             }
             if (batch.empty()) break;
 
-            p.parallel_add(batch.size(), p.num_parallel_inserts,
+            IndexManager::parallelAddPoints(batch.size(), p.num_parallel_inserts,
                 [&](size_t i) {
                     const auto& [label, vec_bytes] = batch[i];
                     new_alg->addPoint<true>(vec_bytes.data(), label);
@@ -235,7 +240,7 @@ void Rebuild::executeJob(const RebuildJobParams& p, std::stop_token st) {
         // indices_mutex_, while deleteIndex holds indices_mutex_ then acquires operation_mutex.
         // Calling reloadIndex here would deadlock with a concurrent delete on the same index.
         auto fresh_alg = std::make_unique<hnswlib::HierarchicalNSW<float>>(p.index_path, 0);
-        p.wire_fetchers(fresh_alg.get(), p.vector_storage);
+        IndexManager::wireVectorFetchers(fresh_alg.get(), entry->vector_storage);
 
         // Both files are deleted here on success. If the server crashes before reaching this
         // point, the timestamped file (default.idx.<ts>) will be removed on next startup
@@ -243,15 +248,24 @@ void Rebuild::executeJob(const RebuildJobParams& p, std::stop_token st) {
         if (std::filesystem::exists(p.temp_path)) std::filesystem::remove(p.temp_path);
         if (std::filesystem::exists(p.timestamped_path)) std::filesystem::remove(p.timestamped_path);
 
-        p.swap_alg(std::move(fresh_alg));
-        p.update_metadata(p.new_M, p.new_ef_con);
-        p.clear_dirty();
+        entry->alg = std::move(fresh_alg);
 
-        LOG_INFO(1801, p.index_id, "Rebuild completed: " << total_processed << " vectors rebuilt");
+        // Update metadata (uses friend access to manager->metadata_manager_)
+        auto m = manager->metadata_manager_->getMetadata(entry->index_id);
+        if (m) {
+            m->M = p.new_M;
+            m->ef_con = p.new_ef_con;
+            m->total_elements = entry->alg->getElementsCount();
+            manager->metadata_manager_->storeMetadata(entry->index_id, *m);
+        }
+
+        entry->is_dirty = false;
+
+        LOG_INFO(1801, entry->index_id, "Rebuild completed: " << total_processed << " vectors rebuilt");
         completeActiveRebuild(p.username);
 
     } catch (const std::exception& e) {
-        LOG_ERROR(1802, p.index_id, "Rebuild failed: " << e.what());
+        LOG_ERROR(1802, entry->index_id, "Rebuild failed: " << e.what());
         if (std::filesystem::exists(p.temp_path)) std::filesystem::remove(p.temp_path);
         failActiveRebuild(p.username, e.what());
     }

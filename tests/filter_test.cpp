@@ -37,7 +37,7 @@ protected:
         }
         
         // Initialize Filter
-        filter = std::make_unique<Filter>(db_path);
+        filter = std::make_unique<Filter>(db_path, "testuser/testidx");
     }
 
     void TearDown() override {

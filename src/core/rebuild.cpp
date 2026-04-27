@@ -46,7 +46,10 @@ void Rebuild::cleanupTempFiles(const std::string& data_dir) {
             }
         }
     } catch (const std::filesystem::filesystem_error& e) {
-        LOG_WARN(1803, "rebuild", "Failed to cleanup temp files on startup: " << e.what());
+        if (e.code() != std::errc::no_such_file_or_directory)
+            LOG_WARN(1803, "rebuild", "Error during temp cleanup: " << e.what());
+    } catch (const std::exception& e) {
+        LOG_WARN(1803, "rebuild", "Error during temp cleanup: " << e.what());
     }
 }
 

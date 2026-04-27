@@ -121,4 +121,14 @@ The following parameters **cannot** be changed via rebuild (returns 400):
 - **One rebuild at a time per user** — cannot start a rebuild on any index while another rebuild is in progress for the same user. Also cannot run concurrently with a backup.
 - **Periodic checkpoints** — the in-progress graph is saved to a temp file at regular intervals.
 - **On completion**, the new graph replaces `default.idx`. All temporary and intermediate files are cleaned up.
-- **On server restart** during an incomplete rebuild, the old index loads normally. Temp files are cleaned up automatically. The rebuild must be restarted manually.
+- **On server restart** during an incomplete rebuild, the old index loads normally. Orphaned temp files are removed automatically on startup. The rebuild must be restarted manually. To confirm a rebuild was incomplete, check that M/ef_con in the index info still show the original values.
+
+---
+
+## Capacity and Timing
+
+**Disk space:** Plan for roughly **2× the index file size** free. A temporary copy of the completed graph is written before being renamed into place.
+
+**Memory:** Both the old and new graphs are in RAM simultaneously during rebuild. Peak usage is approximately **2× the index graph size** in addition to normal vector storage.
+
+**Duration:** Roughly 8-10 minutes per million vectors on commodity hardware at default settings. Higher M or ef_con increases build time. The final disk save adds additional time proportional to index size.

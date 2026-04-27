@@ -71,7 +71,6 @@ public:
     void updateProgress(const std::string& username, size_t processed);
     nlohmann::json getProgress(const std::string& username, const std::string& index_id) const;
 
-    static std::string formatTime(std::chrono::system_clock::time_point tp);
     static std::string getTempPath(const std::string& index_dir);
     static std::string getTimestampedPath(const std::string& index_dir);
 

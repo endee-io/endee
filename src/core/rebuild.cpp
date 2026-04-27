@@ -14,8 +14,8 @@ std::string Rebuild::statusToString(RebuildStatus s) {
         case RebuildStatus::IN_PROGRESS: return "in_progress";
         case RebuildStatus::COMPLETED:   return "completed";
         case RebuildStatus::FAILED:      return "failed";
-        default:                         return "unknown";
     }
+    __builtin_unreachable();
 }
 
 std::string Rebuild::timeToISO8601(std::chrono::system_clock::time_point tp) {
@@ -45,7 +45,7 @@ void Rebuild::cleanupTempFiles(const std::string& data_dir) {
                 std::filesystem::remove(entry.path());
             }
         }
-    } catch (const std::exception& e) {
+    } catch (const std::filesystem::filesystem_error& e) {
         LOG_WARN(1803, "rebuild", "Failed to cleanup temp files on startup: " << e.what());
     }
 }
@@ -144,10 +144,10 @@ nlohmann::json Rebuild::getProgress(const std::string& username, const std::stri
             {"vectors_processed", processed},
             {"total_vectors", total},
             {"percent_complete", percent},
-            {"started_at", formatTime(state.started_at)}
+            {"started_at", timeToISO8601(state.started_at)}
         };
         if (state.status == RebuildStatus::COMPLETED || state.status == RebuildStatus::FAILED) {
-            result["completed_at"] = formatTime(state.completed_at);
+            result["completed_at"] = timeToISO8601(state.completed_at);
         }
         if (state.status == RebuildStatus::FAILED && !state.error_message.empty()) {
             result["error"] = state.error_message;
@@ -155,10 +155,6 @@ nlohmann::json Rebuild::getProgress(const std::string& username, const std::stri
         return result;
     }
     return {{"status", "idle"}};
-}
-
-std::string Rebuild::formatTime(std::chrono::system_clock::time_point tp) {
-    return timeToISO8601(tp);
 }
 
 std::string Rebuild::getTempPath(const std::string& index_dir) {
@@ -231,24 +227,21 @@ void Rebuild::executeJob(const RebuildJobParams& p, std::stop_token st) {
             }
         }
 
-        // Phase 3 — save final, copy to canonical path, load fresh from disk
+        if (st.stop_requested()) {
+            if (std::filesystem::exists(p.temp_path))
+                std::filesystem::remove(p.temp_path);
+            failActiveRebuild(p.username, "Rebuild interrupted by server shutdown");
+            return;
+        }
+
+        // Phase 3 — persist to timestamped path, atomically rename to canonical path
         new_alg->saveIndex(p.timestamped_path);
-        std::filesystem::copy_file(p.timestamped_path, p.index_path,
-            std::filesystem::copy_options::overwrite_existing);
+        std::filesystem::rename(p.timestamped_path, p.index_path);
 
-        // Cannot call reloadIndex() here — we hold operation_mutex and reloadIndex acquires
-        // indices_mutex_, while deleteIndex holds indices_mutex_ then acquires operation_mutex.
-        // Calling reloadIndex here would deadlock with a concurrent delete on the same index.
-        auto fresh_alg = std::make_unique<hnswlib::HierarchicalNSW<float>>(p.index_path, 0);
-        IndexManager::wireVectorFetchers(fresh_alg.get(), entry->vector_storage);
-
-        // Both files are deleted here on success. If the server crashes before reaching this
-        // point, the timestamped file (default.idx.<ts>) will be removed on next startup
-        // by cleanupTempFiles — it does not affect index correctness.
         if (std::filesystem::exists(p.temp_path)) std::filesystem::remove(p.temp_path);
-        if (std::filesystem::exists(p.timestamped_path)) std::filesystem::remove(p.timestamped_path);
 
-        entry->alg = std::move(fresh_alg);
+        // new_alg is fully built and fetchers are already wired (line 194) — use directly
+        entry->alg = std::move(new_alg);
 
         // Update metadata (uses friend access to manager->metadata_manager_)
         auto m = manager->metadata_manager_->getMetadata(entry->index_id);

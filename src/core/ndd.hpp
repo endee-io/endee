@@ -2376,7 +2376,7 @@ inline OperationResult IndexManager::rebuildIndexAsync(const std::string& index_
     rebuild_.setActiveRebuild(username, index_id, current_count);
 
     // Spawn thread — lambda calls rebuild_.executeJob directly (execution lives in Rebuild)
-    std::jthread t([this, params = std::move(params)](std::stop_token st) mutable {
+    std::jthread t([this, params = std::move(params)](std::stop_token st) {
         rebuild_.executeJob(params, st);
     });
 

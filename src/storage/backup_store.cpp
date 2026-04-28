@@ -77,13 +77,13 @@ void BackupStore::createBackup(const CreateBackupParams& params, std::stop_token
                            {"checksum", meta->checksum}};
             LOG_DEBUG("Metadata prepared for backup: " << metadata_json.dump());
         } else {
-            LOG_ERROR(2041, index_id, "Failed to get metadata for backup");
+            LOG_ERROR(1305, index_id, "Failed to get metadata for backup");
             throw std::runtime_error("Cannot create backup without index metadata");
         }
 
         // Check stop_token before expensive operations
         if (st.stop_requested()) {
-            LOG_INFO(2056, index_id, "Backup cancelled before backup work started");
+            LOG_INFO(1306, index_id, "Backup cancelled before backup work started");
             clearActiveBackup(username);
             return;
         }
@@ -104,7 +104,7 @@ void BackupStore::createBackup(const CreateBackupParams& params, std::stop_token
 
             // Check again after acquiring lock (shutdown may have been requested while waiting)
             if (st.stop_requested()) {
-                LOG_INFO(2057, index_id, "Backup cancelled");
+                LOG_INFO(1307, index_id, "Backup cancelled");
                 clearActiveBackup(username);
                 return;
             }
@@ -147,7 +147,7 @@ void BackupStore::createBackup(const CreateBackupParams& params, std::stop_token
 
         clearActiveBackup(username);
 
-        LOG_INFO(2042, index_id, "Backup tar created; write operations resumed");
+        LOG_INFO(1308, index_id, "Backup tar created; write operations resumed");
 
         std::filesystem::rename(backup_tar_temp, backup_tar_final);
 
@@ -155,7 +155,7 @@ void BackupStore::createBackup(const CreateBackupParams& params, std::stop_token
         backup_db[backup_name] = metadata_json;
         writeBackupJson(username, backup_db);
 
-        LOG_INFO(2043, index_id, "Backup completed: " << backup_name << " -> " << backup_tar_final);
+        LOG_INFO(1309, index_id, "Backup completed: " << backup_name << " -> " << backup_tar_final);
 
     } catch (const std::exception& e) {
         std::string user_backup_dir = getUserBackupDir(username);
@@ -177,7 +177,7 @@ void BackupStore::createBackup(const CreateBackupParams& params, std::stop_token
 
         clearActiveBackup(username);
 
-        LOG_ERROR(2044, index_id, "Backup failed for " << backup_name << ": " << e.what());
+        LOG_ERROR(1310, index_id, "Backup failed for " << backup_name << ": " << e.what());
     }
 }
 
@@ -256,14 +256,12 @@ void BackupStore::restoreBackup(const RestoreBackupParams& params, std::stop_tok
 
         clearActiveBackup(username);
 
-        LOG_INFO(2045, username, target_index_name, "Restored backup from " << backup_tar);
+        LOG_INFO(1311, username, target_index_name, "Restored backup from " << backup_tar);
     } catch(const std::exception& e) {
         std::filesystem::remove_all(backup_extract_dir);
         clearActiveBackup(username);
-        LOG_ERROR(2058,
-                  backup_name,
-                  "Restoration of backup failed for " << backup_name << ", index name "
-                                                      << target_index_name << ": " << e.what());
+        LOG_ERROR(1312, username, target_index_name,
+                  "Restoration of backup failed for " << backup_name << ": " << e.what());
     }
 }
 

@@ -521,12 +521,16 @@ int main(int argc, char** argv) {
 
                 try {
                     std::pair<bool, std::string> result =
-                            index_manager.restoreBackup(backup_name, target_index_name, ctx.username);
+                            index_manager.restoreBackupAsync(backup_name, target_index_name, ctx.username);
                     if(!result.first) {
                         LOG_WARN(1023, ctx.username, target_index_name, "Restore-backup request rejected: " << result.second);
                         return json_error(400, result.second);
                     }
-                    return crow::response(201, "Backup restored successfully");
+                    crow::json::wvalue response;
+                    response["backup_name"] = backup_name;
+                    response["target_index"] = result.second;
+                    response["status"] = "in_progress";
+                    return crow::response(202, response.dump());
                 } catch(const std::exception& e) {
                     return json_error_500(ctx.username, target_index_name, req.url, e.what());
                 }
@@ -659,8 +663,8 @@ int main(int argc, char** argv) {
                     crow::json::wvalue response;
                     if (active) {
                         response["active"] = true;
-                        response["backup_name"] = active->second;
-                        response["index_id"] = active->first;
+                        response["backup_name"] = active->first;
+                        response["operation"] = active->second;
                     } else {
                         response["active"] = false;
                     }
@@ -689,6 +693,98 @@ int main(int argc, char** argv) {
                     return res;
                 } catch(const std::exception& e) {
                     return json_error_500(ctx.username, req.url, e.what());
+                }
+            });
+
+    // ========== Rebuild operations ==========
+
+    // Start index rebuild
+    CROW_ROUTE(app, "/api/v1/index/<string>/rebuild")
+            .CROW_MIDDLEWARES(app, AuthMiddleware)
+            .methods("POST"_method)([&index_manager, &app](const crow::request& req,
+                                                           const std::string& index_name) {
+                auto& ctx = app.get_context<AuthMiddleware>(req);
+                std::string index_id = ctx.username + "/" + index_name;
+
+                auto body = crow::json::load(req.body);
+                if (!body) {
+                    return json_error(400, "Invalid JSON");
+                }
+
+                // Reject parameters that cannot be changed via rebuild
+                if (body.has("precision")) {
+                    return json_error(400, "precision cannot be changed via rebuild");
+                }
+                if (body.has("space_type")) {
+                    return json_error(400, "space_type cannot be changed via rebuild");
+                }
+
+                // Get current metadata for defaults
+                auto meta = index_manager.getMetadata(index_id);
+                if (!meta) {
+                    return json_error(404, "Index not found");
+                }
+                // Parse parameters with current values as defaults
+                size_t new_M = body.has("M") ? (size_t)body["M"].i() : meta->M;
+                size_t new_ef_con = body.has("ef_con") ? (size_t)body["ef_con"].i() : meta->ef_con;
+
+                // Validate M
+                if (new_M < settings::MIN_M || new_M > settings::MAX_M) {
+                    return json_error(400,
+                        "M must be between " + std::to_string(settings::MIN_M)
+                        + " and " + std::to_string(settings::MAX_M));
+                }
+
+                // Validate ef_con
+                if (new_ef_con < settings::MIN_EF_CONSTRUCT || new_ef_con > settings::MAX_EF_CONSTRUCT) {
+                    return json_error(400,
+                        "ef_con must be between " + std::to_string(settings::MIN_EF_CONSTRUCT)
+                        + " and " + std::to_string(settings::MAX_EF_CONSTRUCT));
+                }
+
+                // Use live count — meta->total_elements can be stale if not yet flushed to disk
+                size_t actual_element_count = index_manager.getElementCount(index_id);
+                if (actual_element_count == 0) {
+                    return json_error(400, "Cannot rebuild an empty index");
+                }
+
+                try {
+                    auto result = index_manager.rebuildIndexAsync(index_id, new_M, new_ef_con);
+
+                    if (result.code == 1) return json_error(404, result.message);
+                    if (result.code == 2) return json_error(409, result.message);
+                    if (result.code == 3) return json_error(400, result.message);
+
+                    crow::json::wvalue response;
+                    response["status"] = "rebuilding";
+                    response["previous_config"]["M"] = meta->M;
+                    response["previous_config"]["ef_con"] = meta->ef_con;
+                    response["new_config"]["M"] = new_M;
+                    response["new_config"]["ef_con"] = new_ef_con;
+                    response["total_vectors"] = actual_element_count;
+                    return crow::response(202, response.dump());
+                } catch (const std::exception& e) {
+                    return json_error_500(ctx.username, index_name, req.url, e.what());
+                }
+            });
+
+    // Get rebuild status
+    CROW_ROUTE(app, "/api/v1/index/<string>/rebuild/status")
+            .CROW_MIDDLEWARES(app, AuthMiddleware)
+            .methods("GET"_method)([&index_manager, &app](const crow::request& req,
+                                                          const std::string& index_name) {
+                auto& ctx = app.get_context<AuthMiddleware>(req);
+                std::string index_id = ctx.username + "/" + index_name;
+
+                try {
+                    auto progress = index_manager.getRebuildProgress(ctx.username, index_id);
+                    crow::response res;
+                    res.code = 200;
+                    res.set_header("Content-Type", "application/json");
+                    res.body = progress.dump();
+                    return res;
+                } catch (const std::exception& e) {
+                    return json_error_500(ctx.username, index_name, req.url, e.what());
                 }
             });
 

@@ -254,6 +254,8 @@ message(STATUS "Binary name: ${NDD_BINARY_NAME}")
 set(NDD_CORE_SOURCES
     src/sparse/inverted_index.cpp
     src/utils/system_sanity/system_sanity.cpp
+    src/core/rebuild.cpp
+    src/storage/backup_store.cpp
 )
 
 # Build non-main project sources separately so they can be compiled in parallel
@@ -288,6 +290,7 @@ target_include_directories(ndd_core PRIVATE
     ${ASIO_INCLUDE_DIR}
     ${OPENSSL_INCLUDE_DIR}
     ${CURL_INCLUDE_DIRS}
+    ${LIBARCHIVE_INCLUDE_DIR}
 )
 target_include_directories(${NDD_BINARY_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src

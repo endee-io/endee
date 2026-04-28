@@ -107,7 +107,7 @@ struct CacheEntry {
      *
      * writers: addVectors, saveIndexInternal, saveIndex, deleteVectors,
      * evictIfNeeded, recoverIndex, deleteVectorsByFilter, updateFilters,
-     * deleteIndex, executeBackupJob
+     * deleteIndex
      *
      * readers: searchKNN, getVector, getIndexInfo (loaded-index path only)
      *
@@ -197,8 +197,12 @@ struct PersistenceConfig {
 };
 
 #include "../storage/backup_store.hpp"
+#include "rebuild.hpp"
+#include "utils/types.hpp"
 
 class IndexManager {
+    friend class Rebuild;  // executeJob accesses saveIndexInternal + metadata_manager_
+    friend class BackupStore;
 private:
     std::deque<std::string> indices_list_;
     std::unordered_map<std::string, std::shared_ptr<CacheEntry>> indices_;
@@ -220,8 +224,7 @@ private:
     std::thread autosave_thread_;
     std::atomic<bool> running_{true};
     BackupStore backup_store_;
-    void executeBackupJob(const std::string& index_id, const std::string& backup_name,
-                          std::stop_token st);
+    Rebuild rebuild_;
 
     std::unique_ptr<WriteAheadLog> createWAL(const std::string& index_id) {
         const std::string wal_dir = data_dir_ + "/" + index_id;
@@ -581,6 +584,7 @@ public:
         backup_store_(data_dir) {
         std::filesystem::create_directories(data_dir);
         metadata_manager_ = std::make_unique<MetadataManager>(data_dir);
+        rebuild_.cleanupTempFiles(data_dir);
         // Start the autosave thread
         autosave_thread_ = std::thread(&IndexManager::autosaveLoop, this);
     }
@@ -589,9 +593,10 @@ public:
         // Signal all threads to stop (running_ is checked by autosave and backup threads)
         running_ = false;
 
-        // Join background backup threads before destroying members
-        // (prevents use-after-free when detached threads outlive IndexManager)
+        // Join background backup and rebuild threads before destroying members
+        // (prevents use-after-free when threads outlive IndexManager)
         backup_store_.joinAllThreads();
+        rebuild_.joinAllThreads();
 
         /**
          * Don't wait for autosave thread to exit.
@@ -1108,47 +1113,15 @@ public:
             logInsertsAndUpdates(entry, numeric_ids);
 
             // Add to HNSW index in parallel using pre-quantized data from QuantVectorObject
-            size_t available_threads = settings::NUM_PARALLEL_INSERTS;
-            const size_t num_threads = (available_threads < quantized_vectors.size())
-                                               ? available_threads
-                                               : quantized_vectors.size();
-            std::vector<std::thread> threads;
-            const size_t chunk_size =
-                    (quantized_vectors.size() + num_threads - 1) / num_threads;  // Ceiling division
-
-            threads.reserve(num_threads);
-            for(size_t t = 0; t < num_threads; t++) {
-                threads.emplace_back([&, t]() {
-                    // Calculate start and end indices for this thread
-                    size_t start_idx = t * chunk_size;
-                    size_t end_idx = (start_idx + chunk_size < quantized_vectors.size())
-                                            ? (start_idx + chunk_size)
-                                            : quantized_vectors.size();
-
-                    // Process assigned chunk of vectors
-                    for(size_t i = start_idx; i < end_idx; i++) {
-                        const auto& quant_vec_obj = quantized_vectors[i];
-
-                        // Use pre-quantized data directly from QuantVectorObject - no conversion
-                        // needed!
-                        const uint8_t* vector_data = quant_vec_obj.quant_vector.data();
-
-                        // Add to HNSW index using pre-quantized raw bytes
-                        if(numeric_ids[i].second) {
-                            // If it's a new ID, add it to the index
-                            entry.alg->addPoint<true>(vector_data, numeric_ids[i].first);
-                        } else {
-                            // If it's an update, add it to the index
-                            entry.alg->addPoint<false>(vector_data, numeric_ids[i].first);
-                        }
+            parallelAddPoints(quantized_vectors.size(), settings::NUM_PARALLEL_INSERTS,
+                [&](size_t i) {
+                    const uint8_t* vector_data = quantized_vectors[i].quant_vector.data();
+                    if(numeric_ids[i].second) {
+                        entry.alg->addPoint<true>(vector_data, numeric_ids[i].first);
+                    } else {
+                        entry.alg->addPoint<false>(vector_data, numeric_ids[i].first);
                     }
                 });
-            }
-
-            // Wait for all threads to complete
-            for(auto& thread : threads) {
-                thread.join();
-            }
 
             entry.markDirty();
 
@@ -1898,7 +1871,7 @@ public:
     std::pair<bool, std::string> createBackupAsync(const std::string& index_id,
                                                     const std::string& backup_name);
 
-    std::pair<bool, std::string> restoreBackup(const std::string& backup_name,
+    std::pair<bool, std::string> restoreBackupAsync(const std::string& backup_name,
                                                 const std::string& target_index_name,
                                                 const std::string& username);
 
@@ -1928,262 +1901,75 @@ public:
     std::pair<bool, std::string> uploadBackup(const std::string& backup_name,
                                                 const std::string& username,
                                                 const std::string& file_content);
+
+    // Metadata access
+    std::optional<IndexMetadata> getMetadata(const std::string& index_id) {
+        return metadata_manager_->getMetadata(index_id);
+    }
+
+    // Reads live count from the in-memory HNSW graph; meta->total_elements can be stale between saves.
+    size_t getElementCount(const std::string& index_id) {
+        auto entry = getIndexEntry(index_id);
+        return entry->alg->getElementsCount();
+    }
+
+
+    // ========== Rebuild operations ==========
+
+    // Return codes:
+    //   0: rebuild started successfully
+    //   1: index not found
+    //   2: rebuild or backup already in progress for this user
+    //   3: no configuration changes specified / invalid parameters
+    OperationResult rebuildIndexAsync(const std::string& index_id,
+                                      size_t new_M,
+                                      size_t new_ef_con);
+
+    bool hasActiveRebuild(const std::string& username) const {
+        return rebuild_.hasActiveRebuild(username);
+    }
+
+    nlohmann::json getRebuildProgress(const std::string& username,
+                                      const std::string& index_id) const {
+        return rebuild_.getProgress(username, index_id);
+    }
+
+    // Shared parallel addPoint utility — static chunk partition (same as addVectors).
+    // ProcessFn signature: void(size_t index)
+    template <typename ProcessFn>
+    static void parallelAddPoints(size_t count, size_t max_threads, ProcessFn&& process) {
+        if (count == 0) return;
+        size_t num_threads = std::min(max_threads, count);
+        const size_t chunk_size = (count + num_threads - 1) / num_threads;
+        std::vector<std::thread> threads;
+        threads.reserve(num_threads);
+        for (size_t t = 0; t < num_threads; ++t) {
+            threads.emplace_back([&, t]() {
+                size_t start_idx = t * chunk_size;
+                size_t end_idx = std::min(start_idx + chunk_size, count);
+                for (size_t i = start_idx; i < end_idx; ++i) {
+                    process(i);
+                }
+            });
+        }
+        for (auto& th : threads) {
+            th.join();
+        }
+    }
+
+    // Wires vector fetchers on an HNSW graph. Must be called before addPoint — searchBaseLayer
+    // during graph construction needs fetchers to compute distances for base-layer-only nodes.
+    static void wireVectorFetchers(hnswlib::HierarchicalNSW<float>* alg,
+                                   std::shared_ptr<VectorStorage> vs) {
+        alg->setVectorFetcher([vs](ndd::idInt label, uint8_t* buffer) {
+            return vs->get_vector(label, buffer);
+        });
+        alg->setVectorFetcherBatch([vs](const ndd::idInt* labels, uint8_t* buffers,
+                                        bool* success, size_t count) -> size_t {
+            return vs->get_vectors_batch_into(labels, buffers, success, count);
+        });
+    }
 };
-
-// ========== IndexManager backup implementations ==========
-
-inline void IndexManager::executeBackupJob(const std::string& index_id, const std::string& backup_name,
-                                            std::stop_token st) {
-    std::string username;
-    size_t upos = index_id.find('/');
-    if (upos != std::string::npos) {
-        username = index_id.substr(0, upos);
-    }
-
-    try {
-        std::string index_name;
-        if (upos != std::string::npos) {
-            index_name = index_id.substr(upos + 1);
-        } else {
-            throw std::runtime_error("Invalid index ID format");
-        }
-
-        std::string user_backup_dir = backup_store_.getUserBackupDir(username);
-        std::filesystem::create_directories(user_backup_dir);
-        std::string user_temp_dir = backup_store_.getUserTempDir(username);
-        std::filesystem::create_directories(user_temp_dir);
-        std::string source_dir = data_dir_ + "/" + index_id;
-        std::string backup_tar_final = user_backup_dir + "/" + backup_name + ".tar";
-        std::string backup_tar_temp = user_temp_dir + "/.tmp_" + backup_name + ".tar";
-
-        if(std::filesystem::exists(backup_tar_final)) {
-            throw std::runtime_error("Backup already exists: " + backup_name);
-        }
-
-        size_t index_size = 0;
-        for(const auto& file : std::filesystem::recursive_directory_iterator(source_dir)) {
-            if(!std::filesystem::is_directory(file)) {
-                index_size += std::filesystem::file_size(file);
-            }
-        }
-
-        auto space_info = std::filesystem::space(user_backup_dir);
-        if(space_info.available < index_size * 2) {
-            throw std::runtime_error("Insufficient disk space: need " +
-                std::to_string(index_size * 2 / MB) + " MB");
-        }
-
-        auto meta = metadata_manager_->getMetadata(index_id);
-        nlohmann::json metadata_json;
-        if(meta) {
-            metadata_json["original_index"] = index_name;
-            metadata_json["timestamp"] = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-            metadata_json["size_mb"] = index_size / MB;
-            metadata_json["params"] = {{"M", meta->M},
-                           {"ef_construction", meta->ef_con},
-                           {"dim", meta->dimension},
-                           {"sparse_model",
-                            ndd::sparseScoringModelToString(meta->sparse_model)},
-                           {"space_type", meta->space_type_str},
-                           {"quant_level", static_cast<int>(meta->quant_level)},
-                           {"total_elements", meta->total_elements},
-                           {"checksum", meta->checksum}};
-            LOG_DEBUG("Metadata prepared for backup: " << metadata_json.dump());
-        } else {
-            LOG_ERROR(2041, index_id, "Failed to get metadata for backup");
-            throw std::runtime_error("Cannot create backup without index metadata");
-        }
-
-        // Check stop_token before expensive operations
-        if (st.stop_requested()) {
-            LOG_INFO(2056, index_id, "Backup cancelled before backup work started");
-            backup_store_.clearActiveBackup(username);
-            return;
-        }
-
-        auto entry_ptr = getIndexEntry(index_id);
-        auto& entry = *entry_ptr;
-        std::string metadata_file_in_index = source_dir + "/metadata.json";
-        {
-            /**
-             * NOTE: While making a backup is a reading operation on the index,
-             * we are picking a writer's lock here because we have disabled reader's
-             * locks on other instances of read in the system right now.
-             *
-             * This is to enable reads while writes are happening on the index.
-             * Check other instances of shared_lock on operation_mutex.
-             */
-            std::unique_lock<std::shared_mutex> operation_lock(entry.operation_mutex);
-
-            // Check again after acquiring lock (shutdown may have been requested while waiting)
-            if (st.stop_requested()) {
-                LOG_INFO(2057, index_id, "Backup cancelled");
-                backup_store_.clearActiveBackup(username);
-                return;
-            }
-
-            saveIndexInternal(entry);
-
-            if(!metadata_json.empty()) {
-                std::ofstream meta_file(metadata_file_in_index, std::ios::binary);
-                if(!meta_file) {
-                    throw std::runtime_error("Failed to create metadata file: " + metadata_file_in_index);
-                }
-                meta_file << metadata_json.dump(4);
-                meta_file.flush();
-                meta_file.close();
-
-                if(!std::filesystem::exists(metadata_file_in_index)) {
-                    throw std::runtime_error("Metadata file was not created: " + metadata_file_in_index);
-                }
-                LOG_DEBUG("Metadata file created: " << metadata_file_in_index << " (size: " << std::filesystem::file_size(metadata_file_in_index) << " bytes)");
-            }
-
-            std::string error_msg;
-            LOG_DEBUG("Creating tar archive from " << source_dir << " to " << backup_tar_temp);
-            if(!backup_store_.createBackupTar(source_dir, backup_tar_temp, error_msg, st)) {
-                if(std::filesystem::exists(metadata_file_in_index)) {
-                    std::filesystem::remove(metadata_file_in_index);
-                }
-                throw std::runtime_error("Failed to create tar archive: " + error_msg);
-            }
-
-            if(!std::filesystem::exists(backup_tar_temp)) {
-                throw std::runtime_error("Tar archive was not created: " + backup_tar_temp);
-            }
-            LOG_DEBUG("Tar archive created successfully: " << backup_tar_temp << " (size: " << std::filesystem::file_size(backup_tar_temp) << " bytes)");
-
-            if(std::filesystem::exists(metadata_file_in_index)) {
-                std::filesystem::remove(metadata_file_in_index);
-            }
-        }
-
-        backup_store_.clearActiveBackup(username);
-
-        LOG_INFO(2042, index_id, "Backup tar created; write operations resumed");
-
-        std::filesystem::rename(backup_tar_temp, backup_tar_final);
-
-        nlohmann::json backup_db = backup_store_.readBackupJson(username);
-        backup_db[backup_name] = metadata_json;
-        backup_store_.writeBackupJson(username, backup_db);
-
-        LOG_INFO(2043, index_id, "Backup completed: " << backup_name << " -> " << backup_tar_final);
-
-    } catch (const std::exception& e) {
-        std::string user_backup_dir = backup_store_.getUserBackupDir(username);
-        std::string user_temp_dir = backup_store_.getUserTempDir(username);
-        std::string source_dir = data_dir_ + "/" + index_id;
-        std::string backup_tar_final = user_backup_dir + "/" + backup_name + ".tar";
-        std::string backup_tar_temp = user_temp_dir + "/.tmp_" + backup_name + ".tar";
-        std::string metadata_file_in_index = source_dir + "/metadata.json";
-
-        if(std::filesystem::exists(backup_tar_temp)) {
-            std::filesystem::remove(backup_tar_temp);
-        }
-        if(std::filesystem::exists(backup_tar_final)) {
-            std::filesystem::remove(backup_tar_final);
-        }
-        if(std::filesystem::exists(metadata_file_in_index)) {
-            std::filesystem::remove(metadata_file_in_index);
-        }
-
-        backup_store_.clearActiveBackup(username);
-
-        LOG_ERROR(2044, index_id, "Backup failed for " << backup_name << ": " << e.what());
-    }
-}
-
-inline std::pair<bool, std::string> IndexManager::restoreBackup(const std::string& backup_name,
-                                                                  const std::string& target_index_name,
-                                                                  const std::string& username) {
-    std::pair<bool, std::string> result = backup_store_.validateBackupName(backup_name);
-    if(!result.first) {
-        return result;
-    }
-
-    std::string backup_dir_root = backup_store_.getUserBackupDir(username);
-    std::string backup_tar = backup_dir_root + "/" + backup_name + ".tar";
-    std::string user_temp_dir = backup_store_.getUserTempDir(username);
-    std::filesystem::create_directories(user_temp_dir);
-    std::string backup_extract_dir = user_temp_dir + "/" + backup_name;
-    std::string target_index_id = username + "/" + target_index_name;
-    std::string target_dir = data_dir_ + "/" + target_index_id;
-
-    if(!std::filesystem::exists(backup_tar)) {
-        return {false, "Backup not found: " + backup_name};
-    }
-
-    if(metadata_manager_->getMetadata(target_index_id).has_value()) {
-        return {false, "Target index already exists"};
-    }
-
-    std::string error_msg;
-    if(!backup_store_.extractBackupTar(backup_tar, backup_extract_dir, error_msg)) {
-        return {false, "Failed to extract backup archive: " + error_msg};
-    }
-
-    std::vector<std::string> folders;
-    for(const auto& entry : std::filesystem::directory_iterator(backup_extract_dir)) {
-        if(entry.is_directory()) {
-            folders.push_back(entry.path().string());
-        }
-    }
-
-    if(folders.size() != 1) {
-        std::filesystem::remove_all(backup_extract_dir);
-        return {false, "Backup extraction failed - directory not found"};
-    }
-
-    std::string backup_dir = folders[0];
-
-    try {
-        std::ifstream f(backup_dir + "/metadata.json");
-        if(!f.good()) {
-            std::filesystem::remove_all(backup_extract_dir);
-            return {false, "Backup metadata missing"};
-        }
-        nlohmann::json meta_json = nlohmann::json::parse(f);
-
-        std::filesystem::create_directories(target_dir);
-        std::filesystem::copy(backup_dir,
-                              target_dir,
-                              std::filesystem::copy_options::recursive
-                                      | std::filesystem::copy_options::overwrite_existing);
-
-        std::filesystem::remove(target_dir + "/metadata.json");
-
-        IndexMetadata new_meta;
-        new_meta.name = target_index_name;
-        new_meta.dimension = meta_json["params"]["dim"];
-        new_meta.M = meta_json["params"]["M"];
-        new_meta.ef_con = meta_json["params"]["ef_construction"];
-        new_meta.space_type_str = meta_json["params"]["space_type"];
-        new_meta.quant_level = static_cast<ndd::quant::QuantizationLevel>(
-                meta_json["params"]["quant_level"].get<int>());
-        const auto sparse_model = ndd::sparseScoringModelFromString(
-                meta_json["params"]["sparse_model"].get<std::string>());
-        new_meta.sparse_model = *sparse_model;
-        new_meta.created_at = std::chrono::system_clock::now();
-        new_meta.total_elements = meta_json["params"].value("total_elements", 0ul);
-        new_meta.checksum = meta_json["params"].value("checksum", -1);
-
-        metadata_manager_->storeMetadata(target_index_id, new_meta);
-
-        std::filesystem::remove_all(backup_extract_dir);
-
-        {
-            std::unique_lock<std::shared_mutex> write_lock(indices_mutex_);
-            loadIndex(target_index_id);
-        }
-
-        LOG_INFO(2045, username, target_index_name, "Restored backup from " << backup_tar);
-        return {true, ""};
-    } catch(const std::exception& e) {
-        std::filesystem::remove_all(backup_extract_dir);
-        return {false, "Failed to restore backup: " + std::string(e.what())};
-    }
-}
 
 inline std::pair<bool, std::string> IndexManager::createBackupAsync(const std::string& index_id,
                                                                       const std::string& backup_name) {
@@ -2211,14 +1997,75 @@ inline std::pair<bool, std::string> IndexManager::createBackupAsync(const std::s
         return {false, "Backup already exists: " + backup_name};
     }
 
-    std::jthread t([this, index_id, backup_name](std::stop_token st) {
-        executeBackupJob(index_id, backup_name, st);
+    backup_store_.setActiveBackup(username, backup_name, BackupOperation::Creation);
+
+    CreateBackupParams params{
+        .index_id = index_id,
+        .backup_name = backup_name,
+        .index_manager = this,
+    };
+
+    std::jthread t([this, params = std::move(params)](std::stop_token st) {
+        backup_store_.createBackup(params, st);
     });
-    backup_store_.setActiveBackup(username, index_id, backup_name, std::move(t));
+    
+    backup_store_.attachBackupThread(username, std::move(t));
 
     LOG_INFO(2046, index_id, "Backup started: " << backup_name);
 
     return {true, backup_name};
+}
+
+inline std::pair<bool, std::string> IndexManager::restoreBackupAsync(const std::string& backup_name,
+                                                const std::string& target_index_name,
+                                                const std::string& username) {
+
+    // Check if any backup is already under creation or restoration
+    if(backup_store_.hasActiveBackup(username)) {
+        return {false, "Backup already in progress for user: " + username};
+    }
+
+    // Check if the backup exists
+    nlohmann::json backup_db = backup_store_.readBackupJson(username);
+    if(!backup_db.contains(backup_name)) {
+        return {false, "Backup not found: " + backup_name};
+    }
+    
+    // Check if an index with target name already exists
+    std::string target_index_id = username + "/" + target_index_name;
+    if(metadata_manager_->getMetadata(target_index_id).has_value()) {
+        return {false, "Target index already exists"};
+    }
+
+    // Check disk space before making the backup active
+    std::string backup_tar = backup_store_.getUserBackupDir(username) + "/" + backup_name + ".tar";
+    std::string user_temp_dir = backup_store_.getUserTempDir(username);
+    std::filesystem::create_directories(user_temp_dir);
+    size_t backup_size = std::filesystem::file_size(backup_tar);
+    auto space_info = std::filesystem::space(user_temp_dir);
+    if (space_info.available < backup_size * 2) {
+        return {false, "Insufficient disk space: need " +
+            std::to_string(backup_size * 2 / MB) + " MB"};
+    }
+
+    backup_store_.setActiveBackup(username, backup_name, BackupOperation::Restoration);
+
+    RestoreBackupParams params{
+        .backup_name = backup_name,
+        .target_index_name = target_index_name,
+        .username = username,
+        .index_manager = this,
+    };
+
+    std::jthread t([this, params = std::move(params)](std::stop_token st) {
+        backup_store_.restoreBackup(params,st);
+    });
+
+    backup_store_.attachBackupThread(username, std::move(t));    
+    
+    LOG_INFO(2059, username, "Restoration started for backup: " << backup_name <<", target_index: " << target_index_name);
+
+    return {true, target_index_name};
 }
 
 inline std::pair<bool, std::string> IndexManager::uploadBackup(const std::string& backup_name, const std::string& username, const std::string& file_content) {
@@ -2280,4 +2127,67 @@ inline std::pair<bool, std::string> IndexManager::uploadBackup(const std::string
     backup_store_.writeBackupJson(username, backup_db);
 
     return {true, "Backup uploaded successfully"};
+}
+
+// ========== IndexManager rebuild implementations ==========
+
+inline OperationResult IndexManager::rebuildIndexAsync(const std::string& index_id,
+                                                        size_t new_M,
+                                                        size_t new_ef_con) {
+    auto meta = metadata_manager_->getMetadata(index_id);
+    if (!meta) {
+        return {1, "Index not found"};
+    }
+
+    std::string username;
+    size_t pos = index_id.find('/');
+    if (pos != std::string::npos) {
+        username = index_id.substr(0, pos);
+    } else {
+        return {3, "Invalid index ID format"};
+    }
+
+    if (backup_store_.hasActiveBackup(username)) {
+        return {2, "Backup already in progress for user: " + username};
+    }
+    if (rebuild_.hasActiveRebuild(username)) {
+        return {2, "Rebuild already in progress for user: " + username};
+    }
+
+    // Pre-fetch entry now — captured by lambdas so the thread never calls getIndexEntry
+    auto entry = getIndexEntry(index_id);
+    size_t current_count = entry->alg->getElementsCount();
+
+    if (new_M == meta->M && new_ef_con == meta->ef_con) {
+        return {3, "No configuration changes specified"};
+    }
+
+    std::string base_path = data_dir_ + "/" + index_id;
+    std::string vector_storage_dir = base_path + "/vectors";
+
+    RebuildJobParams params{
+        .username             = username,
+        .new_M                = new_M,
+        .new_ef_con           = new_ef_con,
+        .entry                = entry,
+        .manager              = this,
+        .temp_path            = Rebuild::getTempPath(base_path),
+        .timestamped_path     = Rebuild::getTimestampedPath(base_path),
+        .index_path           = vector_storage_dir + "/" + settings::DEFAULT_SUBINDEX + ".idx",
+        .num_parallel_inserts = settings::NUM_PARALLEL_INSERTS,
+    };
+
+    // Register state FIRST with empty thread — hasActiveRebuild() returns true immediately
+    rebuild_.setActiveRebuild(username, index_id, current_count);
+
+    // Spawn thread — lambda calls rebuild_.executeJob directly (execution lives in Rebuild)
+    std::jthread t([this, params = std::move(params)](std::stop_token st) {
+        rebuild_.executeJob(params, st);
+    });
+
+    // Move real thread into the already-registered state
+    rebuild_.attachRebuildThread(username, std::move(t));
+
+    LOG_INFO(1800, index_id, "Rebuild started: M=" << new_M << " ef_con=" << new_ef_con);
+    return {0, "Rebuild started"};
 }

@@ -1,6 +1,6 @@
 # Tests
 
-Unit tests for Endee. Currently two test suites: filter and rebuild.
+Unit tests for Endee. Currently three test suites: filter, rebuild, and backup.
 
 ## Build & Run All Tests
 
@@ -75,6 +75,68 @@ End-to-end rebuild via IndexManager:
 - RebuildIntegrationTest/RebuildWhileInProgress_Returns409Code
 - RebuildIntegrationTest/RebuildNonExistentIndex_Returns404Code
 - RebuildIntegrationTest/RebuildNoChange_Returns400Code
+
+## ndd_backup_test
+
+Unit and integration tests for the backup subsystem (`BackupStore` + `IndexManager` backup methods).
+
+Build and run individually:
+
+    cmake --build build --target ndd_backup_test
+    ./build/tests/ndd_backup_test
+
+Test cases:
+
+BackupStore state management (no IndexManager):
+- BackupStoreStateTest/ValidateName_AlphanumericUnderscore_Passes
+- BackupStoreStateTest/ValidateName_WithHyphen_Passes
+- BackupStoreStateTest/ValidateName_Empty_Fails
+- BackupStoreStateTest/ValidateName_TooLong_Fails
+- BackupStoreStateTest/ValidateName_Slash_Fails
+- BackupStoreStateTest/ValidateName_Space_Fails
+- BackupStoreStateTest/ValidateName_Dot_Fails
+- BackupStoreStateTest/NoActive_HasActiveIsFalse
+- BackupStoreStateTest/SetActive_HasActiveIsTrue
+- BackupStoreStateTest/SetActive_GetActiveReturnsNameAndOperation
+- BackupStoreStateTest/SetActive_Restoration_OperationString
+- BackupStoreStateTest/ClearActive_HasActiveIsFalse
+- BackupStoreStateTest/ClearActive_GetActiveReturnsNullopt
+- BackupStoreStateTest/ClearNonExistent_NoOp
+- BackupStoreStateTest/TwoUsers_IndependentState
+- BackupStoreStateTest/ReadBackupJson_MissingFile_ReturnsEmptyObject
+- BackupStoreStateTest/WriteAndReadBackupJson_RoundTrip
+- BackupStoreStateTest/ListBackups_EmptyWhenNoneExist
+- BackupStoreStateTest/ListBackups_ReturnsAllWrittenEntries
+- BackupStoreStateTest/GetBackupInfo_ExistingEntry
+- BackupStoreStateTest/GetBackupInfo_NonExistent_ReturnsNull
+- BackupStoreStateTest/DeleteBackup_NonExistent_ReturnsFalse
+- BackupStoreStateTest/DeleteBackup_InvalidName_ReturnsFalse
+- BackupStoreStateTest/DeleteBackup_RemovesTarAndJsonEntry
+
+Archive (tar) operations:
+- BackupArchiveTest/CreateBackupTar_ProducesNonEmptyFile
+- BackupArchiveTest/ExtractBackupTar_FilesRoundTrip
+- BackupArchiveTest/ExtractBackupTar_ContentPreserved
+- BackupArchiveTest/ExtractBackupTar_NonExistentArchive_Fails
+- BackupArchiveTest/CreateBackupTar_PreCancelledStopToken_ReturnsFalse
+
+End-to-end backup and restore via IndexManager:
+- BackupIntegrationTest/CreateBackupAsync_ReturnsTrueAndBackupName
+- BackupIntegrationTest/CreateBackup_SetsActiveBackupDuringRun
+- BackupIntegrationTest/CreateBackup_ProducesTarFile
+- BackupIntegrationTest/CreateBackup_AppearsInListBackups
+- BackupIntegrationTest/CreateBackup_MetadataHasExpectedFields
+- BackupIntegrationTest/CreateBackup_WhileInProgress_ReturnsFalse
+- BackupIntegrationTest/CreateBackup_DuplicateName_ReturnsFalse
+- BackupIntegrationTest/CreateBackup_InvalidName_ReturnsFalse
+- BackupIntegrationTest/DeleteBackup_RemovesTarAndJsonEntry
+- BackupIntegrationTest/DeleteBackup_NonExistent_ReturnsFalse
+- BackupIntegrationTest/RestoreBackupAsync_ReturnsTrueAndTargetName
+- BackupIntegrationTest/RestoreBackup_CreatesIndexWithCorrectMetadata
+- BackupIntegrationTest/RestoreBackup_PreservesVectorCount
+- BackupIntegrationTest/RestoreBackup_NonExistentBackup_ReturnsFalse
+- BackupIntegrationTest/RestoreBackup_TargetIndexAlreadyExists_ReturnsFalse
+- BackupIntegrationTest/RestoreBackup_WhileCreateInProgress_ReturnsFalse
 
 ## Notes
 

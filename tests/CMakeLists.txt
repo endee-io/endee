@@ -72,3 +72,36 @@ target_link_libraries(ndd_rebuild_test
 target_compile_definitions(ndd_rebuild_test PRIVATE MDB_MAXKEYSIZE=512)
 
 gtest_discover_tests(ndd_rebuild_test)
+
+# --- ndd_backup_test ---
+add_executable(ndd_backup_test backup_test.cpp ${LMDB_SOURCES} ${ROARING_SOURCE})
+
+set_source_files_properties(${LMDB_SOURCES} PROPERTIES
+    COMPILE_FLAGS "-DMDBX_BUILD_SHARED_LIBRARY=0 -DMDBX_BUILD_FLAGS=\\\"NDD_EMBEDDED\\\""
+)
+
+target_include_directories(ndd_backup_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/core
+    ${CMAKE_SOURCE_DIR}/src/utils
+    ${CMAKE_SOURCE_DIR}/src/server
+    ${CMAKE_SOURCE_DIR}/src/storage
+    ${CMAKE_SOURCE_DIR}/src/filter
+    ${CMAKE_SOURCE_DIR}/src/sparse
+    ${CMAKE_SOURCE_DIR}/src/hnsw
+    ${CMAKE_SOURCE_DIR}/src/quant
+    ${CMAKE_SOURCE_DIR}/third_party
+    ${CMAKE_SOURCE_DIR}/third_party/json
+    ${CMAKE_SOURCE_DIR}/third_party/msgpack/include
+    ${LIBARCHIVE_INCLUDE_DIR}
+)
+
+target_link_libraries(ndd_backup_test
+    PRIVATE
+    ndd_core
+    GTest::gtest_main
+)
+
+target_compile_definitions(ndd_backup_test PRIVATE MDB_MAXKEYSIZE=512)
+
+gtest_discover_tests(ndd_backup_test)

@@ -66,6 +66,7 @@ target_include_directories(ndd_rebuild_test PRIVATE
 target_link_libraries(ndd_rebuild_test
     PRIVATE
     ndd_core
+    archive_static
     GTest::gtest_main
 )
 
@@ -99,6 +100,7 @@ target_include_directories(ndd_backup_test PRIVATE
 target_link_libraries(ndd_backup_test
     PRIVATE
     ndd_core
+    archive_static
     GTest::gtest_main
 )
 

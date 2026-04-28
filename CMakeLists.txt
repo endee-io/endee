@@ -255,6 +255,7 @@ set(NDD_CORE_SOURCES
     src/sparse/inverted_index.cpp
     src/utils/system_sanity/system_sanity.cpp
     src/core/rebuild.cpp
+    src/storage/backup_store.cpp
 )
 
 # Build non-main project sources separately so they can be compiled in parallel

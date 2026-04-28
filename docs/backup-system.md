@@ -97,7 +97,8 @@ addVectors/deleteVectors/updateFilters/deleteByFilter/deleteIndex
 
 ```
 POST /backups/{name}/restore → validate name → check backup exists in backup registry
-→ check target index does NOT exist → check active_user_backups_[username] empty (one per user)
+→ check target index does NOT exist → check disk space (need 2x tar size)
+→ check active_user_backups_[username] empty (one per user)
 → setActiveBackup() — insert entry into active_user_backups_ map (BackupOperation::Restoration, no thread yet)
 → spawn jthread → attachBackupThread() — move jthread into map entry → return 202 { backup_name, target_index, status: "in_progress" }
 ```
@@ -157,7 +158,8 @@ GET /backups/{name}/info
 | 2 | **Write blocking** — writes block on `operation_mutex` until backup completes | addVectors, deleteVectors, updateFilters, deleteByFilter, deleteIndex |
 | 3 | **Name validation** — alphanumeric, underscores, hyphens only; max 200 chars | validateBackupName |
 | 4 | **Duplicate prevention** — checks if .tar file already exists on disk | createBackupAsync, upload |
-| 5 | **Disk space** — requires 2x index size available | executeBackupJob |
+| 5 | **Disk space (create)** — requires 2x index size available in backup dir | executeBackupJob |
+| 5b | **Disk space (restore)** — requires 2x tar file size available in temp dir | restoreBackupAsync |
 | 6 | **Atomic tar** — writes to `backups/.tmp/{username}/` first, then renames to final location | executeBackupJob |
 | 7 | **Crash recovery** — on startup: `cleanupTempDir()` deletes entire `backups/.tmp/` directory | BackupStore constructor |
 | 8 | **Restore safety** — target must not exist, metadata must be valid; cleanup (temp dir + active status) on failure in background thread | restoreBackupAsync, restoreBackup |

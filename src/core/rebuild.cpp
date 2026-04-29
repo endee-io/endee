@@ -3,7 +3,6 @@
 #include <filesystem>
 #include <iomanip>
 #include <sstream>
-#include <unordered_set>
 
 #include "settings.hpp"
 #include "log.hpp"
@@ -193,8 +192,6 @@ void Rebuild::executeJob(const RebuildJobParams& p, std::stop_token st) {
         // MUST wire fetchers before addPoint — searchBaseLayer needs this for base-layer-only nodes
         IndexManager::wireVectorFetchers(new_alg.get(), entry->vector_storage);
 
-        auto deleted_ids_vec = entry->id_mapper->getDeletedIds(SIZE_MAX);
-        std::unordered_set<ndd::idInt> deleted_ids(deleted_ids_vec.begin(), deleted_ids_vec.end());
         auto cursor = entry->vector_storage->getCursor();
         const size_t batch_size = settings::RECOVERY_BATCH_SIZE;
         size_t total_processed = 0;
@@ -213,7 +210,7 @@ void Rebuild::executeJob(const RebuildJobParams& p, std::stop_token st) {
             batch.reserve(batch_size);
             while (cursor.hasNext() && batch.size() < batch_size) {
                 auto [label, vec_bytes] = cursor.next();
-                if (!vec_bytes.empty() && deleted_ids.count(label) == 0)
+                if (!vec_bytes.empty())
                     batch.emplace_back(label, std::move(vec_bytes));
             }
             if (batch.empty()) break;

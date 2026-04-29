@@ -326,3 +326,18 @@ TEST_F(RebuildIntegrationTest, RebuildNoChange_Returns400Code) {
     auto result = manager_->rebuildIndexAsync(INDEX_ID, 8, 64);
     EXPECT_EQ(result.code, 3);
 }
+
+TEST_F(RebuildIntegrationTest, RebuildExcludesDeletedVectors) {
+    createTestIndex();
+    insertVectors(N_VECTORS);  // 100 vectors: vec_0 .. vec_99
+
+    for (size_t i = 0; i < 10; ++i)
+        manager_->deleteVector(INDEX_ID, "vec_" + std::to_string(i));
+
+    EXPECT_EQ(manager_->getElementCount(INDEX_ID), 90u);
+
+    manager_->rebuildIndexAsync(INDEX_ID, 16, 128);
+    ASSERT_TRUE(waitForRebuild());
+
+    EXPECT_EQ(manager_->getElementCount(INDEX_ID), 90u);
+}

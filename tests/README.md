@@ -75,6 +75,7 @@ End-to-end rebuild via IndexManager:
 - RebuildIntegrationTest/RebuildWhileInProgress_Returns409Code
 - RebuildIntegrationTest/RebuildNonExistentIndex_Returns404Code
 - RebuildIntegrationTest/RebuildNoChange_Returns400Code
+- RebuildIntegrationTest/RebuildExcludesDeletedVectors
 
 ## Notes
 

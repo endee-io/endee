@@ -12,6 +12,7 @@
 #include <numeric>
 #include <filesystem>
 #include <set>
+#include <unordered_set>
 #include "../core/types.hpp"
 #include "../utils/settings.hpp"
 
@@ -475,6 +476,23 @@ public:
         }
 
         mdbx_txn_commit(txn);
+        return result;
+    }
+
+    // Read-only snapshot of deleted numeric IDs — does not consume or modify MDBX
+    std::unordered_set<idInt> getDeletedIdsSet() const {
+        std::unordered_set<idInt> result;
+        MDBX_txn* txn;
+        if (mdbx_txn_begin(env_, nullptr, MDBX_TXN_RDONLY, &txn) != MDBX_SUCCESS)
+            return result;
+        std::string del_key = DELETED_IDS_KEY;
+        MDBX_val key{const_cast<char*>(del_key.data()), del_key.size()}, val;
+        if (mdbx_get(txn, dbi_, &key, &val) == MDBX_SUCCESS) {
+            size_t count = val.iov_len / sizeof(idInt);
+            idInt* raw = reinterpret_cast<idInt*>(val.iov_base);
+            result.insert(raw, raw + count);
+        }
+        mdbx_txn_abort(txn);
         return result;
     }
 

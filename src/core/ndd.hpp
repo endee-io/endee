@@ -727,28 +727,38 @@ public:
         }
 
         hnswlib::SpaceType space_type = hnswlib::getSpaceType(config.space_type_str);
-        std::string lmdb_dir = index_dir + "/ids";
 
         //create the directory and initialize sequence for IDMapper
         LOG_INFO(2021,
                        index_id,
                        "Creating ID mapper with user type " << userTypeToString(user_type));
 
-        // IDMapper now uses tier-based fixed bloom filter sizing based on user_type
-        auto id_mapper = std::make_shared<IDMapper>(lmdb_dir, true, user_type);
-
-
         // Create HNSW directly with all necessary parameters
         ndd::quant::QuantizationLevel quant_level = config.quant_level;
         auto vector_storage =
                 std::make_shared<VectorStorage>(index_dir, index_id, config.dim, config.quant_level);
 
+        std::shared_ptr<IDMapper> id_mapper;
+        if(vector_storage->uses_shared_env()) {
+            id_mapper = std::make_shared<IDMapper>(
+                    vector_storage->shared_env(), "id_map", true, user_type);
+        } else {
+            std::string lmdb_dir = index_dir + "/ids";
+            // IDMapper now uses tier-based fixed bloom filter sizing based on user_type
+            id_mapper = std::make_shared<IDMapper>(lmdb_dir, true, user_type);
+        }
+
         // Initialize Sparse Storage if needed
         std::unique_ptr<ndd::SparseVectorStorage> sparse_storage = nullptr;
         if(ndd::sparseModelEnabled(config.sparse_model)) {
-            std::string sparse_storage_dir = index_dir + "/sparse";
-            sparse_storage = std::make_unique<ndd::SparseVectorStorage>(
-                sparse_storage_dir, index_id, config.sparse_model);
+            if(vector_storage->uses_shared_env()) {
+                sparse_storage = std::make_unique<ndd::SparseVectorStorage>(
+                        vector_storage->shared_env(), index_id, config.sparse_model);
+            } else {
+                std::string sparse_storage_dir = index_dir + "/sparse";
+                sparse_storage = std::make_unique<ndd::SparseVectorStorage>(
+                        sparse_storage_dir, index_id, config.sparse_model);
+            }
             if(!sparse_storage->initialize()) {
                 throw std::runtime_error("Failed to initialize sparse storage");
             }
@@ -824,12 +834,10 @@ public:
 
     void loadIndex(const std::string& index_id) {
         std::string index_dir = data_dir_ + "/" + index_id;
-        std::string lmdb_dir = index_dir + "/ids";
         std::string vector_storage_dir = index_dir + "/vectors";
         std::string index_path = vector_storage_dir + "/" + settings::DEFAULT_SUBINDEX + ".idx";
 
-        if(!std::filesystem::exists(index_path) || !std::filesystem::exists(lmdb_dir)
-           || !std::filesystem::exists(vector_storage_dir)) {
+        if(!std::filesystem::exists(index_path) || !std::filesystem::exists(vector_storage_dir)) {
             throw std::runtime_error("Required files missing for index: " + index_id);
         }
 
@@ -852,16 +860,32 @@ public:
         }
 
         // Step 2: Create IDMapper and VectorStorage - IDMapper handles bloom filter initialization
-        auto id_mapper = std::make_shared<IDMapper>(lmdb_dir, false);
         auto vector_storage = std::make_shared<VectorStorage>(
                 index_dir, index_id, alg->getDimension(), alg->getQuantLevel());
+
+        std::shared_ptr<IDMapper> id_mapper;
+        if(vector_storage->uses_shared_env()) {
+            id_mapper = std::make_shared<IDMapper>(
+                    vector_storage->shared_env(), "id_map", false);
+        } else {
+            std::string lmdb_dir = index_dir + "/ids";
+            if(!std::filesystem::exists(lmdb_dir)) {
+                throw std::runtime_error("Required files missing for index: " + index_id);
+            }
+            id_mapper = std::make_shared<IDMapper>(lmdb_dir, false);
+        }
 
         // Initialize Sparse Storage if sparse_model is enabled
         std::unique_ptr<ndd::SparseVectorStorage> sparse_storage;
         if(ndd::sparseModelEnabled(sparse_model)) {
-            std::string sparse_storage_dir = index_dir + "/sparse";
-            sparse_storage = std::make_unique<ndd::SparseVectorStorage>(
-                sparse_storage_dir, index_id, sparse_model);
+            if(vector_storage->uses_shared_env()) {
+                sparse_storage = std::make_unique<ndd::SparseVectorStorage>(
+                        vector_storage->shared_env(), index_id, sparse_model);
+            } else {
+                std::string sparse_storage_dir = index_dir + "/sparse";
+                sparse_storage = std::make_unique<ndd::SparseVectorStorage>(
+                        sparse_storage_dir, index_id, sparse_model);
+            }
             if(!sparse_storage->initialize()) {
                 throw std::runtime_error("Failed to initialize sparse storage for index: "
                                          + index_id);
@@ -1014,15 +1038,44 @@ public:
                 str_ids.push_back(vec.id);
             }
             LOG_DEBUG("Extracted " << str_ids.size() << " string IDs from vectors");
+            const bool shared_atomic_write = entry.vector_storage->uses_shared_env()
+                                             && entry.id_mapper->get_env()
+                                                        == entry.vector_storage->shared_env();
+
             std::vector<std::pair<idInt, bool>> numeric_ids;
-            // Get or create numeric IDs in batch - this returns ids.
-            // If str_id already exists, it will return the old numeric ID
-            if(entry.alg->getDeletedCount() > 0) {
-                // There are deleted IDs, we need to reuse them
-                numeric_ids = entry.id_mapper->create_ids_batch<true>(str_ids, wal);
+            MDBX_txn* shared_txn = nullptr;
+            int64_t sparse_count_delta = 0;
+
+            if(shared_atomic_write) {
+                int rc = mdbx_txn_begin(
+                        entry.vector_storage->shared_env(), nullptr, MDBX_TXN_READWRITE, &shared_txn);
+                if(rc != MDBX_SUCCESS) {
+                    throw std::runtime_error("Failed to begin shared add transaction: "
+                                             + std::string(mdbx_strerror(rc)));
+                }
+
+                try {
+                    if(entry.alg->getDeletedCount() > 0) {
+                        numeric_ids =
+                                entry.id_mapper->create_ids_batch_txn<true>(shared_txn, str_ids);
+                    } else {
+                        numeric_ids =
+                                entry.id_mapper->create_ids_batch_txn<false>(shared_txn, str_ids);
+                    }
+                } catch(...) {
+                    mdbx_txn_abort(shared_txn);
+                    throw;
+                }
             } else {
-                // No deleted IDs, just create new ones
-                numeric_ids = entry.id_mapper->create_ids_batch<false>(str_ids, wal);
+                // Get or create numeric IDs in batch - this returns ids.
+                // If str_id already exists, it will return the old numeric ID
+                if(entry.alg->getDeletedCount() > 0) {
+                    // There are deleted IDs, we need to reuse them
+                    numeric_ids = entry.id_mapper->create_ids_batch<true>(str_ids, wal);
+                } else {
+                    // No deleted IDs, just create new ones
+                    numeric_ids = entry.id_mapper->create_ids_batch<false>(str_ids, wal);
+                }
             }
             LOG_DEBUG("Created " << numeric_ids.size() << " numeric IDs for string IDs");
 
@@ -1063,12 +1116,25 @@ public:
                     }
 
                     if(!sparse_batch.empty()) {
-                        if(!entry.sparse_storage->store_vectors_batch(sparse_batch)) {
-                            LOG_ERROR(2053,
-                                      index_id,
-                                      "Failed to update sparse storage for batch size "
-                                              << sparse_batch.size());
-                            return false;
+                        if(shared_atomic_write && shared_txn
+                           && entry.sparse_storage->uses_shared_env()) {
+                            if(!entry.sparse_storage->store_vectors_batch_txn(
+                                       shared_txn, sparse_batch, &sparse_count_delta)) {
+                                mdbx_txn_abort(shared_txn);
+                                LOG_ERROR(2053,
+                                          index_id,
+                                          "Failed to update sparse storage for batch size "
+                                                  << sparse_batch.size());
+                                return false;
+                            }
+                        } else {
+                            if(!entry.sparse_storage->store_vectors_batch(sparse_batch)) {
+                                LOG_ERROR(2053,
+                                          index_id,
+                                          "Failed to update sparse storage for batch size "
+                                                  << sparse_batch.size());
+                                return false;
+                            }
                         }
                     }
                 }
@@ -1100,7 +1166,24 @@ public:
                 // Copy QuantVectorObject for storage (we need to keep original for HNSW)
                 storage_vectors.emplace_back(numeric_ids[i].first, quantized_vectors[i]);
             }
-            entry.vector_storage->store_vectors_batch(storage_vectors);
+            if(shared_atomic_write && shared_txn) {
+                try {
+                    entry.vector_storage->store_vectors_batch_txn(shared_txn, storage_vectors);
+                    int rc = mdbx_txn_commit(shared_txn);
+                    if(rc != MDBX_SUCCESS) {
+                        throw std::runtime_error("Failed to commit shared add transaction: "
+                                                 + std::string(mdbx_strerror(rc)));
+                    }
+                    if(entry.sparse_storage && entry.sparse_storage->uses_shared_env()) {
+                        entry.sparse_storage->apply_vector_count_delta(sparse_count_delta);
+                    }
+                } catch(...) {
+                    mdbx_txn_abort(shared_txn);
+                    throw;
+                }
+            } else {
+                entry.vector_storage->store_vectors_batch(storage_vectors);
+            }
             LOG_DEBUG("Stored " << storage_vectors.size()
                                 << " pre-quantized vectors in vector storage");
 
@@ -1334,24 +1417,81 @@ public:
     // meta, vector data Meta and vector data will be overwritten when the id is reused
     bool deleteVectorsByIds(CacheEntry& entry, const std::vector<ndd::idInt>& numeric_ids) {
         try {
-            for(ndd::idInt numeric_id : numeric_ids) {
-                auto meta = entry.vector_storage->get_meta(numeric_id);
-                // Remove ID mapping by getting the string id from metadata
-                auto stored_ids = entry.id_mapper->deletePoints({meta.id});
-                if(stored_ids[0] != numeric_id) {
-                    LOG_DEBUG("Error: Mismatch in stored ID and numeric ID "
-                              << stored_ids[0] << " != " << numeric_id);
-                    continue;
+            const bool can_use_shared_txn = entry.vector_storage->uses_shared_env()
+                                            && entry.id_mapper->get_env()
+                                                       == entry.vector_storage->shared_env();
+
+            if(can_use_shared_txn) {
+                MDBX_txn* txn;
+                int64_t sparse_count_delta = 0;
+                int rc = mdbx_txn_begin(
+                        entry.vector_storage->shared_env(), nullptr, MDBX_TXN_READWRITE, &txn);
+                if(rc != MDBX_SUCCESS) {
+                    throw std::runtime_error("Failed to begin shared delete transaction: "
+                                             + std::string(mdbx_strerror(rc)));
                 }
-                // Remove the filter
-                entry.vector_storage->deleteFilter(numeric_id, meta.filter);
-                // Mark as deleted in HNSW index
 
-                entry.alg->markDelete(numeric_id);
+                try {
+                    for(ndd::idInt numeric_id : numeric_ids) {
+                        auto meta = entry.vector_storage->get_meta_txn(txn, numeric_id);
+                        auto stored_ids = entry.id_mapper->deletePoints_txn(txn, {meta.id});
+                        if(stored_ids.empty() || stored_ids[0] != numeric_id) {
+                            LOG_DEBUG("Error: Mismatch in stored ID and numeric ID "
+                                      << (stored_ids.empty() ? 0 : stored_ids[0]) << " != "
+                                      << numeric_id);
+                            continue;
+                        }
 
-                // Delete from sparse storage if hybrid index
-                if(entry.sparse_storage) {
-                    entry.sparse_storage->delete_vector(numeric_id);
+                        entry.vector_storage->deletePoint_txn(txn, numeric_id);
+                        if(entry.sparse_storage && entry.sparse_storage->uses_shared_env()) {
+                            int64_t one_delta = 0;
+                            if(entry.sparse_storage->delete_vector_txn(txn, numeric_id, &one_delta)) {
+                                sparse_count_delta += one_delta;
+                            }
+                        }
+                    }
+
+                    rc = mdbx_txn_commit(txn);
+                    if(rc != MDBX_SUCCESS) {
+                        throw std::runtime_error(
+                                "Failed to commit shared delete transaction: "
+                                + std::string(mdbx_strerror(rc)));
+                    }
+                } catch(...) {
+                    mdbx_txn_abort(txn);
+                    throw;
+                }
+
+                if(entry.sparse_storage && entry.sparse_storage->uses_shared_env()) {
+                    entry.sparse_storage->apply_vector_count_delta(sparse_count_delta);
+                }
+
+                for(ndd::idInt numeric_id : numeric_ids) {
+                    entry.alg->markDelete(numeric_id);
+                    if(entry.sparse_storage && !entry.sparse_storage->uses_shared_env()) {
+                        entry.sparse_storage->delete_vector(numeric_id);
+                    }
+                }
+            } else {
+                for(ndd::idInt numeric_id : numeric_ids) {
+                    auto meta = entry.vector_storage->get_meta(numeric_id);
+                    // Remove ID mapping by getting the string id from metadata
+                    auto stored_ids = entry.id_mapper->deletePoints({meta.id});
+                    if(stored_ids[0] != numeric_id) {
+                        LOG_DEBUG("Error: Mismatch in stored ID and numeric ID "
+                                  << stored_ids[0] << " != " << numeric_id);
+                        continue;
+                    }
+                    // Remove the filter
+                    entry.vector_storage->deleteFilter(numeric_id, meta.filter);
+                    // Mark as deleted in HNSW index
+
+                    entry.alg->markDelete(numeric_id);
+
+                    // Delete from sparse storage if hybrid index
+                    if(entry.sparse_storage) {
+                        entry.sparse_storage->delete_vector(numeric_id);
+                    }
                 }
             }
             // Add the list to write ahead log using IndexManager's method
@@ -1409,16 +1549,54 @@ public:
 
             std::unique_lock<std::shared_mutex> operation_lock(entry.operation_mutex);
 
+            const bool can_use_shared_txn = entry.vector_storage->uses_shared_env()
+                                            && entry.id_mapper->get_env()
+                                                       == entry.vector_storage->shared_env();
+
             size_t updated_count = 0;
-            for(const auto& [str_id, new_filter] : updates) {
-                ndd::idInt numeric_id = entry.id_mapper->get_id(str_id);
-                if(numeric_id == 0) {
-                    LOG_DEBUG("updateFilters: ID not found: " << str_id);
-                    continue;
+            if(can_use_shared_txn) {
+                MDBX_txn* txn;
+                int rc = mdbx_txn_begin(
+                        entry.vector_storage->shared_env(), nullptr, MDBX_TXN_READWRITE, &txn);
+                if(rc != MDBX_SUCCESS) {
+                    throw std::runtime_error(
+                            "Failed to begin shared updateFilters transaction: "
+                            + std::string(mdbx_strerror(rc)));
                 }
 
-                entry.vector_storage->updateFilter(numeric_id, new_filter);
-                updated_count++;
+                try {
+                    for(const auto& [str_id, new_filter] : updates) {
+                        ndd::idInt numeric_id = entry.id_mapper->get_id_txn(txn, str_id);
+                        if(numeric_id == 0) {
+                            LOG_DEBUG("updateFilters: ID not found: " << str_id);
+                            continue;
+                        }
+
+                        entry.vector_storage->updateFilter_txn(txn, numeric_id, new_filter);
+                        updated_count++;
+                    }
+
+                    rc = mdbx_txn_commit(txn);
+                    if(rc != MDBX_SUCCESS) {
+                        throw std::runtime_error(
+                                "Failed to commit shared updateFilters transaction: "
+                                + std::string(mdbx_strerror(rc)));
+                    }
+                } catch(...) {
+                    mdbx_txn_abort(txn);
+                    throw;
+                }
+            } else {
+                for(const auto& [str_id, new_filter] : updates) {
+                    ndd::idInt numeric_id = entry.id_mapper->get_id(str_id);
+                    if(numeric_id == 0) {
+                        LOG_DEBUG("updateFilters: ID not found: " << str_id);
+                        continue;
+                    }
+
+                    entry.vector_storage->updateFilter(numeric_id, new_filter);
+                    updated_count++;
+                }
             }
 
             if(updated_count > 0) {

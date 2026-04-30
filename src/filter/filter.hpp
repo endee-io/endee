@@ -4,12 +4,14 @@
 #include <string>
 #include <memory>
 #include <stdexcept>
-#include <filesystem>
 #include <sstream>
 #include <iomanip>
 #include <iostream>
 #include <unordered_map>
 #include <vector>
+#include <mutex>
+#include <cerrno>
+#include <sys/stat.h>
 
 #include "json/nlohmann_json.hpp"
 #include "../utils/settings.hpp"
@@ -44,6 +46,8 @@ private:
     MDBX_dbi dbi_;  // Used for schema storage
     std::string index_id_;
     std::string path_;
+    std::string schema_dbi_name_;
+    bool owns_env_;
     std::unique_ptr<ndd::filter::NumericIndex> numeric_index_;
     std::unique_ptr<ndd::filter::CategoryIndex> category_index_;
 
@@ -79,13 +83,28 @@ private:
         mdbx_txn_abort(txn);
     }
 
-    void save_schema_internal() {
+    bool save_schema_internal(MDBX_txn* txn) {
         nlohmann::json j;
-        for(const auto& [k, v] : schema_cache_) {
-            j[k] = static_cast<int>(v);
+        {
+            std::lock_guard<std::mutex> lock(schema_mutex_);
+            for(const auto& [k, v] : schema_cache_) {
+                j[k] = static_cast<int>(v);
+            }
         }
         std::string json_str = j.dump();
 
+        MDBX_val key{const_cast<char*>(SCHEMA_KEY), strlen(SCHEMA_KEY)};
+        MDBX_val data{const_cast<char*>(json_str.c_str()), json_str.size()};
+
+        int rc = mdbx_put(txn, dbi_, &key, &data, MDBX_UPSERT);
+        if(rc != MDBX_SUCCESS) {
+            LOG_ERROR(1211, index_id_, "Failed to persist filter schema: " << mdbx_strerror(rc));
+            return false;
+        }
+        return true;
+    }
+
+    void save_schema_internal() {
         MDBX_txn* txn;
         int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
         if(rc != MDBX_SUCCESS) {
@@ -94,32 +113,58 @@ private:
             return;
         }
 
-        MDBX_val key{const_cast<char*>(SCHEMA_KEY), strlen(SCHEMA_KEY)};
-        MDBX_val data{const_cast<char*>(json_str.c_str()), json_str.size()};
-
-        rc = mdbx_put(txn, dbi_, &key, &data, MDBX_UPSERT);
-        if(rc == MDBX_SUCCESS) {
-            rc = mdbx_txn_commit(txn);
-            if(rc != MDBX_SUCCESS) {
-                LOG_ERROR(
-                        1209, index_id_, "Failed to commit filter schema update: " << mdbx_strerror(rc));
-            }
-        } else {
+        if(!save_schema_internal(txn)) {
             mdbx_txn_abort(txn);
-            LOG_ERROR(1211, index_id_, "Failed to persist filter schema: " << mdbx_strerror(rc));
+            return;
+        }
+
+        rc = mdbx_txn_commit(txn);
+        if(rc != MDBX_SUCCESS) {
+            LOG_ERROR(
+                    1209, index_id_, "Failed to commit filter schema update: " << mdbx_strerror(rc));
         }
     }
 
-    bool register_field_type(const std::string& field, FieldType type) {
+    bool register_field_type(const std::string& field, FieldType type, bool* changed = nullptr) {
         std::lock_guard<std::mutex> lock(schema_mutex_);
         auto it = schema_cache_.find(field);
         if(it != schema_cache_.end()) {
+            if(changed) {
+                *changed = false;
+            }
             return it->second == type;
         }
 
         schema_cache_[field] = type;
-        save_schema_internal();
+        if(changed) {
+            *changed = true;
+        }
         return true;
+    }
+
+    void init_dbis() {
+        MDBX_txn* txn;
+        int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
+        if(rc != 0) {
+            throw std::runtime_error(std::string("Failed to begin filter transaction: ") + mdbx_strerror(rc));
+        }
+
+        const char* schema_dbi_name = schema_dbi_name_.empty() ? nullptr : schema_dbi_name_.c_str();
+        rc = mdbx_dbi_open(txn, schema_dbi_name, MDBX_CREATE, &dbi_);
+        if(rc != 0) {
+            mdbx_txn_abort(txn);
+            throw std::runtime_error(std::string("Failed to open filter database: ") + mdbx_strerror(rc));
+        }
+        rc = mdbx_txn_commit(txn);
+        if(rc != 0) {
+            throw std::runtime_error(std::string("Failed to commit filter transaction: ") + mdbx_strerror(rc));
+        }
+
+        // Initialize Indices
+        numeric_index_ = std::make_unique<ndd::filter::NumericIndex>(env_);
+        category_index_ = std::make_unique<ndd::filter::CategoryIndex>(env_);
+
+        load_schema();
     }
 
     void init_environment() {
@@ -148,28 +193,7 @@ private:
         if(rc != 0) {
             throw std::runtime_error(std::string("Failed to open filter environment: ") + mdbx_strerror(rc));
         }
-
-        MDBX_txn* txn;
-        rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
-        if(rc != 0) {
-            throw std::runtime_error(std::string("Failed to begin filter transaction: ") + mdbx_strerror(rc));
-        }
-
-        rc = mdbx_dbi_open(txn, nullptr, MDBX_CREATE, &dbi_);
-        if(rc != 0) {
-            mdbx_txn_abort(txn);
-            throw std::runtime_error(std::string("Failed to open filter database: ") + mdbx_strerror(rc));
-        }
-        rc = mdbx_txn_commit(txn);
-        if(rc != 0) {
-            throw std::runtime_error(std::string("Failed to commit filter transaction: ") + mdbx_strerror(rc));
-        }
-
-        // Initialize Indices
-        numeric_index_ = std::make_unique<ndd::filter::NumericIndex>(env_);
-        category_index_ = std::make_unique<ndd::filter::CategoryIndex>(env_);
-
-        load_schema();
+        init_dbis();
     }
 
     static std::string format_filter_key(const std::string& field, const std::string& value) {
@@ -179,14 +203,31 @@ private:
 public:
     Filter(const std::string& path, const std::string& index_id) :
         index_id_(index_id),
-        path_(path) {
-        std::filesystem::create_directories(path);
+        path_(path),
+        schema_dbi_name_(),
+        owns_env_(true) {
+        if(::mkdir(path.c_str(), 0775) != 0 && errno != EEXIST) {
+            throw std::runtime_error("Failed to create filter directory: " + path);
+        }
         init_environment();
+    }
+
+    Filter(MDBX_env* env,
+           const std::string& index_id,
+           const std::string& schema_dbi_name = "filter_schema") :
+        env_(env),
+        index_id_(index_id),
+        path_(),
+        schema_dbi_name_(schema_dbi_name),
+        owns_env_(false) {
+        init_dbis();
     }
 
     ~Filter() {
         mdbx_dbi_close(env_, dbi_);
-        mdbx_env_close(env_);
+        if(owns_env_) {
+            mdbx_env_close(env_);
+        }
     }
 
     // Compute the filter bitmap based on the provided JSON filter array
@@ -393,11 +434,14 @@ public:
     }
 
     // Optimized version to process filter JSON in batch
-    void add_filters_from_json_batch(
+    void add_filters_from_json_batch_txn(
+            MDBX_txn* txn,
             const std::vector<std::pair<ndd::idInt, std::string>>& id_filter_pairs) {
         if(id_filter_pairs.empty()) {
             return;
         }
+
+        bool schema_changed = false;
 
         // Create a map to collect IDs for each filter
         std::unordered_map<std::string, std::vector<ndd::idInt>> filter_to_ids;
@@ -421,13 +465,16 @@ public:
                         continue;
                     }
 
-                    if(!register_field_type(field, type)) {
+                    bool field_added = false;
+                    if(!register_field_type(field, type, &field_added)) {
                         LOG_ERROR(1202, index_id_, "Type mismatch for field '" << field << "'");
                         continue;
                     }
+                    schema_changed = schema_changed || field_added;
 
                     if(value.is_string()) {
-                        std::string filter_key = format_filter_key(field, value.get<std::string>());
+                        std::string filter_key =
+                                format_filter_key(field, value.get<std::string>());
                         filter_to_ids[filter_key].push_back(numeric_id);
                     } else if(value.is_number()) {
                         // Use Numeric Index for numbers
@@ -437,17 +484,17 @@ public:
                         } else {
                             sortable_val = ndd::filter::float_to_sortable(value.get<float>());
                         }
-                        numeric_index_->put(field, numeric_id, sortable_val);
+                        numeric_index_->put(txn, field, numeric_id, sortable_val);
                     } else if(value.is_boolean()) {
                         std::string filter_key =
                                 format_filter_key(field, value.get<bool>() ? "1" : "0");
                         filter_to_ids[filter_key].push_back(numeric_id);
                     } else {
                         LOG_WARN(1203,
-                                       index_id_,
-                                       "Unsupported filter type for field '" << field
-                                                                             << "' in filter: "
-                                                                             << value.dump());
+                                 index_id_,
+                                 "Unsupported filter type for field '" << field
+                                                                       << "' in filter: "
+                                                                       << value.dump());
                     }
                 }
             } catch(const std::exception& e) {
@@ -457,7 +504,43 @@ public:
 
         // Process each filter with its batch of IDs
         for(const auto& [filter_key, ids] : filter_to_ids) {
-            add_to_filter_batch(filter_key, ids);
+            category_index_->add_batch_by_key(txn, filter_key, ids);
+        }
+
+        if(schema_changed && !save_schema_internal(txn)) {
+            throw std::runtime_error("Failed to persist filter schema in batch mutation");
+        }
+    }
+
+    void add_filters_from_json_batch(
+            const std::vector<std::pair<ndd::idInt, std::string>>& id_filter_pairs) {
+        if(id_filter_pairs.empty()) {
+            return;
+        }
+
+        MDBX_txn* txn;
+        int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
+        if(rc != MDBX_SUCCESS) {
+            LOG_ERROR(1212,
+                      index_id_,
+                      "Failed to begin batch filter write transaction: " << mdbx_strerror(rc));
+            throw std::runtime_error("Failed to begin filter transaction: "
+                                     + std::string(mdbx_strerror(rc)));
+        }
+
+        bool schema_changed = false;
+
+        try {
+            add_filters_from_json_batch_txn(txn, id_filter_pairs);
+
+            rc = mdbx_txn_commit(txn);
+            if(rc != MDBX_SUCCESS) {
+                throw std::runtime_error("Failed to commit filter batch transaction: "
+                                         + std::string(mdbx_strerror(rc)));
+            }
+        } catch(...) {
+            mdbx_txn_abort(txn);
+            throw;
         }
     }
 
@@ -470,63 +553,119 @@ public:
         return category_index_->contains(field, value, numeric_id);
     }
 
+    void add_filters_from_json_txn(MDBX_txn* txn,
+                                   ndd::idInt numeric_id,
+                                   const std::string& filter_json) {
+        bool schema_changed = false;
+
+        auto j = nlohmann::json::parse(filter_json);
+        for(const auto& [field, value] : j.items()) {
+            FieldType type = FieldType::Unknown;
+            if(value.is_boolean()) {
+                type = FieldType::Bool;
+            } else if(value.is_number()) {
+                type = FieldType::Number;
+            } else if(value.is_string()) {
+                type = FieldType::String;
+            }
+
+            if(type == FieldType::Unknown) {
+                LOG_DEBUG("Unsupported filter type for field '" << field << "'");
+                continue;
+            }
+
+            bool field_added = false;
+            if(!register_field_type(field, type, &field_added)) {
+                LOG_ERROR(1205, index_id_, "Type mismatch for field '" << field << "'");
+                continue;
+            }
+            schema_changed = schema_changed || field_added;
+
+            if(value.is_string()) {
+                category_index_->add(txn, field, value.get<std::string>(), numeric_id);
+            } else if(value.is_number()) {
+                uint32_t sortable_val;
+                if(value.is_number_integer()) {
+                    sortable_val = ndd::filter::int_to_sortable(value.get<int>());
+                } else {
+                    sortable_val = ndd::filter::float_to_sortable(value.get<float>());
+                }
+                numeric_index_->put(txn, field, numeric_id, sortable_val);
+            } else if(value.is_boolean()) {
+                category_index_->add(txn, field, value.get<bool>() ? "1" : "0", numeric_id);
+            }
+        }
+
+        if(schema_changed && !save_schema_internal(txn)) {
+            throw std::runtime_error("Failed to persist filter schema");
+        }
+    }
+
     void add_filters_from_json(ndd::idInt numeric_id, const std::string& filter_json) {
+        MDBX_txn* txn;
+        int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
+        if(rc != MDBX_SUCCESS) {
+            LOG_ERROR(1213,
+                      index_id_,
+                      "Failed to begin filter insert transaction: " << mdbx_strerror(rc));
+            throw std::runtime_error("Failed to begin filter transaction: "
+                                     + std::string(mdbx_strerror(rc)));
+        }
+
         try {
-            auto j = nlohmann::json::parse(filter_json);
-            for(const auto& [field, value] : j.items()) {
-                FieldType type = FieldType::Unknown;
-                if(value.is_boolean()) {
-                    type = FieldType::Bool;
-                } else if(value.is_number()) {
-                    type = FieldType::Number;
-                } else if(value.is_string()) {
-                    type = FieldType::String;
-                }
+            add_filters_from_json_txn(txn, numeric_id, filter_json);
 
-                if(type == FieldType::Unknown) {
-                    LOG_DEBUG("Unsupported filter type for field '" << field << "'");
-                    continue;
-                }
-
-                if(!register_field_type(field, type)) {
-                    LOG_ERROR(1205, index_id_, "Type mismatch for field '" << field << "'");
-                    continue;
-                }
-
-                if(value.is_string()) {
-                    add_to_filter(field, value.get<std::string>(), numeric_id);
-                } else if(value.is_number()) {
-                    uint32_t sortable_val;
-                    if(value.is_number_integer()) {
-                        sortable_val = ndd::filter::int_to_sortable(value.get<int>());
-                    } else {
-                        sortable_val = ndd::filter::float_to_sortable(value.get<float>());
-                    }
-                    numeric_index_->put(field, numeric_id, sortable_val);
-                } else if(value.is_boolean()) {
-                    add_to_filter(field, value.get<bool>() ? "1" : "0", numeric_id);
-                }
+            rc = mdbx_txn_commit(txn);
+            if(rc != MDBX_SUCCESS) {
+                throw std::runtime_error("Failed to commit filter insert transaction: "
+                                         + std::string(mdbx_strerror(rc)));
             }
         } catch(const std::exception& e) {
+            mdbx_txn_abort(txn);
             LOG_ERROR(1206, index_id_, "Error adding filters: " << e.what());
+            throw;
+        }
+    }
+
+    void remove_filters_from_json_txn(MDBX_txn* txn,
+                                      ndd::idInt numeric_id,
+                                      const std::string& filter_json) {
+        auto j = nlohmann::json::parse(filter_json);
+        for(const auto& [field, value] : j.items()) {
+            if(value.is_string()) {
+                category_index_->remove(txn, field, value.get<std::string>(), numeric_id);
+            } else if(value.is_number()) {
+                // Remove from Numeric Index
+                numeric_index_->remove(txn, field, numeric_id);
+            } else if(value.is_boolean()) {
+                category_index_->remove(txn, field, value.get<bool>() ? "1" : "0", numeric_id);
+            }
         }
     }
 
     void remove_filters_from_json(ndd::idInt numeric_id, const std::string& filter_json) {
+        MDBX_txn* txn;
+        int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
+        if(rc != MDBX_SUCCESS) {
+            LOG_ERROR(1214,
+                      index_id_,
+                      "Failed to begin filter delete transaction: " << mdbx_strerror(rc));
+            throw std::runtime_error("Failed to begin filter transaction: "
+                                     + std::string(mdbx_strerror(rc)));
+        }
+
         try {
-            auto j = nlohmann::json::parse(filter_json);
-            for(const auto& [field, value] : j.items()) {
-                if(value.is_string()) {
-                    remove_from_filter(field, value.get<std::string>(), numeric_id);
-                } else if(value.is_number()) {
-                    // Remove from Numeric Index
-                    numeric_index_->remove(field, numeric_id);
-                } else if(value.is_boolean()) {
-                    remove_from_filter(field, value.get<bool>() ? "1" : "0", numeric_id);
-                }
+            remove_filters_from_json_txn(txn, numeric_id, filter_json);
+
+            rc = mdbx_txn_commit(txn);
+            if(rc != MDBX_SUCCESS) {
+                throw std::runtime_error("Failed to commit filter delete transaction: "
+                                         + std::string(mdbx_strerror(rc)));
             }
         } catch(const std::exception& e) {
+            mdbx_txn_abort(txn);
             LOG_ERROR(1207, index_id_, "Error removing filters: " << e.what());
+            throw;
         }
     }
 

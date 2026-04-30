@@ -13,6 +13,7 @@
 #include <memory>
 #include <stdexcept>
 #include <filesystem>
+#include <utility>
 
 // Handles vector storage
 class VectorStore {
@@ -333,6 +334,40 @@ public:
 
             mdbx_txn_abort(txn);
             return result;
+        } catch(...) {
+            mdbx_txn_abort(txn);
+            throw;
+        }
+    }
+
+    template <typename Visitor>
+    size_t visit_vectors_by_ids(const std::vector<ndd::idInt>& numeric_ids,
+                                Visitor&& visitor) const {
+        if(numeric_ids.empty()) {
+            return 0;
+        }
+
+        MDBX_txn* txn;
+        int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_RDONLY, &txn);
+        if(rc != MDBX_SUCCESS) {
+            throw std::runtime_error(std::string("Failed to begin transaction: ") + mdbx_strerror(rc));
+        }
+
+        size_t visited = 0;
+        try {
+            for(const auto& numeric_id : numeric_ids) {
+                MDBX_val key{const_cast<ndd::idInt*>(&numeric_id), sizeof(ndd::idInt)};
+                MDBX_val data;
+
+                rc = mdbx_get(txn, dbi_, &key, &data);
+                if(rc == MDBX_SUCCESS && data.iov_len == bytes_per_vector_) {
+                    visitor(numeric_id, static_cast<const void*>(data.iov_base));
+                    visited++;
+                }
+            }
+
+            mdbx_txn_abort(txn);
+            return visited;
         } catch(...) {
             mdbx_txn_abort(txn);
             throw;
@@ -745,6 +780,15 @@ public:
     get_vectors_batch(const std::vector<ndd::idInt>& numeric_ids) const {
         return vector_store_->get_vectors_batch(numeric_ids);
     }
+
+    template <typename Visitor>
+    size_t visit_vectors_by_ids(const std::vector<ndd::idInt>& numeric_ids,
+                                Visitor&& visitor) const {
+        return vector_store_->visit_vectors_by_ids(
+                numeric_ids,
+                std::forward<Visitor>(visitor));
+    }
+
     ndd::VectorMeta get_meta(ndd::idInt numeric_id) const {
         return meta_store_->get_meta(numeric_id);
     }

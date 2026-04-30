@@ -27,6 +27,7 @@
 #include <thread>
 #include <atomic>
 #include <optional>
+#include <queue>
 #include <random>
 #include <type_traits>
 #include <future>
@@ -1591,24 +1592,36 @@ public:
                                     &valid_ids);
                         }
 
-                        std::vector<std::pair<idInt, std::vector<uint8_t>>> vector_batch;
                         {
-                            ndd::ScopedSearchTiming mdbx_get_timer(
-                                    ndd::searchTimingStats().prefilter_mdbx_get);
-                            vector_batch = entry.vector_storage->get_vectors_batch(valid_ids);
-                        }
+                            ndd::ScopedSearchTiming direct_score_timer(
+                                    ndd::searchTimingStats().prefilter_direct_mdbx_score);
+                            auto distance_func = space->get_dist_func();
+                            void* dist_func_param = space->get_dist_func_param();
+                            std::priority_queue<std::pair<float, ndd::idInt>> top_results;
 
-                        std::vector<std::pair<idInt, std::vector<uint8_t>>> vector_subset;
-                        vector_subset.reserve(vector_batch.size());
-                        for(auto& [nid, vbytes] : vector_batch) {
-                            vector_subset.emplace_back(nid, std::move(vbytes));
-                        }
+                            if(k > 0) {
+                                entry.vector_storage->visit_vectors_by_ids(
+                                        valid_ids,
+                                        [&](ndd::idInt numeric_id, const void* vector_data) {
+                                            float distance = distance_func(query_bytes.data(),
+                                                                           vector_data,
+                                                                           dist_func_param);
 
-                        {
-                            ndd::ScopedSearchTiming distance_compute_timer(
-                                    ndd::searchTimingStats().prefilter_distance_compute);
-                            dense_results = hnswlib::searchKnnSubset<float>(
-                                    query_bytes.data(), vector_subset, k, space);
+                                            if(top_results.size() < k) {
+                                                top_results.emplace(distance, numeric_id);
+                                            } else if(distance < top_results.top().first) {
+                                                top_results.pop();
+                                                top_results.emplace(distance, numeric_id);
+                                            }
+                                        });
+                            }
+
+                            dense_results.reserve(top_results.size());
+                            while(!top_results.empty()) {
+                                dense_results.push_back(top_results.top());
+                                top_results.pop();
+                            }
+                            std::reverse(dense_results.begin(), dense_results.end());
                         }
 
                     } else {

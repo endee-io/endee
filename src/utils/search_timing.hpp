@@ -21,6 +21,7 @@ namespace ndd {
         SearchTimingCounter filtered_hnsw_search;
         SearchTimingCounter prefilter_total;
         SearchTimingCounter prefilter_bitmap_to_ids;
+        SearchTimingCounter prefilter_direct_mdbx_score;
         SearchTimingCounter prefilter_mdbx_get;
         SearchTimingCounter prefilter_distance_compute;
         std::atomic<uint64_t> prefilter_cardinality_total{0};
@@ -118,6 +119,7 @@ namespace ndd {
         print_counter("filtered_hnsw_search", stats.filtered_hnsw_search);
         const uint64_t prefilter_calls = print_counter("prefilter_total", stats.prefilter_total);
         print_counter("prefilter_bitmap_to_ids", stats.prefilter_bitmap_to_ids);
+        print_counter("prefilter_direct_mdbx_score", stats.prefilter_direct_mdbx_score);
         print_counter("prefilter_mdbx_get", stats.prefilter_mdbx_get);
         print_counter("prefilter_distance_compute", stats.prefilter_distance_compute);
 

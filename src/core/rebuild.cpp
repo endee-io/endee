@@ -185,8 +185,12 @@ void Rebuild::executeJob(const RebuildJobParams& p, std::stop_token st) {
 
         // Phase 2 — build new HNSW with updated M/ef_con
         auto* old_alg = entry->alg.get();
+        // Size new graph based on live vector count + buffer, not allocated capacity.
+        // This ensures default.idx shrinks proportionally after deletions.
+        size_t live_count = old_alg->getElementsCount();
+        size_t new_max    = live_count + settings::MAX_ELEMENTS_INCREMENT;
         auto new_alg = std::make_unique<hnswlib::HierarchicalNSW<float>>(
-            old_alg->getMaxElements(), old_alg->getSpaceType(), old_alg->getDimension(),
+            new_max, old_alg->getSpaceType(), old_alg->getDimension(),
             p.new_M, p.new_ef_con,
             settings::RANDOM_SEED, old_alg->getQuantLevel(), old_alg->getChecksum());
 

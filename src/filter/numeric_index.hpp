@@ -235,6 +235,7 @@ namespace ndd {
                 return field + ":" + std::to_string(id);
             }
 
+            // Key Format: [Field]:[BigEndian_BaseValue]
             std::string make_bucket_key(const std::string& field, uint32_t start_val) {
                 uint32_t be_val = 0;
 #if defined(__GNUC__) || defined(__clang__)
@@ -274,6 +275,7 @@ namespace ndd {
                                                        const std::string& field,
                                                        uint32_t value,
                                                        ndd::idInt id) {
+                // Find bucket
                 std::string bkey_str = make_bucket_key(field, value);
                 MDBX_val key{const_cast<char*>(bkey_str.data()), bkey_str.size()};
                 MDBX_val data;
@@ -284,17 +286,28 @@ namespace ndd {
                                          + std::string(mdbx_strerror(rc))};
                 }
 
+                /**
+                 * Scan backward to find bucket covering 'value'.
+                 * Logic to find correct bucket:
+                 */
                 rc = mdbx_cursor_get(cursor, &key, &data, MDBX_SET_RANGE);
                 if(rc == MDBX_SUCCESS) {
+                    // Check if we are in right field & range
                     std::string found_key(static_cast<char*>(key.iov_base), key.iov_len);
                     if(found_key.rfind(field + ":", 0) != 0
                        || parse_bucket_key_val(found_key) > value) {
                         rc = mdbx_cursor_get(cursor, &key, &data, MDBX_PREV);
                     }
                 } else if(rc == MDBX_NOTFOUND) {
+                    /**
+                     * The only possible bucket that could still contain
+                     * value is the very last bucket in the database.
+                     * Hence jumping there.
+                     */
                     rc = mdbx_cursor_get(cursor, &key, &data, MDBX_LAST);
                 }
 
+                // Should be at correct bucket now
                 if(rc != MDBX_SUCCESS) {
                     mdbx_cursor_close(cursor);
                     if(rc == MDBX_NOTFOUND) {
@@ -319,6 +332,7 @@ namespace ndd {
                 try {
                     Bucket bucket = Bucket::deserialize(data.iov_base, data.iov_len, bucket_base);
                     if(bucket.remove(id)) {
+                        // Save back or Delete if empty
                         if(bucket.is_empty()) {
                             rc = mdbx_cursor_del(cursor, static_cast<MDBX_put_flags_t>(0));
                             if(rc != MDBX_SUCCESS) {
@@ -366,10 +380,12 @@ namespace ndd {
                                          + std::string(mdbx_strerror(rc))};
                 }
 
+                // Find candidate bucket
                 std::string search_key = make_bucket_key(field, value);
                 MDBX_val key{const_cast<char*>(search_key.data()), search_key.size()};
                 MDBX_val data;
 
+                // Move logic to find predecessor
                 rc = mdbx_cursor_get(cursor, &key, &data, MDBX_SET_RANGE);
                 if(rc == MDBX_SUCCESS) {
                     std::string found_key(static_cast<char*>(key.iov_base), key.iov_len);
@@ -406,6 +422,8 @@ namespace ndd {
                     std::string found_key(static_cast<char*>(key.iov_base), key.iov_len);
                     if(found_key.rfind(field + ":", 0) == 0) {
                         target_base = parse_bucket_key_val(found_key);
+
+                        // Check range condition
                         if(value >= target_base
                            && (static_cast<uint64_t>(value) - target_base)
                                       <= Bucket::MAX_DELTA) {
@@ -417,6 +435,7 @@ namespace ndd {
 
                 try {
                     if(create_new) {
+                        // Create new bucket at exact value
                         Bucket bucket;
                         bucket.base_value = value;
                         bucket.add(value, id);
@@ -433,18 +452,30 @@ namespace ndd {
                                                  + std::string(mdbx_strerror(rc))};
                         }
                     } else {
+                        /**
+                         * Update existing.
+                         * We must re-fetch current key/data because cursor move might have updated key/data.
+                         */
                         MDBX_val k{const_cast<char*>(target_key_str.data()),
                                    target_key_str.size()};
                         MDBX_val v;
                         rc = mdbx_cursor_get(cursor, &k, &v, MDBX_SET);
                         if(rc != MDBX_SUCCESS) {
+                            // Should not happen if logic is correct
                             mdbx_cursor_close(cursor);
                             return {200, "Failed to resync numeric bucket cursor: "
                                                  + std::string(mdbx_strerror(rc))};
                         }
 
                         Bucket bucket = Bucket::deserialize(v.iov_base, v.iov_len, target_base);
+                        // Capacity Check
                         if(bucket.ids.size() >= Bucket::MAX_SIZE) {
+                            /**
+                             * SPLIT LOGIC
+                             * Sort is maintained by arrays.
+                             * "Slide Split": Scan right from median.
+                             * Ensure we don't split a group of identical values.
+                             */
                             size_t mid_idx = bucket.ids.size() / 2;
                             size_t probe_right = mid_idx;
                             while(probe_right < bucket.deltas.size() && probe_right > 0
@@ -456,16 +487,23 @@ namespace ndd {
                             if(probe_right < bucket.deltas.size()) {
                                 mid_idx = probe_right;
                             } else {
+                                // Fallback: Try scanning left
                                 size_t probe_left = mid_idx;
                                 while(probe_left > 0
                                       && bucket.deltas[probe_left]
                                                  == bucket.deltas[probe_left - 1]) {
                                     probe_left--;
                                 }
+                                // All identical
                                 mid_idx = probe_left > 0 ? probe_left : bucket.deltas.size();
                             }
 
+                            // If we hit end, we can't split by value uniqueness
                             if(mid_idx == bucket.deltas.size()) {
+                                /**
+                                 * Fallback: Just append (overfill) or implement logic to handle identicals.
+                                 * For now: Append.
+                                 */
                                 bucket.add(value, id);
                                 auto bytes = bucket.serialize();
                                 MDBX_val k2{const_cast<char*>(target_key_str.data()),
@@ -480,26 +518,43 @@ namespace ndd {
                                 return {SUCCESS, ""};
                             }
 
+                            // Standard Slide Split
                             Bucket right_bucket;
                             right_bucket.base_value = bucket.base_value + bucket.deltas[mid_idx];
+                            // Move entries
                             for(size_t i = mid_idx; i < bucket.deltas.size(); ++i) {
                                 right_bucket.add(bucket.base_value + bucket.deltas[i],
                                                  bucket.ids[i]);
                             }
 
+                            // Truncate left
                             bucket.deltas.resize(mid_idx);
                             bucket.ids.resize(mid_idx);
+                            // Rebuild left bitmap
                             bucket.summary_bitmap = ndd::RoaringBitmap();
                             for(auto bucket_id : bucket.ids) {
                                 bucket.summary_bitmap.add(bucket_id);
                             }
 
+                            // Now add new value to correct bucket
                             if(value >= right_bucket.base_value) {
                                 right_bucket.add(value, id);
                             } else {
+                                /**
+                                 * If value < right, goes to left.
+                                 * But wait, split point was determined by existing items.
+                                 * If new value is >= base+split_delta, it goes right.
+                                 * BUT we just cleared right from b.
+                                 * Correct logic:
+                                 * Oh wait, if we added to left, we might overflow again or break order?
+                                 * Simply: Check which bucket covers it.
+                                 * Left covers [Base, RightBase-1].
+                                 * Right covers [RightBase, ...].
+                                 */
                                 bucket.add(value, id);
                             }
 
+                            // Save Left
                             auto left_bytes = bucket.serialize();
                             MDBX_val left_v{left_bytes.data(), left_bytes.size()};
                             MDBX_val left_k{const_cast<char*>(target_key_str.data()),
@@ -511,12 +566,14 @@ namespace ndd {
                                                      + std::string(mdbx_strerror(rc))};
                             }
 
+                            // Save Right
                             auto right_bytes = right_bucket.serialize();
                             std::string right_k_str =
                                     make_bucket_key(field, right_bucket.base_value);
                             MDBX_val right_k{const_cast<char*>(right_k_str.data()),
                                              right_k_str.size()};
                             MDBX_val right_v{right_bytes.data(), right_bytes.size()};
+                            // Use put for new key
                             rc = mdbx_put(txn, inverted_dbi_, &right_k, &right_v, MDBX_UPSERT);
                             if(rc != MDBX_SUCCESS) {
                                 mdbx_cursor_close(cursor);
@@ -524,9 +581,11 @@ namespace ndd {
                                                      + std::string(mdbx_strerror(rc))};
                             }
                         } else {
+                            // Normal Insert
                             bucket.add(value, id);
                             auto bytes = bucket.serialize();
                             MDBX_val new_data{bytes.data(), bytes.size()};
+                            // Use cursor put to update current
                             rc = mdbx_cursor_put(cursor, &k, &new_data, MDBX_CURRENT);
                             if(rc != MDBX_SUCCESS) {
                                 mdbx_cursor_close(cursor);
@@ -559,6 +618,8 @@ namespace ndd {
                                                 const std::string& field,
                                                 ndd::idInt id,
                                                 uint32_t value) {
+
+                // 1. Check Forward Index
                 std::string fwd_key_str = make_forward_key(field, id);
                 MDBX_val fwd_key{const_cast<char*>(fwd_key_str.data()), fwd_key_str.size()};
                 MDBX_val fwd_val;
@@ -582,6 +643,7 @@ namespace ndd {
                                          + std::string(mdbx_strerror(rc))};
                 }
 
+                // 2. Update Forward
                 MDBX_val new_val_data{&value, sizeof(uint32_t)};
                 rc = mdbx_put(txn, forward_dbi_, &fwd_key, &new_val_data, MDBX_UPSERT);
                 if(rc != MDBX_SUCCESS) {
@@ -589,6 +651,7 @@ namespace ndd {
                                          + std::string(mdbx_strerror(rc))};
                 }
 
+                // 3. Add to Inverted Buckets
                 return add_to_buckets(txn, field, value, id);
             }
 
@@ -746,6 +809,7 @@ namespace ndd {
                                          + std::string(mdbx_strerror(rc))};
                 }
 
+                // 1. Find Start Bucket
                 std::string start_k = make_bucket_key(field, min_val);
                 MDBX_val key{const_cast<char*>(start_k.data()), start_k.size()};
                 MDBX_val data;
@@ -754,13 +818,16 @@ namespace ndd {
                 if(rc == MDBX_SUCCESS) {
                     std::string fkey(static_cast<char*>(key.iov_base), key.iov_len);
                     if(fkey.rfind(field + ":", 0) != 0 || parse_bucket_key_val(fkey) > min_val) {
+                        // Check if we need to back up
                         MDBX_val prev_key = key;
                         MDBX_val prev_data;
+                        // Check prev
                         int prev_rc = mdbx_cursor_get(cursor, &prev_key, &prev_data, MDBX_PREV);
                         if(prev_rc == MDBX_SUCCESS) {
                             std::string prev_key_str(static_cast<char*>(prev_key.iov_base),
                                                      prev_key.iov_len);
                             if(prev_key_str.rfind(field + ":", 0) == 0) {
+                                // Prev is valid start
                                 key = prev_key;
                                 data = prev_data;
                             }
@@ -792,6 +859,7 @@ namespace ndd {
                 }
 
                 try {
+                    // Iterate forward
                     while(rc == MDBX_SUCCESS) {
                         std::string cur_key(static_cast<char*>(key.iov_base), key.iov_len);
                         if(cur_key.rfind(field + ":", 0) != 0) {
@@ -803,6 +871,24 @@ namespace ndd {
                             break;
                         }
 
+                        /**
+                         * Peek Strategy:
+                         * If bucket_base >= min_val, we know the start is covered.
+                         * If we could know NEXT bucket start, we'd know overlap.
+                         * Since we iterate, we can be greedy on read.
+                         *
+                         * For now, always deserialize.
+                         * Potential optimization: Read only bitmap if we are "deep" in the range.
+                         * e.g. min_val=10, max_val=100. Bucket=20.
+                         * If bucket=20. Next Bucket=30.
+                         * Then Bucket 20 covers [20..30).
+                         * Range [10..100] covers [20..30] fully.
+                         * So we need lookahead.
+                         *
+                         * Simple logic without lookahead:
+                         * Just read full bucket. It's 8KB max (2 pages).
+                         * It's fast unless we have millions of buckets.
+                         */
                         Bucket bucket = Bucket::deserialize(data.iov_base,
                                                             data.iov_len,
                                                             bucket_base);
@@ -811,8 +897,10 @@ namespace ndd {
                             uint32_t bucket_max = bucket.get_value(bucket.ids.size() - 1);
 
                             if(bucket_min >= min_val && bucket_max <= max_val) {
+                                // Full overlap
                                 result |= bucket.summary_bitmap;
                             } else {
+                                // Partial overlap
                                 for(size_t i = 0; i < bucket.ids.size(); ++i) {
                                     uint32_t value = bucket.get_value(i);
                                     if(value >= min_val && value <= max_val) {

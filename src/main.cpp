@@ -88,6 +88,21 @@ inline crow::response json_error(int code, const std::string& message) {
     crow::json::wvalue err_json({{"error", message}});
     return crow::response(code, err_json.dump());
 }
+
+
+/**
+ * OperationResult code ranges are the contract between core/filter code and the HTTP
+ * boundary: SUCCESS means success, 1-99 means the request was rejected for caller-fixable
+ * input such as filter validation, and 100+ means storage/internal/corruption failure.
+ * When adding an OperationResult-returning function, document its code ranges and keep
+ * client-correctable errors below 100 so this helper maps them to HTTP 400 instead of
+ * the 500 path.
+ */
+template <typename T>
+inline bool operation_error_is_client_error(const ndd::OperationResult<T>& result) {
+    return result.code > SUCCESS && result.code < 100;
+}
+
 // Special helper function to log and send error messages in JSON format for 500 errors
 inline crow::response json_error_500(const std::string& username,
                                      const std::string& index_name,
@@ -207,7 +222,7 @@ int main(int argc, char** argv) {
     }
 
     if(!run_startup_sanity_checks()) {
-        LOG_ERROR(1799, "Server startup aborted due to failed sanity checks");
+        LOG_ERROR(1076, "Server startup aborted due to failed sanity checks");
         return 1;
     }
 
@@ -855,14 +870,23 @@ int main(int argc, char** argv) {
                                                                     dense_rrf_weight,
                                                                     rrf_rank_constant);
 
-                    if(!search_response) {
-                        LOG_WARN(1038, ctx.username, index_name, "Search request returned no results because the index is missing or search failed");
-                        return json_error(404, "Index not found or search failed");
+                    if(!search_response.ok()) {
+                        if(operation_error_is_client_error(search_response)) {
+                            LOG_WARN(1075,
+                                     ctx.username,
+                                     index_name,
+                                     "Search request rejected: " << search_response.message);
+                            return json_error(400, search_response.message);
+                        }
+                        return json_error_500(ctx.username,
+                                              index_name,
+                                              req.url,
+                                              search_response.message);
                     }
 
                     // Serialize the ResultSet using MessagePack
                     msgpack::sbuffer sbuf;
-                    msgpack::pack(sbuf, search_response.value());
+                    msgpack::pack(sbuf, search_response.value_or_throw());
                     crow::response resp(200, std::string(sbuf.data(), sbuf.size()));
                     resp.add_header("Content-Type", "application/msgpack");
                     return resp;
@@ -956,8 +980,21 @@ int main(int argc, char** argv) {
                     }
 
                     try {
-                        bool success = index_manager.addVectors(index_id, vectors);
-                        if(!success) {
+                        auto insert_result = index_manager.addVectors(index_id, vectors);
+                        if(!insert_result.ok()) {
+                            if(operation_error_is_client_error(insert_result)) {
+                                LOG_WARN(1069,
+                                         ctx.username,
+                                         index_name,
+                                         "Insert request rejected: " << insert_result.message);
+                                return json_error(400, insert_result.message);
+                            }
+                            return json_error_500(ctx.username,
+                                                  index_name,
+                                                  req.url,
+                                                  insert_result.message);
+                        }
+                        if(!insert_result.value_or_throw()) {
                             LOG_WARN(1066,
                                      ctx.username,
                                      index_name,
@@ -981,8 +1018,21 @@ int main(int argc, char** argv) {
                             // Try HybridVectorObject first
                             auto vectors = obj.as<std::vector<ndd::HybridVectorObject>>();
                             LOG_DEBUG("Batch size (Hybrid): " << vectors.size());
-                            bool success = index_manager.addVectors(index_id, vectors);
-                            if(!success) {
+                            auto insert_result = index_manager.addVectors(index_id, vectors);
+                            if(!insert_result.ok()) {
+                                if(operation_error_is_client_error(insert_result)) {
+                                    LOG_WARN(1070,
+                                             ctx.username,
+                                             index_name,
+                                             "Insert request rejected: " << insert_result.message);
+                                    return json_error(400, insert_result.message);
+                                }
+                                return json_error_500(ctx.username,
+                                                      index_name,
+                                                      req.url,
+                                                      insert_result.message);
+                            }
+                            if(!insert_result.value_or_throw()) {
                                 LOG_WARN(1067,
                                          ctx.username,
                                          index_name,
@@ -994,8 +1044,21 @@ int main(int argc, char** argv) {
                             // Fallback to VectorObject
                             auto vectors = obj.as<std::vector<ndd::VectorObject>>();
                             LOG_DEBUG("Batch size (Dense): " << vectors.size());
-                            bool success = index_manager.addVectors(index_id, vectors);
-                            if(!success) {
+                            auto insert_result = index_manager.addVectors(index_id, vectors);
+                            if(!insert_result.ok()) {
+                                if(operation_error_is_client_error(insert_result)) {
+                                    LOG_WARN(1071,
+                                             ctx.username,
+                                             index_name,
+                                             "Insert request rejected: " << insert_result.message);
+                                    return json_error(400, insert_result.message);
+                                }
+                                return json_error_500(ctx.username,
+                                                      index_name,
+                                                      req.url,
+                                                      insert_result.message);
+                            }
+                            if(!insert_result.value_or_throw()) {
                                 LOG_WARN(1068,
                                          ctx.username,
                                          index_name,
@@ -1067,7 +1130,21 @@ int main(int argc, char** argv) {
                 LOG_DEBUG("Deleting vector " << vector_id << " from index " << index_id);
 
                 try {
-                    if(index_manager.deleteVector(index_id, vector_id)) {
+                    auto delete_result = index_manager.deleteVector(index_id, vector_id);
+                    if(!delete_result.ok()) {
+                        if(operation_error_is_client_error(delete_result)) {
+                            LOG_WARN(1072,
+                                     ctx.username,
+                                     index_name,
+                                     "Delete-vector request rejected: " << delete_result.message);
+                            return json_error(400, delete_result.message);
+                        }
+                        return json_error_500(ctx.username,
+                                              index_name,
+                                              req.url,
+                                              delete_result.message);
+                    }
+                    if(delete_result.value_or_throw()) {
                         return crow::response(200, "Vector deleted successfully");
                     } else {
                         LOG_WARN(1046, ctx.username, index_name, "Delete-vector request for missing vector id " << vector_id);
@@ -1113,10 +1190,25 @@ int main(int argc, char** argv) {
                                           "Filter must be an array. Please use format: "
                                           "[{\"field\":{\"$op\":value}}]");
                     }
-                    size_t deleted_count =
+                    auto delete_result =
                             index_manager.deleteVectorsByFilter(index_id, filter_array);
+                    if(!delete_result.ok()) {
+                        if(operation_error_is_client_error(delete_result)) {
+                            LOG_WARN(1073,
+                                     ctx.username,
+                                     index_name,
+                                     "Delete-by-filter request rejected: " << delete_result.message);
+                            return json_error(400, delete_result.message);
+                        }
+                        return json_error_500(ctx.username,
+                                              index_name,
+                                              req.url,
+                                              delete_result.message);
+                    }
 
-                    return crow::response(200, std::to_string(deleted_count) + " vectors deleted");
+                    return crow::response(200,
+                                          std::to_string(delete_result.value_or_throw())
+                                                  + " vectors deleted");
                 } catch(const std::runtime_error& e) {
                     LOG_WARN(1051, ctx.username, index_name, "Delete-by-filter request rejected: " << e.what());
                     return json_error(400, e.what());
@@ -1163,8 +1255,23 @@ int main(int argc, char** argv) {
                         updates.emplace_back(id, filter);
                     }
 
-                    size_t count = index_manager.updateFilters(index_id, updates);
-                    return crow::response(200, std::to_string(count) + " filters updated");
+                    auto update_result = index_manager.updateFilters(index_id, updates);
+                    if(!update_result.ok()) {
+                        if(operation_error_is_client_error(update_result)) {
+                            LOG_WARN(1074,
+                                     ctx.username,
+                                     index_name,
+                                     "Update-filters request rejected: " << update_result.message);
+                            return json_error(400, update_result.message);
+                        }
+                        return json_error_500(ctx.username,
+                                              index_name,
+                                              req.url,
+                                              update_result.message);
+                    }
+                    return crow::response(200,
+                                          std::to_string(update_result.value_or_throw())
+                                                  + " filters updated");
 
                 } catch(const std::runtime_error& e) {
                     LOG_WARN(1054, ctx.username, index_name, "Update-filters request rejected: " << e.what());

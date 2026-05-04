@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <filesystem>
 #include <string>
+#include <utility>
 #include <vector>
 #include "filter/filter.hpp"
 #include "json/nlohmann_json.hpp"
@@ -8,6 +9,17 @@
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
+
+static void expect_ok(const ndd::OperationResult<>& result) {
+    EXPECT_TRUE(result.ok()) << result.message;
+}
+
+template <typename T>
+static T unwrap_ok(ndd::OperationResult<T> result) {
+    EXPECT_TRUE(result.ok()) << result.message;
+    EXPECT_TRUE(result.value.has_value());
+    return std::move(*result.value);
+}
 
 TEST(BucketTest, Serialization) {
     ndd::filter::Bucket b;
@@ -55,16 +67,16 @@ TEST_F(FilterTest, CategoryFilterBasics) {
     // ID 2: City=London
     // ID 3: City=Paris
     
-    filter->add_to_filter("city", "Paris", 1);
-    filter->add_to_filter("city", "London", 2);
-    filter->add_to_filter("city", "Paris", 3);
+    expect_ok(filter->add_to_filter("city", "Paris", 1));
+    expect_ok(filter->add_to_filter("city", "London", 2));
+    expect_ok(filter->add_to_filter("city", "Paris", 3));
 
     // Query for City=Paris
     json query = json::array({
         {{"city", {{"$eq", "Paris"}}}}
     });
 
-    std::vector<ndd::idInt> ids = filter->getIdsMatchingFilter(query);
+    std::vector<ndd::idInt> ids = unwrap_ok(filter->getIdsMatchingFilter(query));
     
     // Should find 1 and 3
     EXPECT_EQ(ids.size(), 2);
@@ -79,15 +91,15 @@ TEST_F(FilterTest, BooleanFilterBasics) {
     // ID 11: Active=false
     
     // Using JSON add interface for variety
-    filter->add_filters_from_json(10, R"({"is_active": true})");
-    filter->add_filters_from_json(11, R"({"is_active": false})");
+    expect_ok(filter->add_filters_from_json(10, R"({"is_active": true})"));
+    expect_ok(filter->add_filters_from_json(11, R"({"is_active": false})"));
 
     // Query Active=true
     json query_true = json::array({
         {{"is_active", {{"$eq", true}}}}
     });
     
-    auto ids_true = filter->getIdsMatchingFilter(query_true);
+    auto ids_true = unwrap_ok(filter->getIdsMatchingFilter(query_true));
     EXPECT_EQ(ids_true.size(), 1);
     EXPECT_EQ(ids_true[0], 10);
 
@@ -96,7 +108,7 @@ TEST_F(FilterTest, BooleanFilterBasics) {
         {{"is_active", {{"$eq", false}}}}
     });
     
-    auto ids_false = filter->getIdsMatchingFilter(query_false);
+    auto ids_false = unwrap_ok(filter->getIdsMatchingFilter(query_false));
     EXPECT_EQ(ids_false.size(), 1);
     EXPECT_EQ(ids_false[0], 11);
 }
@@ -106,16 +118,16 @@ TEST_F(FilterTest, NumericFilterBasics) {
     // ID 101: Age=30
     // ID 102: Age=35
     
-    filter->add_filters_from_json(100, R"({"age": 25})");
-    filter->add_filters_from_json(101, R"({"age": 30})");
-    filter->add_filters_from_json(102, R"({"age": 35})");
+    expect_ok(filter->add_filters_from_json(100, R"({"age": 25})"));
+    expect_ok(filter->add_filters_from_json(101, R"({"age": 30})"));
+    expect_ok(filter->add_filters_from_json(102, R"({"age": 35})"));
 
     // Range Query: 20 <= Age <= 32
     json query_range = json::array({
         {{"age", {{"$range", {20, 32}}}}}
     });
 
-    auto ids = filter->getIdsMatchingFilter(query_range);
+    auto ids = unwrap_ok(filter->getIdsMatchingFilter(query_range));
     
     // Should match 100 (25) and 101 (30)
     EXPECT_EQ(ids.size(), 2);
@@ -132,14 +144,14 @@ TEST_F(FilterTest, FloatNumericFilter) {
     // ID 1: Price=10.5
     // ID 2: Price=20.0
     
-    filter->add_filters_from_json(1, R"({"price": 10.5})");
-    filter->add_filters_from_json(2, R"({"price": 20.0})");
+    expect_ok(filter->add_filters_from_json(1, R"({"price": 10.5})"));
+    expect_ok(filter->add_filters_from_json(2, R"({"price": 20.0})"));
 
     json query = json::array({
         {{"price", {{"$range", {10.0, 15.0}}}}}
     });
 
-    auto ids = filter->getIdsMatchingFilter(query);
+    auto ids = unwrap_ok(filter->getIdsMatchingFilter(query));
     EXPECT_EQ(ids.size(), 1);
     EXPECT_EQ(ids[0], 1);
 }
@@ -149,9 +161,9 @@ TEST_F(FilterTest, MixedAndLogic) {
     // ID 2: City=NY, Age=40 (Age fail)
     // ID 3: City=LA, Age=30 (City fail)
     
-    filter->add_filters_from_json(1, R"({"city": "NY", "age": 30})");
-    filter->add_filters_from_json(2, R"({"city": "NY", "age": 40})");
-    filter->add_filters_from_json(3, R"({"city": "LA", "age": 30})");
+    expect_ok(filter->add_filters_from_json(1, R"({"city": "NY", "age": 30})"));
+    expect_ok(filter->add_filters_from_json(2, R"({"city": "NY", "age": 40})"));
+    expect_ok(filter->add_filters_from_json(3, R"({"city": "LA", "age": 30})"));
 
     // Filter: City=NY AND Age < 35
     json query = json::array({
@@ -159,7 +171,7 @@ TEST_F(FilterTest, MixedAndLogic) {
         {{"age", {{"$range", {0, 35}}}}}
     });
 
-    auto ids = filter->getIdsMatchingFilter(query);
+    auto ids = unwrap_ok(filter->getIdsMatchingFilter(query));
     EXPECT_EQ(ids.size(), 1);
     EXPECT_EQ(ids[0], 1);
 }
@@ -169,51 +181,97 @@ TEST_F(FilterTest, InOperator) {
     // ID 2: Color=Blue
     // ID 3: Color=Green
     
-    filter->add_to_filter("color", "Red", 1);
-    filter->add_to_filter("color", "Blue", 2);
-    filter->add_to_filter("color", "Green", 3);
+    expect_ok(filter->add_to_filter("color", "Red", 1));
+    expect_ok(filter->add_to_filter("color", "Blue", 2));
+    expect_ok(filter->add_to_filter("color", "Green", 3));
 
     // Query: Color IN [Red, Green]
     json query = json::array({
         {{"color", {{"$in", {"Red", "Green"}}}}}
     });
 
-    auto ids = filter->getIdsMatchingFilter(query);
+    auto ids = unwrap_ok(filter->getIdsMatchingFilter(query));
     EXPECT_EQ(ids.size(), 2); // 1 and 3
 }
 
 TEST_F(FilterTest, DeleteFilter) {
     // ID 1: Tag=A
-    filter->add_to_filter("tag", "A", 1);
+    expect_ok(filter->add_to_filter("tag", "A", 1));
     
     json query = json::array({
         {{"tag", {{"$eq", "A"}}}}
     });
     
-    EXPECT_EQ(filter->countIdsMatchingFilter(query), 1);
+    EXPECT_EQ(unwrap_ok(filter->countIdsMatchingFilter(query)), 1);
     
     // Remove functionality test
     // Usually removal requires us to know what to remove or we remove entire ID?
     // The Filter class has: remove_from_filter(field, value, id)
     
-    filter->remove_from_filter("tag", "A", 1);
+    expect_ok(filter->remove_from_filter("tag", "A", 1));
     
-    EXPECT_EQ(filter->countIdsMatchingFilter(query), 0);
+    EXPECT_EQ(unwrap_ok(filter->countIdsMatchingFilter(query)), 0);
 }
 
 TEST_F(FilterTest, NumericDelete) {
     // ID 1: Score=100
-    filter->add_filters_from_json(1, R"({"score": 100})");
+    expect_ok(filter->add_filters_from_json(1, R"({"score": 100})"));
     
     // Check it exists
     json query = json::array({
         {{"score", {{"$eq", 100}}}}
     });
-    EXPECT_EQ(filter->countIdsMatchingFilter(query), 1);
+    EXPECT_EQ(unwrap_ok(filter->countIdsMatchingFilter(query)), 1);
     
     // Remove
     // remove_filters_from_json uses the whole object
-    filter->remove_filters_from_json(1, R"({"score": 100})");
+    expect_ok(filter->remove_filters_from_json(1, R"({"score": 100})"));
     
-    EXPECT_EQ(filter->countIdsMatchingFilter(query), 0);
+    EXPECT_EQ(unwrap_ok(filter->countIdsMatchingFilter(query)), 0);
+}
+
+TEST_F(FilterTest, RejectsMalformedFilterJson) {
+    auto result = filter->add_filters_from_json(1, R"({"city": "Paris")");
+
+    EXPECT_FALSE(result.ok());
+    EXPECT_EQ(result.code, 1);
+}
+
+TEST_F(FilterTest, RejectsUnsupportedFilterType) {
+    auto result = filter->add_filters_from_json(1, R"({"tags": ["a", "b"]})");
+
+    EXPECT_FALSE(result.ok());
+    EXPECT_EQ(result.code, 2);
+}
+
+TEST_F(FilterTest, RejectsSchemaTypeMismatch) {
+    expect_ok(filter->add_filters_from_json(1, R"({"age": 30})"));
+
+    auto result = filter->add_filters_from_json(2, R"({"age": "thirty"})");
+
+    EXPECT_FALSE(result.ok());
+    EXPECT_EQ(result.code, 3);
+}
+
+TEST_F(FilterTest, RejectsInvalidOperator) {
+    json query = json::array({
+        {{"city", {{"$contains", "Paris"}}}}
+    });
+
+    auto result = filter->getIdsMatchingFilter(query);
+
+    EXPECT_FALSE(result.ok());
+    EXPECT_EQ(result.code, 2);
+}
+
+TEST_F(FilterTest, RejectsInvalidRange) {
+    expect_ok(filter->add_filters_from_json(1, R"({"score": 100})"));
+    json query = json::array({
+        {{"score", {{"$range", {200, 100}}}}}
+    });
+
+    auto result = filter->getIdsMatchingFilter(query);
+
+    EXPECT_FALSE(result.ok());
+    EXPECT_EQ(result.code, 2);
 }

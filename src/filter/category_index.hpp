@@ -124,6 +124,7 @@ namespace ndd {
                             + mdbx_strerror(rc));
                 }
 
+                // Open named DB for category/boolean
                 rc = mdbx_dbi_open(txn, "category_idx", MDBX_CREATE, &dbi_);
                 if(rc != MDBX_SUCCESS) {
                     mdbx_txn_abort(txn);
@@ -295,6 +296,7 @@ namespace ndd {
                 return store_bitmap_internal(key, bitmap_result.value_or_throw());
             }
 
+            // Expose key formatting for external batching logic
             static std::string make_key(const std::string& field, const std::string& value) {
                 return format_filter_key(field, value);
             }

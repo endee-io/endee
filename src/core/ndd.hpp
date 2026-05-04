@@ -990,7 +990,7 @@ public:
         entry->alg = std::move(new_alg);
     }
 
-    /*
+    /**
      * Adds or updates a batch of vectors and their associated filter documents.
      *
      * Return codes:
@@ -1350,8 +1350,10 @@ public:
         }
     }
 
-    /*
+    /**
      * Deletes vectors from id mapper, filter indexes, sparse storage, and HNSW live set.
+     * XXX: Does not delete meta, vector data Meta and vector data will be overwritten when
+     * the id is reused.
      *
      * Return codes:
      * 0 = success
@@ -1409,7 +1411,7 @@ public:
         }
     }
 
-    /*
+    /**
      * Deletes all vectors matching a filter query.
      *
      * Return codes:
@@ -1471,7 +1473,7 @@ public:
         }
     }
 
-    /*
+    /**
      * Replaces filter documents for a batch of vectors.
      *
      * Return codes:
@@ -1527,8 +1529,10 @@ public:
         }
     }
 
-    /*
+    /**
      * Deletes one vector by string id and removes its filter index entries.
+     * The meta and filter will be deleted and the vector will be marked as
+     * deleted in HNSW. The id will be put in the deleted_ids in id mapper and will be reused for new vectors.
      *
      * Return codes:
      * 0 = success; value is false when the vector id does not exist
@@ -1571,7 +1575,7 @@ public:
         }
     }
 
-    /*
+    /**
      * Searches an index with optional filter bitmap computation.
      *
      * Return codes:

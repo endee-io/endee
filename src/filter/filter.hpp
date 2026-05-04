@@ -1,5 +1,6 @@
 #pragma once
 
+// System includes
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
@@ -25,10 +26,11 @@
 enum class FieldType : uint8_t {
     Unknown = 0,
     String = 1,
-    Number = 2,
+    Number = 2, // Unified Integer and Float
     Bool = 4
 };
 
+// Filter Functor for HNSW
 class BitMapFilterFunctor : public hnswlib::BaseFilterFunctor {
     const ndd::RoaringBitmap& bitmap_;
 
@@ -42,6 +44,7 @@ public:
 class Filter {
 private:
     MDBX_env* env_;
+    // Used for schema storage
     MDBX_dbi dbi_;
     std::string index_id_;
     std::string path_;
@@ -219,12 +222,14 @@ private:
                                      + mdbx_strerror(rc));
         }
 
+        // max DBs to allow multiple databases (main + schema + numeric_forward + numeric_inverted)
         rc = mdbx_env_set_maxdbs(env_, 10);
         if(rc != MDBX_SUCCESS) {
             throw std::runtime_error(std::string("Failed to configure max DBs for filters: ")
                                      + mdbx_strerror(rc));
         }
 
+        // Set geometry for auto-grow using the filter map size settings
         rc = mdbx_env_set_geometry(env_,
                                    -1,
                                    1ULL << settings::FILTER_MAP_SIZE_BITS,
@@ -266,6 +271,7 @@ private:
                                      + mdbx_strerror(rc));
         }
 
+        // Initialize Indices
         numeric_index_ = std::make_unique<ndd::filter::NumericIndex>(env_);
         category_index_ = std::make_unique<ndd::filter::CategoryIndex>(env_);
 
@@ -329,6 +335,7 @@ public:
                 return {1, "Filter operator must be a single-field object"};
             }
 
+            // Check schema for field type
             FieldType type = FieldType::Unknown;
             {
                 std::lock_guard<std::mutex> lock(schema_mutex_);
@@ -433,6 +440,7 @@ public:
             partial_results.push_back(std::move(or_result));
         }
 
+        // Optimization: Sort by cardinality (smallest first)
         std::sort(partial_results.begin(),
                   partial_results.end(),
                   [](const ndd::RoaringBitmap& left, const ndd::RoaringBitmap& right) {
@@ -446,6 +454,8 @@ public:
         ndd::RoaringBitmap final_result = partial_results[0];
         for(size_t i = 1; i < partial_results.size(); ++i) {
             final_result &= partial_results[i];
+
+            // If result becomes empty, stop early
             if(final_result.isEmpty()) {
                 return {SUCCESS, "", std::move(final_result)};
             }
@@ -454,8 +464,8 @@ public:
         return {SUCCESS, "", std::move(final_result)};
     }
 
-    /*
-     * Returns numeric ids matching a filter query.
+    /**
+     * Returns numeric ids matching a filter query based on the provided JSON filter array
      *
      * Return codes:
      * 0 = success
@@ -544,11 +554,13 @@ public:
             return {SUCCESS, ""};
         }
 
+        // Create a map to collect IDs for each label filter
         std::unordered_map<std::string, std::vector<ndd::idInt>> label_filter_to_ids;
         label_filter_to_ids.reserve(id_filter_pairs.size());
         std::vector<ndd::filter::NumericBatchEntry> numeric_filter_entries;
         numeric_filter_entries.reserve(id_filter_pairs.size());
 
+        // Group IDs by filter
         for(const auto& [numeric_id, filter_json] : id_filter_pairs) {
             nlohmann::json parsed;
             try {
@@ -606,6 +618,13 @@ public:
             }
         }
 
+        /**
+         * XXX: For transactional correctness of filter adds, all the filters
+         * should be added in a single transaction.
+         * For now, they are being added in two different transactions.
+         * one for numeric_index and other for labels.
+         */
+
         if(!numeric_filter_entries.empty()) {
             auto numeric_result = numeric_index_->put_batch(numeric_filter_entries);
             if(!numeric_result.ok()) {
@@ -613,6 +632,7 @@ public:
             }
         }
 
+        // Process each filter with its batch of IDs
         for(const auto& [filter_key, ids] : label_filter_to_ids) {
             auto add_result = add_to_filter_batch(filter_key, ids);
             if(!add_result.ok()) {
@@ -702,6 +722,7 @@ public:
                 }
                 remove_result = remove_from_filter(field, category_result.value_or_throw(), numeric_id);
             } else if(value.is_number()) {
+                // Remove from Numeric Index
                 remove_result = numeric_index_->remove(field, numeric_id);
             } else if(value.is_boolean()) {
                 remove_result = remove_from_filter(field,

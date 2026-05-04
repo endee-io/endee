@@ -7,9 +7,11 @@
 #include <algorithm>
 #include <stdexcept>
 #include <iostream>
+#include <utility>
 #include "mdbx/mdbx.h"
 #include "../utils/log.hpp"
 #include "../core/types.hpp"
+#include "../utils/types.hpp"
 
 namespace ndd {
     namespace filter {
@@ -233,7 +235,6 @@ namespace ndd {
                 return field + ":" + std::to_string(id);
             }
 
-            // Key Format: [Field]:[BigEndian_BaseValue]
             std::string make_bucket_key(const std::string& field, uint32_t start_val) {
                 uint32_t be_val = 0;
 #if defined(__GNUC__) || defined(__clang__)
@@ -243,12 +244,14 @@ namespace ndd {
                          | ((start_val >> 8) & 0xff00) | ((start_val << 24) & 0xff000000);
 #endif
                 std::string key = field + ":";
-                key.append((char*)&be_val, 4);
+                key.append(reinterpret_cast<char*>(&be_val), 4);
                 return key;
             }
 
             uint32_t parse_bucket_key_val(const std::string& key) {
-                if (key.size() < 4) return 0;
+                if(key.size() < 4) {
+                    return 0;
+                }
                 uint32_t be_val;
                 std::memcpy(&be_val, key.data() + key.size() - 4, 4);
 #if defined(__GNUC__) || defined(__clang__)
@@ -259,424 +262,627 @@ namespace ndd {
 #endif
             }
 
-        public:
-            NumericIndex(MDBX_env* env) : env_(env) {
-                MDBX_txn* txn;
-                if (mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn) == MDBX_SUCCESS) {
-                    mdbx_dbi_open(txn, "numeric_forward", MDBX_CREATE, &forward_dbi_);
-                    mdbx_dbi_open(txn, "numeric_inverted", MDBX_CREATE, &inverted_dbi_);
-                    mdbx_txn_commit(txn);
-                }
-            }
-
-            /**
-             * TODO:
-             * 1. comprehensive error print and return.
-             * If there is an error here, there should be a way to reverse
-             * vector add operation.
+            /*
+             * Removes one id from the numeric inverted bucket that currently owns its old value.
+             *
+             * Return codes:
+             * 0 = success
+             * 100 = MDBX cursor, read, delete, or write failure; caller should log ERROR and return HTTP 500
+             * 200 = corrupt numeric bucket payload; caller should log ERROR and return HTTP 500
              */
-            void put_batch(const std::vector<NumericBatchEntry>& entries) {
-                if(entries.empty()) {
-                    return;
-                }
-
-                MDBX_txn* txn;
-                mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
-                try {
-                    for(const auto& entry : entries) {
-                        put_internal(txn, entry.field, entry.id, entry.value);
-                    }
-                    mdbx_txn_commit(txn);
-                } catch(...) {
-                    mdbx_txn_abort(txn);
-                    throw;
-                }
-            }
-
-            void remove(const std::string& field, ndd::idInt id) {
-                MDBX_txn* txn;
-                mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
-                try {
-                    std::string fwd_key_str = make_forward_key(field, id);
-                    MDBX_val fwd_key{const_cast<char*>(fwd_key_str.data()), fwd_key_str.size()};
-                    MDBX_val fwd_val;
-
-                    if(mdbx_get(txn, forward_dbi_, &fwd_key, &fwd_val) == MDBX_SUCCESS) {
-                        uint32_t old_val;
-                        std::memcpy(&old_val, fwd_val.iov_base, sizeof(uint32_t));
-                        remove_from_buckets(txn, field, old_val, id);
-                        mdbx_del(txn, forward_dbi_, &fwd_key, nullptr);
-                    }
-
-                    mdbx_txn_commit(txn);
-                } catch(...) {
-                    mdbx_txn_abort(txn);
-                    throw;
-                }
-            }
-
-        private:
-            void put_internal(MDBX_txn* txn, const std::string& field, ndd::idInt id, uint32_t value) {
-                // 1. Check Forward Index
-                std::string fwd_key_str = make_forward_key(field, id);
-                MDBX_val fwd_key{const_cast<char*>(fwd_key_str.data()), fwd_key_str.size()};
-                MDBX_val fwd_val;
-
-                if (mdbx_get(txn, forward_dbi_, &fwd_key, &fwd_val) == MDBX_SUCCESS) {
-                    uint32_t old_val;
-                    std::memcpy(&old_val, fwd_val.iov_base, 4);
-                    if (old_val == value) return;
-                    remove_from_buckets(txn, field, old_val, id);
-                }
-
-                // 2. Update Forward
-                MDBX_val new_val_data{&value, sizeof(uint32_t)};
-                mdbx_put(txn, forward_dbi_, &fwd_key, &new_val_data, MDBX_UPSERT);
-
-                // 3. Add to Inverted Buckets
-                add_to_buckets(txn, field, value, id);
-            }
-
-            void remove_from_buckets(MDBX_txn* txn, const std::string& field, uint32_t value, ndd::idInt id) {
-                // Find bucket
+            ndd::OperationResult<> remove_from_buckets(MDBX_txn* txn,
+                                                       const std::string& field,
+                                                       uint32_t value,
+                                                       ndd::idInt id) {
                 std::string bkey_str = make_bucket_key(field, value);
                 MDBX_val key{const_cast<char*>(bkey_str.data()), bkey_str.size()};
                 MDBX_val data;
-                MDBX_cursor* cursor;
-                mdbx_cursor_open(txn, inverted_dbi_, &cursor);
+                MDBX_cursor* cursor = nullptr;
+                int rc = mdbx_cursor_open(txn, inverted_dbi_, &cursor);
+                if(rc != MDBX_SUCCESS) {
+                    return {100, "Failed to open numeric bucket remove cursor: "
+                                         + std::string(mdbx_strerror(rc))};
+                }
 
-                // Scan backward to find bucket covering 'value'
-                int rc = mdbx_cursor_get(cursor, &key, &data, MDBX_SET_RANGE);
-                
-                // Logic to find correct bucket:
-                std::string found_key;
-
-                if (rc == MDBX_SUCCESS) {
-                    found_key = std::string((char*)key.iov_base, key.iov_len);
-                    // Check if we are in right field & range
-                    if (found_key.rfind(field + ":", 0) != 0 || parse_bucket_key_val(found_key) > value) {
-                            rc = mdbx_cursor_get(cursor, &key, &data, MDBX_PREV);
+                rc = mdbx_cursor_get(cursor, &key, &data, MDBX_SET_RANGE);
+                if(rc == MDBX_SUCCESS) {
+                    std::string found_key(static_cast<char*>(key.iov_base), key.iov_len);
+                    if(found_key.rfind(field + ":", 0) != 0
+                       || parse_bucket_key_val(found_key) > value) {
+                        rc = mdbx_cursor_get(cursor, &key, &data, MDBX_PREV);
                     }
-                } else if (rc == MDBX_NOTFOUND) {
-                    /**
-                     * The only possible bucket that could still contain
-                     * value is the very last bucket in the database.
-                     * Hence jumping there.
-                     */
-                   rc = mdbx_cursor_get(cursor, &key, &data, MDBX_LAST);
+                } else if(rc == MDBX_NOTFOUND) {
+                    rc = mdbx_cursor_get(cursor, &key, &data, MDBX_LAST);
                 }
 
-                // Should be at correct bucket now
-                if (rc == MDBX_SUCCESS) {
-                     found_key = std::string((char*)key.iov_base, key.iov_len);
-                     if (found_key.rfind(field + ":", 0) == 0) {
-                         uint32_t bucket_base = parse_bucket_key_val(found_key);
-                         if (value >= bucket_base) {
-                             Bucket b = Bucket::deserialize(data.iov_base, data.iov_len, bucket_base);
-                             if (b.remove(id)) {
-                                 // Save back or Delete if empty
-                                 if (b.is_empty()) {
-                                     mdbx_cursor_del(cursor, static_cast<MDBX_put_flags_t>(0));
-                                 } else {
-                                     auto bytes = b.serialize();
-                                     MDBX_val new_data{bytes.data(), bytes.size()};
-                                     mdbx_cursor_put(cursor, &key, &new_data, MDBX_CURRENT);
-                                 }
-                             }
-                         }
-                     }
+                if(rc != MDBX_SUCCESS) {
+                    mdbx_cursor_close(cursor);
+                    if(rc == MDBX_NOTFOUND) {
+                        return {SUCCESS, ""};
+                    }
+                    return {100, "Failed to locate numeric bucket for remove: "
+                                         + std::string(mdbx_strerror(rc))};
                 }
+
+                std::string found_key(static_cast<char*>(key.iov_base), key.iov_len);
+                if(found_key.rfind(field + ":", 0) != 0) {
+                    mdbx_cursor_close(cursor);
+                    return {SUCCESS, ""};
+                }
+
+                uint32_t bucket_base = parse_bucket_key_val(found_key);
+                if(value < bucket_base) {
+                    mdbx_cursor_close(cursor);
+                    return {SUCCESS, ""};
+                }
+
+                try {
+                    Bucket bucket = Bucket::deserialize(data.iov_base, data.iov_len, bucket_base);
+                    if(bucket.remove(id)) {
+                        if(bucket.is_empty()) {
+                            rc = mdbx_cursor_del(cursor, static_cast<MDBX_put_flags_t>(0));
+                            if(rc != MDBX_SUCCESS) {
+                                mdbx_cursor_close(cursor);
+                                return {100, "Failed to delete empty numeric bucket: "
+                                                     + std::string(mdbx_strerror(rc))};
+                            }
+                        } else {
+                            auto bytes = bucket.serialize();
+                            MDBX_val new_data{bytes.data(), bytes.size()};
+                            rc = mdbx_cursor_put(cursor, &key, &new_data, MDBX_CURRENT);
+                            if(rc != MDBX_SUCCESS) {
+                                mdbx_cursor_close(cursor);
+                                return {100, "Failed to update numeric bucket after remove: "
+                                                     + std::string(mdbx_strerror(rc))};
+                            }
+                        }
+                    }
+                } catch(const std::exception& e) {
+                    mdbx_cursor_close(cursor);
+                    return {200, "Corrupt numeric bucket while removing id: "
+                                         + std::string(e.what())};
+                }
+
                 mdbx_cursor_close(cursor);
+                return {SUCCESS, ""};
             }
 
-            void add_to_buckets(MDBX_txn* txn, const std::string& field, uint32_t value, ndd::idInt id) {
-                MDBX_cursor* cursor;
-                mdbx_cursor_open(txn, inverted_dbi_, &cursor);
+            /*
+             * Adds one id/value pair into the numeric inverted bucket index.
+             *
+             * Return codes:
+             * 0 = success
+             * 100 = MDBX cursor, read, or write failure; caller should log ERROR and return HTTP 500
+             * 200 = corrupt numeric bucket payload or invalid bucket invariant; caller should log ERROR and return HTTP 500
+             */
+            ndd::OperationResult<> add_to_buckets(MDBX_txn* txn,
+                                                  const std::string& field,
+                                                  uint32_t value,
+                                                  ndd::idInt id) {
+                MDBX_cursor* cursor = nullptr;
+                int rc = mdbx_cursor_open(txn, inverted_dbi_, &cursor);
+                if(rc != MDBX_SUCCESS) {
+                    return {100, "Failed to open numeric bucket add cursor: "
+                                         + std::string(mdbx_strerror(rc))};
+                }
 
-                // Find candidate bucket
                 std::string search_key = make_bucket_key(field, value);
                 MDBX_val key{const_cast<char*>(search_key.data()), search_key.size()};
                 MDBX_val data;
 
-                int rc = mdbx_cursor_get(cursor, &key, &data, MDBX_SET_RANGE);
-                
-                bool create_new = false;
+                rc = mdbx_cursor_get(cursor, &key, &data, MDBX_SET_RANGE);
+                if(rc == MDBX_SUCCESS) {
+                    std::string found_key(static_cast<char*>(key.iov_base), key.iov_len);
+                    if(found_key.rfind(field + ":", 0) != 0
+                       || parse_bucket_key_val(found_key) > value) {
+                        int prev_rc = mdbx_cursor_get(cursor, &key, &data, MDBX_PREV);
+                        if(prev_rc == MDBX_SUCCESS) {
+                            rc = prev_rc;
+                        } else if(prev_rc != MDBX_NOTFOUND) {
+                            mdbx_cursor_close(cursor);
+                            return {100, "Failed to seek previous numeric bucket: "
+                                                 + std::string(mdbx_strerror(prev_rc))};
+                        } else {
+                            rc = MDBX_NOTFOUND;
+                        }
+                    }
+                } else if(rc == MDBX_NOTFOUND) {
+                    rc = mdbx_cursor_get(cursor, &key, &data, MDBX_LAST);
+                    if(rc != MDBX_SUCCESS && rc != MDBX_NOTFOUND) {
+                        mdbx_cursor_close(cursor);
+                        return {100, "Failed to seek last numeric bucket: "
+                                             + std::string(mdbx_strerror(rc))};
+                    }
+                } else {
+                    mdbx_cursor_close(cursor);
+                    return {100, "Failed to seek numeric bucket: "
+                                         + std::string(mdbx_strerror(rc))};
+                }
+
+                bool create_new = true;
                 std::string target_key_str;
                 uint32_t target_base = 0;
-
-                // Move logic to find predecessor
-                if (rc == MDBX_SUCCESS) {
-                     std::string found_key((char*)key.iov_base, key.iov_len);
-                     if (found_key.rfind(field + ":", 0) != 0 || parse_bucket_key_val(found_key) > value) {
-                         rc = mdbx_cursor_get(cursor, &key, &data, MDBX_PREV);
-                     }
-                } else {
-                    rc = mdbx_cursor_get(cursor, &key, &data, MDBX_LAST);
+                if(rc == MDBX_SUCCESS) {
+                    std::string found_key(static_cast<char*>(key.iov_base), key.iov_len);
+                    if(found_key.rfind(field + ":", 0) == 0) {
+                        target_base = parse_bucket_key_val(found_key);
+                        if(value >= target_base
+                           && (static_cast<uint64_t>(value) - target_base)
+                                      <= Bucket::MAX_DELTA) {
+                            target_key_str = found_key;
+                            create_new = false;
+                        }
+                    }
                 }
 
-                if (rc == MDBX_SUCCESS) {
-                    std::string found_key((char*)key.iov_base, key.iov_len);
-                    if (found_key.rfind(field + ":", 0) == 0) {
-                        target_base = parse_bucket_key_val(found_key);
-                        // Check range condition
-                        if (value >= target_base && (static_cast<uint64_t>(value) - target_base) <= Bucket::MAX_DELTA) {
-                             target_key_str = found_key;
-                        } else {
-                            create_new = true;
+                try {
+                    if(create_new) {
+                        Bucket bucket;
+                        bucket.base_value = value;
+                        bucket.add(value, id);
+                        auto bytes = bucket.serialize();
+
+                        target_key_str = make_bucket_key(field, value);
+                        MDBX_val k{const_cast<char*>(target_key_str.data()),
+                                   target_key_str.size()};
+                        MDBX_val v{bytes.data(), bytes.size()};
+                        rc = mdbx_put(txn, inverted_dbi_, &k, &v, MDBX_UPSERT);
+                        if(rc != MDBX_SUCCESS) {
+                            mdbx_cursor_close(cursor);
+                            return {100, "Failed to create numeric bucket: "
+                                                 + std::string(mdbx_strerror(rc))};
                         }
                     } else {
-                        create_new = true;
+                        MDBX_val k{const_cast<char*>(target_key_str.data()),
+                                   target_key_str.size()};
+                        MDBX_val v;
+                        rc = mdbx_cursor_get(cursor, &k, &v, MDBX_SET);
+                        if(rc != MDBX_SUCCESS) {
+                            mdbx_cursor_close(cursor);
+                            return {200, "Failed to resync numeric bucket cursor: "
+                                                 + std::string(mdbx_strerror(rc))};
+                        }
+
+                        Bucket bucket = Bucket::deserialize(v.iov_base, v.iov_len, target_base);
+                        if(bucket.ids.size() >= Bucket::MAX_SIZE) {
+                            size_t mid_idx = bucket.ids.size() / 2;
+                            size_t probe_right = mid_idx;
+                            while(probe_right < bucket.deltas.size() && probe_right > 0
+                                  && bucket.deltas[probe_right]
+                                             == bucket.deltas[probe_right - 1]) {
+                                probe_right++;
+                            }
+
+                            if(probe_right < bucket.deltas.size()) {
+                                mid_idx = probe_right;
+                            } else {
+                                size_t probe_left = mid_idx;
+                                while(probe_left > 0
+                                      && bucket.deltas[probe_left]
+                                                 == bucket.deltas[probe_left - 1]) {
+                                    probe_left--;
+                                }
+                                mid_idx = probe_left > 0 ? probe_left : bucket.deltas.size();
+                            }
+
+                            if(mid_idx == bucket.deltas.size()) {
+                                bucket.add(value, id);
+                                auto bytes = bucket.serialize();
+                                MDBX_val k2{const_cast<char*>(target_key_str.data()),
+                                            target_key_str.size()};
+                                MDBX_val v2{bytes.data(), bytes.size()};
+                                rc = mdbx_cursor_put(cursor, &k2, &v2, MDBX_CURRENT);
+                                mdbx_cursor_close(cursor);
+                                if(rc != MDBX_SUCCESS) {
+                                    return {100, "Failed to update overfull numeric bucket: "
+                                                         + std::string(mdbx_strerror(rc))};
+                                }
+                                return {SUCCESS, ""};
+                            }
+
+                            Bucket right_bucket;
+                            right_bucket.base_value = bucket.base_value + bucket.deltas[mid_idx];
+                            for(size_t i = mid_idx; i < bucket.deltas.size(); ++i) {
+                                right_bucket.add(bucket.base_value + bucket.deltas[i],
+                                                 bucket.ids[i]);
+                            }
+
+                            bucket.deltas.resize(mid_idx);
+                            bucket.ids.resize(mid_idx);
+                            bucket.summary_bitmap = ndd::RoaringBitmap();
+                            for(auto bucket_id : bucket.ids) {
+                                bucket.summary_bitmap.add(bucket_id);
+                            }
+
+                            if(value >= right_bucket.base_value) {
+                                right_bucket.add(value, id);
+                            } else {
+                                bucket.add(value, id);
+                            }
+
+                            auto left_bytes = bucket.serialize();
+                            MDBX_val left_v{left_bytes.data(), left_bytes.size()};
+                            MDBX_val left_k{const_cast<char*>(target_key_str.data()),
+                                            target_key_str.size()};
+                            rc = mdbx_cursor_put(cursor, &left_k, &left_v, MDBX_CURRENT);
+                            if(rc != MDBX_SUCCESS) {
+                                mdbx_cursor_close(cursor);
+                                return {100, "Failed to update split numeric bucket: "
+                                                     + std::string(mdbx_strerror(rc))};
+                            }
+
+                            auto right_bytes = right_bucket.serialize();
+                            std::string right_k_str =
+                                    make_bucket_key(field, right_bucket.base_value);
+                            MDBX_val right_k{const_cast<char*>(right_k_str.data()),
+                                             right_k_str.size()};
+                            MDBX_val right_v{right_bytes.data(), right_bytes.size()};
+                            rc = mdbx_put(txn, inverted_dbi_, &right_k, &right_v, MDBX_UPSERT);
+                            if(rc != MDBX_SUCCESS) {
+                                mdbx_cursor_close(cursor);
+                                return {100, "Failed to write split numeric bucket: "
+                                                     + std::string(mdbx_strerror(rc))};
+                            }
+                        } else {
+                            bucket.add(value, id);
+                            auto bytes = bucket.serialize();
+                            MDBX_val new_data{bytes.data(), bytes.size()};
+                            rc = mdbx_cursor_put(cursor, &k, &new_data, MDBX_CURRENT);
+                            if(rc != MDBX_SUCCESS) {
+                                mdbx_cursor_close(cursor);
+                                return {100, "Failed to update numeric bucket: "
+                                                     + std::string(mdbx_strerror(rc))};
+                            }
+                        }
                     }
-                } else {
-                    create_new = true;
+                } catch(const std::exception& e) {
+                    mdbx_cursor_close(cursor);
+                    return {200, "Corrupt numeric bucket while adding id: "
+                                         + std::string(e.what())};
                 }
 
-                if (create_new) {
-                    // Create new bucket at exact value
-                    Bucket b;
-                    b.base_value = value;
-                    b.add(value, id);
-                    auto bytes = b.serialize();
-                    
-                    target_key_str = make_bucket_key(field, value);
-                    MDBX_val k{const_cast<char*>(target_key_str.data()), target_key_str.size()};
-                    MDBX_val v{bytes.data(), bytes.size()};
-                    mdbx_put(txn, inverted_dbi_, &k, &v, MDBX_UPSERT);
-                    
-                } else {
-                    // Update existing
-                    // We must re-fetch current key/data because cursor move might have updated key/data
-                     MDBX_val k{const_cast<char*>(target_key_str.data()), target_key_str.size()};
-                     MDBX_val v;
-                     if(mdbx_cursor_get(cursor, &k, &v, MDBX_SET) != MDBX_SUCCESS) {
-                         // Should not happen if logic is correct
-                         throw std::runtime_error("Cursor sync fail");
-                     }
-
-                    Bucket b = Bucket::deserialize(v.iov_base, v.iov_len, target_base);
-                    
-                    // Capacity Check
-                    if (b.ids.size() >= Bucket::MAX_SIZE) {
-                         // SPLIT LOGIC
-                         // Sort is maintained by arrays. 
-                         // "Slide Split": Scan right from median
-                         size_t mid_idx = b.ids.size() / 2;
-                         
-                         // Ensure we don't split a group of identical values
-                         size_t probe_right = mid_idx;
-                         while (probe_right < b.deltas.size() && probe_right > 0 && b.deltas[probe_right] == b.deltas[probe_right - 1]) {
-                             probe_right++;
-                         }
-
-                         if (probe_right < b.deltas.size()) {
-                             mid_idx = probe_right;
-                         } else {
-                             // Fallback: Try scanning left
-                             size_t probe_left = mid_idx;
-                             while (probe_left > 0 && b.deltas[probe_left] == b.deltas[probe_left - 1]) {
-                                 probe_left--;
-                             }
-                             
-                             if (probe_left > 0) {
-                                 mid_idx = probe_left;
-                             } else {
-                                 // All identical
-                                 mid_idx = b.deltas.size();
-                             }
-                         }
-                         
-                         // If we hit end, we can't split by value uniqueness
-                         if (mid_idx == b.deltas.size()) {
-                             // Fallback: Just append (overfill) or implement logic to handle identicals.
-                             // For now: Append
-                             b.add(value, id);
-                             auto bytes = b.serialize();
-                             MDBX_val k2{const_cast<char*>(target_key_str.data()), target_key_str.size()};
-                             MDBX_val v2{bytes.data(), bytes.size()};
-                             mdbx_cursor_put(cursor, &k2, &v2, MDBX_CURRENT);
-                             mdbx_cursor_close(cursor);
-                             return;
-                         }
-
-                         // Standard Slide Split
-                         Bucket right_b;
-                         right_b.base_value = b.base_value + b.deltas[mid_idx]; // New base
-                         
-                         // Move entries
-                         for(size_t i=mid_idx; i<b.deltas.size(); ++i) {
-                             right_b.add(b.base_value + b.deltas[i], b.ids[i]);
-                         }
-                         
-                         // Truncate left
-                         b.deltas.resize(mid_idx);
-                         b.ids.resize(mid_idx);
-                         // Rebuild left bitmap
-                         b.summary_bitmap = ndd::RoaringBitmap();
-                         for(auto pid : b.ids) b.summary_bitmap.add(pid);
-
-                         // Now add new value to correct bucket
-                         if (value >= right_b.base_value) {
-                             right_b.add(value, id);
-                         } else {
-                             // If value < right, goes to left. 
-                             // But wait, split point was determined by existing items.
-                             // If new value is >= base+split_delta, it goes right.
-                             // BUT we just cleared right from b.
-                             // Correct logic:
-                             b.add(value, id); // Add to left if it fits range (logic handles delta)
-                             // Oh wait, if we added to left, we might overflow again or break order? 
-                             // Simply: Check which bucket covers it.
-                             // Left covers [Base, RightBase-1]
-                             // Right covers [RightBase, ...]
-                         }
-
-                         // Save Left
-                         auto left_bytes = b.serialize();
-                         MDBX_val left_v{left_bytes.data(), left_bytes.size()};
-                         MDBX_val left_k{const_cast<char*>(target_key_str.data()), target_key_str.size()};
-                         mdbx_cursor_put(cursor, &left_k, &left_v, MDBX_CURRENT);
-
-                         // Save Right
-                         auto right_bytes = right_b.serialize();
-                         std::string right_k_str = make_bucket_key(field, right_b.base_value);
-                         MDBX_val right_k{const_cast<char*>(right_k_str.data()), right_k_str.size()};
-                         MDBX_val right_v{right_bytes.data(), right_bytes.size()};
-                         
-                         // Use put for new key
-                         mdbx_put(txn, inverted_dbi_, &right_k, &right_v, MDBX_UPSERT);
-
-                    } else {
-                        // Normal Insert
-                        b.add(value, id);
-                        auto bytes = b.serialize();
-                        MDBX_val new_data{bytes.data(), bytes.size()};
-                        
-                        // Use cursor put to update current
-                         mdbx_cursor_put(cursor, &k, &new_data, MDBX_CURRENT);
-                    }
-                }
                 mdbx_cursor_close(cursor);
+                return {SUCCESS, ""};
+            }
+
+            /*
+             * Writes one numeric forward entry and updates the inverted buckets inside a caller transaction.
+             *
+             * Return codes:
+             * 0 = success
+             * 100 = MDBX read or write failure; caller should log ERROR and return HTTP 500
+             * 100-199 = propagated MDBX/storage failure from bucket helpers
+             * 200 = corrupt numeric forward value; caller should log ERROR and return HTTP 500
+             * 200-299 = propagated corruption/invariant failure from bucket helpers
+             */
+            ndd::OperationResult<> put_internal(MDBX_txn* txn,
+                                                const std::string& field,
+                                                ndd::idInt id,
+                                                uint32_t value) {
+                std::string fwd_key_str = make_forward_key(field, id);
+                MDBX_val fwd_key{const_cast<char*>(fwd_key_str.data()), fwd_key_str.size()};
+                MDBX_val fwd_val;
+
+                int rc = mdbx_get(txn, forward_dbi_, &fwd_key, &fwd_val);
+                if(rc == MDBX_SUCCESS) {
+                    if(fwd_val.iov_len != sizeof(uint32_t)) {
+                        return {200, "Corrupt numeric forward value for field '" + field + "'"};
+                    }
+                    uint32_t old_val;
+                    std::memcpy(&old_val, fwd_val.iov_base, sizeof(uint32_t));
+                    if(old_val == value) {
+                        return {SUCCESS, ""};
+                    }
+                    auto remove_result = remove_from_buckets(txn, field, old_val, id);
+                    if(!remove_result.ok()) {
+                        return remove_result;
+                    }
+                } else if(rc != MDBX_NOTFOUND) {
+                    return {100, "Failed to read numeric forward value: "
+                                         + std::string(mdbx_strerror(rc))};
+                }
+
+                MDBX_val new_val_data{&value, sizeof(uint32_t)};
+                rc = mdbx_put(txn, forward_dbi_, &fwd_key, &new_val_data, MDBX_UPSERT);
+                if(rc != MDBX_SUCCESS) {
+                    return {100, "Failed to write numeric forward value: "
+                                         + std::string(mdbx_strerror(rc))};
+                }
+
+                return add_to_buckets(txn, field, value, id);
             }
 
         public:
-            ndd::RoaringBitmap range(const std::string& field, uint32_t min_val, uint32_t max_val) {
+            NumericIndex(MDBX_env* env) :
+                env_(env) {
+                MDBX_txn* txn = nullptr;
+                int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
+                if(rc != MDBX_SUCCESS) {
+                    throw std::runtime_error(std::string("Failed to begin NumericIndex init: ")
+                                             + mdbx_strerror(rc));
+                }
+
+                rc = mdbx_dbi_open(txn, "numeric_forward", MDBX_CREATE, &forward_dbi_);
+                if(rc != MDBX_SUCCESS) {
+                    mdbx_txn_abort(txn);
+                    throw std::runtime_error(std::string("Failed to open numeric_forward dbi: ")
+                                             + mdbx_strerror(rc));
+                }
+
+                rc = mdbx_dbi_open(txn, "numeric_inverted", MDBX_CREATE, &inverted_dbi_);
+                if(rc != MDBX_SUCCESS) {
+                    mdbx_txn_abort(txn);
+                    throw std::runtime_error(std::string("Failed to open numeric_inverted dbi: ")
+                                             + mdbx_strerror(rc));
+                }
+
+                rc = mdbx_txn_commit(txn);
+                if(rc != MDBX_SUCCESS) {
+                    throw std::runtime_error(std::string("Failed to commit NumericIndex init: ")
+                                             + mdbx_strerror(rc));
+                }
+            }
+
+            /*
+             * Writes a batch of numeric filter entries in one MDBX write transaction.
+             *
+             * Return codes:
+             * 0 = success
+             * 100 = MDBX transaction or commit failure; caller should log ERROR and return HTTP 500
+             * 100-199 = propagated MDBX/storage failure from per-entry writes
+             * 200-299 = propagated corruption/invariant failure from per-entry writes
+             */
+            ndd::OperationResult<> put_batch(const std::vector<NumericBatchEntry>& entries) {
+                if(entries.empty()) {
+                    return {SUCCESS, ""};
+                }
+
+                MDBX_txn* txn = nullptr;
+                int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
+                if(rc != MDBX_SUCCESS) {
+                    return {100, "Failed to begin numeric batch write transaction: "
+                                         + std::string(mdbx_strerror(rc))};
+                }
+
+                for(const auto& entry : entries) {
+                    auto put_result = put_internal(txn, entry.field, entry.id, entry.value);
+                    if(!put_result.ok()) {
+                        mdbx_txn_abort(txn);
+                        return put_result;
+                    }
+                }
+
+                rc = mdbx_txn_commit(txn);
+                if(rc != MDBX_SUCCESS) {
+                    return {100, "Failed to commit numeric batch write transaction: "
+                                         + std::string(mdbx_strerror(rc))};
+                }
+                return {SUCCESS, ""};
+            }
+
+            /*
+             * Removes one id from the numeric forward and inverted indexes for a field.
+             *
+             * Return codes:
+             * 0 = success
+             * 100 = MDBX transaction, read, delete, or commit failure; caller should log ERROR and return HTTP 500
+             * 100-199 = propagated MDBX/storage failure from bucket helpers
+             * 200 = corrupt numeric forward value; caller should log ERROR and return HTTP 500
+             * 200-299 = propagated corruption/invariant failure from bucket helpers
+             */
+            ndd::OperationResult<> remove(const std::string& field, ndd::idInt id) {
+                MDBX_txn* txn = nullptr;
+                int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
+                if(rc != MDBX_SUCCESS) {
+                    return {100, "Failed to begin numeric remove transaction: "
+                                         + std::string(mdbx_strerror(rc))};
+                }
+
+                std::string fwd_key_str = make_forward_key(field, id);
+                MDBX_val fwd_key{const_cast<char*>(fwd_key_str.data()), fwd_key_str.size()};
+                MDBX_val fwd_val;
+
+                rc = mdbx_get(txn, forward_dbi_, &fwd_key, &fwd_val);
+                if(rc == MDBX_NOTFOUND) {
+                    mdbx_txn_abort(txn);
+                    return {SUCCESS, ""};
+                }
+                if(rc != MDBX_SUCCESS) {
+                    mdbx_txn_abort(txn);
+                    return {100, "Failed to read numeric forward value for remove: "
+                                         + std::string(mdbx_strerror(rc))};
+                }
+                if(fwd_val.iov_len != sizeof(uint32_t)) {
+                    mdbx_txn_abort(txn);
+                    return {200, "Corrupt numeric forward value for field '" + field + "'"};
+                }
+
+                uint32_t old_val;
+                std::memcpy(&old_val, fwd_val.iov_base, sizeof(uint32_t));
+                auto remove_result = remove_from_buckets(txn, field, old_val, id);
+                if(!remove_result.ok()) {
+                    mdbx_txn_abort(txn);
+                    return remove_result;
+                }
+
+                rc = mdbx_del(txn, forward_dbi_, &fwd_key, nullptr);
+                if(rc != MDBX_SUCCESS && rc != MDBX_NOTFOUND) {
+                    mdbx_txn_abort(txn);
+                    return {100, "Failed to delete numeric forward value: "
+                                         + std::string(mdbx_strerror(rc))};
+                }
+
+                rc = mdbx_txn_commit(txn);
+                if(rc != MDBX_SUCCESS) {
+                    return {100, "Failed to commit numeric remove transaction: "
+                                         + std::string(mdbx_strerror(rc))};
+                }
+                return {SUCCESS, ""};
+            }
+
+            /*
+             * Computes a bitmap of ids whose numeric field value falls within an inclusive sortable range.
+             *
+             * Return codes:
+             * 0 = success
+             * 100 = MDBX transaction, cursor, or scan failure; caller should log ERROR and return HTTP 500
+             * 200 = corrupt numeric bucket payload; caller should log ERROR and return HTTP 500
+             */
+            ndd::OperationResult<ndd::RoaringBitmap>
+            range(const std::string& field, uint32_t min_val, uint32_t max_val) {
                 ndd::RoaringBitmap result;
-                MDBX_txn* txn;
-                if (mdbx_txn_begin(env_, nullptr, MDBX_TXN_RDONLY, &txn) != MDBX_SUCCESS) return result;
+                MDBX_txn* txn = nullptr;
+                int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_RDONLY, &txn);
+                if(rc != MDBX_SUCCESS) {
+                    return {100, "Failed to begin numeric range transaction: "
+                                         + std::string(mdbx_strerror(rc))};
+                }
 
-                MDBX_cursor* cursor;
-                mdbx_cursor_open(txn, inverted_dbi_, &cursor);
+                MDBX_cursor* cursor = nullptr;
+                rc = mdbx_cursor_open(txn, inverted_dbi_, &cursor);
+                if(rc != MDBX_SUCCESS) {
+                    mdbx_txn_abort(txn);
+                    return {100, "Failed to open numeric range cursor: "
+                                         + std::string(mdbx_strerror(rc))};
+                }
 
-                // 1. Find Start Bucket
                 std::string start_k = make_bucket_key(field, min_val);
                 MDBX_val key{const_cast<char*>(start_k.data()), start_k.size()};
                 MDBX_val data;
 
-                int rc = mdbx_cursor_get(cursor, &key, &data, MDBX_SET_RANGE);
-                if (rc == MDBX_SUCCESS) {
-                    // Check if we need to back up
-                     std::string fkey((char*)key.iov_base, key.iov_len);
-                     if (fkey.rfind(field + ":", 0) != 0 || parse_bucket_key_val(fkey) > min_val) {
-                         // Check prev
-                         MDBX_val p_key = key; 
-                         MDBX_val p_data;
-                         if (mdbx_cursor_get(cursor, &p_key, &p_data, MDBX_PREV) == MDBX_SUCCESS) {
-                              std::string pkey_str((char*)p_key.iov_base, p_key.iov_len);
-                              if (pkey_str.rfind(field + ":", 0) == 0) {
-                                  // Prev is valid start
-                                  key = p_key; data = p_data;
-                                  rc = MDBX_SUCCESS;
-                              }
-                         }
-                     }
-                } else if (rc == MDBX_NOTFOUND) {
-                     rc = mdbx_cursor_get(cursor, &key, &data, MDBX_LAST);
-                     if (rc == MDBX_SUCCESS && data.iov_len > 0) {
-                         std::string fkey((char*)key.iov_base, key.iov_len);
-                         if (fkey.rfind(field + ":", 0) == 0) {
-                             rc = MDBX_SUCCESS;
-                         } else {
-                             rc = MDBX_NOTFOUND;
-                         }
-                     } else {
-                         rc = MDBX_NOTFOUND;
-                     }
+                rc = mdbx_cursor_get(cursor, &key, &data, MDBX_SET_RANGE);
+                if(rc == MDBX_SUCCESS) {
+                    std::string fkey(static_cast<char*>(key.iov_base), key.iov_len);
+                    if(fkey.rfind(field + ":", 0) != 0 || parse_bucket_key_val(fkey) > min_val) {
+                        MDBX_val prev_key = key;
+                        MDBX_val prev_data;
+                        int prev_rc = mdbx_cursor_get(cursor, &prev_key, &prev_data, MDBX_PREV);
+                        if(prev_rc == MDBX_SUCCESS) {
+                            std::string prev_key_str(static_cast<char*>(prev_key.iov_base),
+                                                     prev_key.iov_len);
+                            if(prev_key_str.rfind(field + ":", 0) == 0) {
+                                key = prev_key;
+                                data = prev_data;
+                            }
+                        } else if(prev_rc != MDBX_NOTFOUND) {
+                            mdbx_cursor_close(cursor);
+                            mdbx_txn_abort(txn);
+                            return {100, "Failed to seek previous numeric range bucket: "
+                                                 + std::string(mdbx_strerror(prev_rc))};
+                        }
+                    }
+                } else if(rc == MDBX_NOTFOUND) {
+                    rc = mdbx_cursor_get(cursor, &key, &data, MDBX_LAST);
+                    if(rc == MDBX_SUCCESS) {
+                        std::string fkey(static_cast<char*>(key.iov_base), key.iov_len);
+                        if(fkey.rfind(field + ":", 0) != 0) {
+                            rc = MDBX_NOTFOUND;
+                        }
+                    } else if(rc != MDBX_NOTFOUND) {
+                        mdbx_cursor_close(cursor);
+                        mdbx_txn_abort(txn);
+                        return {100, "Failed to seek last numeric range bucket: "
+                                             + std::string(mdbx_strerror(rc))};
+                    }
+                } else {
+                    mdbx_cursor_close(cursor);
+                    mdbx_txn_abort(txn);
+                    return {100, "Failed to seek numeric range bucket: "
+                                         + std::string(mdbx_strerror(rc))};
                 }
 
-                // Iterate forward
-                while (rc == MDBX_SUCCESS) {
-                    std::string cur_key((char*)key.iov_base, key.iov_len);
-                    if (cur_key.rfind(field + ":", 0) != 0) break; // End of field
+                try {
+                    while(rc == MDBX_SUCCESS) {
+                        std::string cur_key(static_cast<char*>(key.iov_base), key.iov_len);
+                        if(cur_key.rfind(field + ":", 0) != 0) {
+                            break;
+                        }
 
-                    uint32_t bucket_base = parse_bucket_key_val(cur_key);
-                    
-                    if (bucket_base > max_val) break; // Past the end
+                        uint32_t bucket_base = parse_bucket_key_val(cur_key);
+                        if(bucket_base > max_val) {
+                            break;
+                        }
 
-                    // Peek Strategy:
-                    // If bucket_base >= min_val, we know the start is covered.
-                    // If we could know NEXT bucket start, we'd know overlap.
-                    // Since we iterate, we can be greedy on read.
-                    
-                    // For now, always deserialize. 
-                    // Potential optimization: Read only bitmap if we are "deep" in the range. 
-                    // e.g. min_val=10, max_val=100. Bucket=20.
-                    // If bucket=20. Next Bucket=30.
-                    // Then Bucket 20 covers [20..30).
-                    // Range [10..100] covers [20..30] fully.
-                    // So we need lookahead. 
-                    
-                    // Simple logic without lookahead:
-                    // Just read full bucket. It's 8KB max (2 pages). 
-                    // It's fast unless we have millions of buckets.
-                    
-                    Bucket b = Bucket::deserialize(data.iov_base, data.iov_len, bucket_base);
-                    
-                    if (b.ids.empty()) {
+                        Bucket bucket = Bucket::deserialize(data.iov_base,
+                                                            data.iov_len,
+                                                            bucket_base);
+                        if(!bucket.ids.empty()) {
+                            uint32_t bucket_min = bucket.get_value(0);
+                            uint32_t bucket_max = bucket.get_value(bucket.ids.size() - 1);
+
+                            if(bucket_min >= min_val && bucket_max <= max_val) {
+                                result |= bucket.summary_bitmap;
+                            } else {
+                                for(size_t i = 0; i < bucket.ids.size(); ++i) {
+                                    uint32_t value = bucket.get_value(i);
+                                    if(value >= min_val && value <= max_val) {
+                                        result.add(bucket.ids[i]);
+                                    }
+                                }
+                            }
+                        }
+
                         rc = mdbx_cursor_get(cursor, &key, &data, MDBX_NEXT);
-                        continue;
                     }
-
-                    uint32_t b_min = b.get_value(0);
-                    uint32_t b_max = b.get_value(b.ids.size()-1);
-
-                    if (b_min >= min_val && b_max <= max_val) {
-                         // Full overlap
-                         result |= b.summary_bitmap;
-                    } else {
-                        // Partial overlap
-                         for(size_t i=0; i<b.ids.size(); ++i) {
-                             uint32_t v = b.get_value(i);
-                             if (v >= min_val && v <= max_val) {
-                                 result.add(b.ids[i]);
-                             }
-                         }
-                    }
-
-                    rc = mdbx_cursor_get(cursor, &key, &data, MDBX_NEXT);
+                } catch(const std::exception& e) {
+                    mdbx_cursor_close(cursor);
+                    mdbx_txn_abort(txn);
+                    return {200, "Corrupt numeric bucket during range scan: "
+                                         + std::string(e.what())};
                 }
 
                 mdbx_cursor_close(cursor);
                 mdbx_txn_abort(txn);
-                return result;
+                if(rc != MDBX_SUCCESS && rc != MDBX_NOTFOUND) {
+                    return {100, "Failed during numeric range scan: "
+                                         + std::string(mdbx_strerror(rc))};
+                }
+                return {SUCCESS, "", std::move(result)};
             }
 
-            bool check_range(const std::string& field, ndd::idInt id, uint32_t min_val, uint32_t max_val) {
-                MDBX_txn* txn;
-                if(mdbx_txn_begin(env_, nullptr, MDBX_TXN_RDONLY, &txn) != MDBX_SUCCESS) return false;
-                
+            /*
+             * Checks whether one id has a numeric field value inside an inclusive sortable range.
+             *
+             * Return codes:
+             * 0 = success
+             * 100 = MDBX transaction or read failure; caller should log ERROR and return HTTP 500
+             * 200 = corrupt numeric forward value; caller should log ERROR and return HTTP 500
+             */
+            ndd::OperationResult<bool>
+            check_range(const std::string& field,
+                        ndd::idInt id,
+                        uint32_t min_val,
+                        uint32_t max_val) {
+                MDBX_txn* txn = nullptr;
+                int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_RDONLY, &txn);
+                if(rc != MDBX_SUCCESS) {
+                    return {100, "Failed to begin numeric check transaction: "
+                                         + std::string(mdbx_strerror(rc))};
+                }
+
                 std::string fwd_key_str = make_forward_key(field, id);
                 MDBX_val fwd_key{const_cast<char*>(fwd_key_str.data()), fwd_key_str.size()};
                 MDBX_val fwd_val;
-                
-                bool match = false;
-                if(mdbx_get(txn, forward_dbi_, &fwd_key, &fwd_val) == MDBX_SUCCESS) {
-                    uint32_t val;
-                    std::memcpy(&val, fwd_val.iov_base, 4);
-                    if(val >= min_val && val <= max_val) match = true;
+
+                rc = mdbx_get(txn, forward_dbi_, &fwd_key, &fwd_val);
+                if(rc == MDBX_NOTFOUND) {
+                    mdbx_txn_abort(txn);
+                    return {SUCCESS, "", false};
                 }
-                
+                if(rc != MDBX_SUCCESS) {
+                    mdbx_txn_abort(txn);
+                    return {100, "Failed to read numeric forward value during check: "
+                                         + std::string(mdbx_strerror(rc))};
+                }
+                if(fwd_val.iov_len != sizeof(uint32_t)) {
+                    mdbx_txn_abort(txn);
+                    return {200, "Corrupt numeric forward value for field '" + field + "'"};
+                }
+
+                uint32_t value;
+                std::memcpy(&value, fwd_val.iov_base, sizeof(uint32_t));
                 mdbx_txn_abort(txn);
-                return match;
+                return {SUCCESS, "", value >= min_val && value <= max_val};
             }
         };
 

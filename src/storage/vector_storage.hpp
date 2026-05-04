@@ -593,19 +593,30 @@ public:
         filter_store_ = std::make_unique<Filter>(base_path + "/filters", index_id_);
     }
     VectorStore::Cursor getCursor() { return vector_store_->getCursor(); }
-    // Get numeric ids of matching filters
-    std::vector<ndd::idInt> getIdsMatchingFilters(
+    /*
+     * Returns numeric ids matching legacy category filter pairs.
+     *
+     * Return codes:
+     * 0 = success
+     * 100-199 = propagated MDBX/storage failure from filter store
+     * 200-299 = propagated corruption/invariant failure from filter store
+     */
+    ndd::OperationResult<std::vector<ndd::idInt>> getIdsMatchingFilters(
             const std::vector<std::pair<std::string, std::string>>& filter_pairs) const {
-        auto bitmap = filter_store_->combine_filters_and(filter_pairs);
+        auto bitmap_result = filter_store_->combine_filters_and(filter_pairs);
+        if(!bitmap_result.ok()) {
+            return {bitmap_result.code, bitmap_result.message};
+        }
+
         std::vector<ndd::idInt> numeric_ids;
-        bitmap.iterate(
+        bitmap_result.value_or_throw().iterate(
                 [](ndd::idInt value, void* ptr) -> bool {
                     auto* ids = static_cast<std::vector<ndd::idInt>*>(ptr);
                     ids->push_back(value);
                     return true;
                 },
                 &numeric_ids);
-        return numeric_ids;
+        return {SUCCESS, "", std::move(numeric_ids)};
     }
 
     bool matches_filter(ndd::idInt numeric_id,
@@ -641,7 +652,8 @@ public:
             }
 
             if(is_numeric_query) {
-                if(!filter_store_->check_numeric(field, numeric_id, op, val)) {
+                auto check_result = filter_store_->check_numeric(field, numeric_id, op, val);
+                if(!check_result.ok() || !check_result.value_or_throw()) {
                     return false;
                 }
             } else {
@@ -716,11 +728,19 @@ public:
         }
     }
 
-    // Optimized batch operation using pre-quantized QuantVectorObject
-    // This avoids double quantization by using already quantized data
-    void store_vectors_batch(const std::vector<std::pair<ndd::idInt, QuantVectorObject>>& vectors) {
+    /*
+     * Stores vectors, metadata, and associated filter documents for one pre-quantized batch.
+     *
+     * Return codes:
+     * 0 = success
+     * 1-99 = propagated filter validation failure from filter store
+     * 100-199 = propagated MDBX/storage failure from filter store
+     * 200-299 = propagated corruption/invariant failure from filter store
+     */
+    ndd::OperationResult<>
+    store_vectors_batch(const std::vector<std::pair<ndd::idInt, QuantVectorObject>>& vectors) {
         if(vectors.empty()) {
-            return;
+            return {SUCCESS, ""};
         }
 
         // Prepare vector and meta batches
@@ -758,8 +778,12 @@ public:
 
         // Process filter data in batch if any
         if(!filter_batch.empty()) {
-            filter_store_->add_filters_from_json_batch(filter_batch);
+            auto filter_result = filter_store_->add_filters_from_json_batch(filter_batch);
+            if(!filter_result.ok()) {
+                return filter_result;
+            }
         }
+        return {SUCCESS, ""};
     }
 
     std::vector<uint8_t> get_vector(ndd::idInt numeric_id) const {
@@ -793,37 +817,69 @@ public:
         return meta_store_->get_meta(numeric_id);
     }
 
-    // NOT used anymore. Deletes filter, meta and vector data.
-    void deletePoint(ndd::idInt numeric_id) {
+    /*
+     * Deletes filter, metadata, and vector data for one numeric id.
+     *
+     * Return codes:
+     * 0 = success
+     * 1-99 = propagated filter validation failure from filter store
+     * 100-199 = propagated MDBX/storage failure from filter store
+     * 200-299 = propagated corruption/invariant failure from filter store
+     */
+    ndd::OperationResult<> deletePoint(ndd::idInt numeric_id) {
         try {
             // Get metadata first to get filter info
             auto meta = meta_store_->get_meta(numeric_id);
 
             // Remove filter entries if they exist
             if(!meta.filter.empty()) {
-                filter_store_->remove_filters_from_json(numeric_id, meta.filter);
+                auto filter_result = filter_store_->remove_filters_from_json(numeric_id, meta.filter);
+                if(!filter_result.ok()) {
+                    return filter_result;
+                }
             }
             // Try to remove both vector and meta data
             vector_store_->remove(numeric_id);
             meta_store_->remove(numeric_id);
+            return {SUCCESS, ""};
         } catch(const std::exception& e) {
-            throw std::runtime_error(std::string("Failed to remove vector and metadata: ")
-                                     + e.what());
+            return {100, std::string("Failed to remove vector and metadata: ") + e.what()};
         }
     }
-    // Deletes filter only.
-    void deleteFilter(ndd::idInt numeric_id, std::string filter) {
-        filter_store_->remove_filters_from_json(numeric_id, filter);
+
+    /*
+     * Deletes only filter index entries for one numeric id.
+     *
+     * Return codes:
+     * 0 = success
+     * 1-99 = propagated filter validation failure from filter store
+     * 100-199 = propagated MDBX/storage failure from filter store
+     * 200-299 = propagated corruption/invariant failure from filter store
+     */
+    ndd::OperationResult<> deleteFilter(ndd::idInt numeric_id, std::string filter) {
+        return filter_store_->remove_filters_from_json(numeric_id, filter);
     }
 
-    // Update filter for a vector
-    void updateFilter(ndd::idInt numeric_id, const std::string& new_filter_json) {
+    /*
+     * Replaces the filter document for one vector.
+     *
+     * Return codes:
+     * 0 = success
+     * 1-99 = propagated filter validation failure from filter store
+     * 100-199 = propagated MDBX/storage failure from filter store
+     * 200-299 = propagated corruption/invariant failure from filter store
+     */
+    ndd::OperationResult<> updateFilter(ndd::idInt numeric_id,
+                                        const std::string& new_filter_json) {
         // Get existing meta
         auto meta = meta_store_->get_meta(numeric_id);
 
         // Remove old filters
         if(!meta.filter.empty()) {
-            filter_store_->remove_filters_from_json(numeric_id, meta.filter);
+            auto remove_result = filter_store_->remove_filters_from_json(numeric_id, meta.filter);
+            if(!remove_result.ok()) {
+                return remove_result;
+            }
         }
 
         // Update meta
@@ -832,8 +888,12 @@ public:
 
         // Add new filters
         if(!new_filter_json.empty()) {
-            filter_store_->add_filters_from_json(numeric_id, new_filter_json);
+            auto add_result = filter_store_->add_filters_from_json(numeric_id, new_filter_json);
+            if(!add_result.ok()) {
+                return add_result;
+            }
         }
+        return {SUCCESS, ""};
     }
 
     ndd::quant::QuantizationLevel getQuantLevel() const { return vector_store_->getQuantLevel(); }

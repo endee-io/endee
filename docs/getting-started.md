@@ -122,6 +122,7 @@ Endee uses special CPU instructions called **SIMD** to run vector searches extre
 | Linux or Windows with Intel or AMD CPU | `avx2` |
 | Server-grade Intel Xeon / AMD EPYC | `avx512` |
 | ARM server (ARMv9) | `sve2` |
+| Generic x86 (no specific SIMD required) | `x86` |
 
 Not sure on Linux? Run this to check:
 ```bash
@@ -157,7 +158,7 @@ docker build \
 | Flag | Meaning |
 |---|---|
 | `--ulimit nofile=100000:100000` | Allows the build process to open up to 100,000 files at once. The compiler opens many files during a large C++ build — without this it can fail. |
-| `--build-arg BUILD_ARCH=avx2` | Passes a build argument into the Dockerfile. This tells it which CPU instruction set to compile for (`avx2`, `avx512`, `neon`, or `sve2`). |
+| `--build-arg BUILD_ARCH=avx2` | Passes a build argument into the Dockerfile. This tells it which CPU instruction set to compile for (`x86`, `avx2`, `avx512`, `neon`, or `sve2`). |
 | `-t endee-oss:latest` | Tags (names) the resulting image as `endee-oss:latest` so you can refer to it by name when running it. |
 | `-f ./infra/Dockerfile` | Points Docker to the Dockerfile — the recipe file that describes how to build the image. |
 | `.` | The build context — Docker copies all files in the current directory into the build environment so the Dockerfile can access them. |
@@ -247,6 +248,7 @@ Before running, you need two things:
 | Linux Intel / AMD | `--avx2` |
 | Server-grade Xeon / EPYC | `--avx512` |
 | ARMv9 server | `--sve2` |
+| Generic x86 (no specific SIMD required) | `--x86` |
 
 ### Run it
 

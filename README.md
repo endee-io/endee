@@ -28,7 +28,7 @@
 
 **Endee** is a high-performance open-source vector database built for AI search and retrieval workloads. It is designed for teams building **RAG pipelines**, **semantic search**, **hybrid search**, recommendation systems, and filtered vector retrieval APIs that need production-oriented performance and control.
 
-Endee combines vector search with filtering, sparse retrieval support, backup workflows, and deployment flexibility across local builds and Docker-based environments. The project is implemented in C++ and optimized for modern CPU targets, including AVX2, AVX512, NEON, and SVE2.
+Endee combines vector search with filtering, sparse retrieval support, backup workflows, and deployment flexibility across local builds and Docker-based environments. The project is implemented in C++ and optimized for modern CPU targets, including x86 (runtime dispatch), AVX2, AVX512, NEON, and SVE2.
 
 If you want the fastest path to evaluate Endee locally, start with the [Getting Started guide](./docs/getting-started.md) or the hosted docs at [docs.endee.io](https://docs.endee.io/quick-start).
 
@@ -86,7 +86,7 @@ Support recommendation, similarity matching, and nearest-neighbor retrieval work
 - **Payload filtering** for structured retrieval logic documented in [docs/filter.md](./docs/filter.md).
 - **Backup APIs and flows** documented in [docs/backup-system.md](./docs/backup-system.md).
 - **Operational logging and instrumentation** documented in [docs/logs.md](./docs/logs.md) and [docs/mdbx-instrumentation.md](./docs/mdbx-instrumentation.md).
-- **CPU-targeted builds** for AVX2, AVX512, NEON, and SVE2 deployments.
+- **CPU-targeted builds** for x86 (runtime dispatch), AVX2, AVX512, NEON, and SVE2 deployments.
 - **Docker deployment options** for local and server environments.
 
 ## API and Clients

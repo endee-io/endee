@@ -262,7 +262,8 @@ build_project() {
             avx512) cmake_args+=("-DUSE_AVX512=ON") ;;
             neon)   cmake_args+=("-DUSE_NEON=ON") ;;
             sve2)   cmake_args+=("-DUSE_SVE2=ON") ;;
-            *) 
+            x86)    cmake_args+=("-DUSE_X86=ON") ;;
+            *)
                 error "Unknown CPU target: $CPU_TARGET"
                 exit 1 
                 ;;
@@ -303,6 +304,7 @@ Build Mode Options (Select one):
   --debug_nd      Build with -DND_DEBUG=ON
 
 CPU Optimization Options (Select one):
+  --x86           Generic x86 with runtime SIMD dispatch (produces binary 'ndd-x86')
   --avx2          Add -DUSE_AVX2=ON
   --avx512        Add -DUSE_AVX512=ON
   --neon          Add -DUSE_NEON=ON
@@ -358,6 +360,10 @@ parse_args() {
                 ;;
             --sve2)
                 CPU_TARGET="sve2"
+                shift
+                ;;
+            --x86)
+                CPU_TARGET="x86"
                 shift
                 ;;
 

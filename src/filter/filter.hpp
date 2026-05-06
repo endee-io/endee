@@ -2,8 +2,11 @@
 
 // System includes
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -213,6 +216,79 @@ private:
 
     static std::string format_filter_key(const std::string& field, const std::string& value) {
         return field + ":" + value;
+    }
+
+    /*
+     * Resolves [$lt | $lte | $gt | $gte] on a JSON numeric value into a
+     * sortable [min, max] range usable against NumericIndex::range / check_range.
+     * A returned pair with min > max signals a provably-empty range
+     * (e.g. $gt INT32_MAX, $lt the smallest float); callers must skip the lookup.
+     *
+     * Return codes:
+     * 0 = success
+     * 2 = value is not a finite number, or operator is not a numeric comparison;
+     *     caller should return HTTP 400
+     */
+    static ndd::OperationResult<std::pair<uint32_t, uint32_t>>
+    numeric_bound_from_comparison(const std::string& op, const nlohmann::json& val) {
+        using Bound = std::pair<uint32_t, uint32_t>;
+        constexpr uint32_t SORTABLE_MIN = 0x00000000u;
+        constexpr uint32_t SORTABLE_MAX = 0xFFFFFFFFu;
+        const Bound EMPTY{SORTABLE_MAX, SORTABLE_MIN};
+
+        if(!val.is_number()) {
+            return {2, op + " value must be a finite number"};
+        }
+        if(!val.is_number_integer() && !std::isfinite(val.get<float>())) {
+            return {2, op + " value must be a finite number"};
+        }
+
+        if(op == "$gte") {
+            auto sortable_result = sortable_from_json(val, op + " value");
+            if(!sortable_result.ok()) {
+                return {sortable_result.code, sortable_result.message};
+            }
+            return {SUCCESS, "", Bound{sortable_result.value_or_throw(), SORTABLE_MAX}};
+        }
+        if(op == "$lte") {
+            auto sortable_result = sortable_from_json(val, op + " value");
+            if(!sortable_result.ok()) {
+                return {sortable_result.code, sortable_result.message};
+            }
+            return {SUCCESS, "", Bound{SORTABLE_MIN, sortable_result.value_or_throw()}};
+        }
+        if(op == "$gt") {
+            if(val.is_number_integer()) {
+                int32_t x = val.get<int>();
+                if(x == std::numeric_limits<int32_t>::max()) {
+                    return {SUCCESS, "", EMPTY};
+                }
+                return {SUCCESS, "", Bound{ndd::filter::int_to_sortable(x + 1), SORTABLE_MAX}};
+            }
+            float x = val.get<float>();
+            float next = std::nextafterf(x, std::numeric_limits<float>::infinity());
+            if(!std::isfinite(next)) {
+                return {SUCCESS, "", EMPTY};
+            }
+            return {SUCCESS, "", Bound{ndd::filter::float_to_sortable(next), SORTABLE_MAX}};
+        }
+        if(op == "$lt") {
+            if(val.is_number_integer()) {
+                int32_t x = val.get<int>();
+                if(x == std::numeric_limits<int32_t>::min()) {
+                    return {SUCCESS, "", EMPTY};
+                }
+                return {SUCCESS, "", Bound{SORTABLE_MIN, ndd::filter::int_to_sortable(x - 1)}};
+            }
+            float x = val.get<float>();
+            float next = std::nextafterf(x, -std::numeric_limits<float>::infinity());
+            if(!std::isfinite(next)) {
+                return {SUCCESS, "", EMPTY};
+            }
+            return {SUCCESS, "", Bound{SORTABLE_MIN, ndd::filter::float_to_sortable(next)}};
+        }
+
+        return {2, "Unsupported numeric comparison operator: " + op};
     }
 
     void init_environment() {
@@ -433,6 +509,22 @@ public:
                     return {range_result.code, range_result.message};
                 }
                 or_result = std::move(range_result.value_or_throw());
+            } else if(op == "$lt" || op == "$lte" || op == "$gt" || op == "$gte") {
+                if(type != FieldType::Number) {
+                    return {2, op + " operator is only supported for numeric fields"};
+                }
+                auto bound_result = numeric_bound_from_comparison(op, val);
+                if(!bound_result.ok()) {
+                    return {bound_result.code, bound_result.message};
+                }
+                auto [min_val, max_val] = bound_result.value_or_throw();
+                if(min_val <= max_val) {
+                    auto range_result = numeric_index_->range(field, min_val, max_val);
+                    if(!range_result.ok()) {
+                        return {range_result.code, range_result.message};
+                    }
+                    or_result = std::move(range_result.value_or_throw());
+                }
             } else {
                 return {2, "Unsupported filter operator: " + op};
             }
@@ -854,6 +946,18 @@ public:
             }
 
             return numeric_index_->check_range(field, id, start_result.value_or_throw(), end_result.value_or_throw());
+        }
+
+        if(op == "$lt" || op == "$lte" || op == "$gt" || op == "$gte") {
+            auto bound_result = numeric_bound_from_comparison(op, val);
+            if(!bound_result.ok()) {
+                return {bound_result.code, bound_result.message};
+            }
+            auto [min_val, max_val] = bound_result.value_or_throw();
+            if(min_val > max_val) {
+                return {SUCCESS, "", false};
+            }
+            return numeric_index_->check_range(field, id, min_val, max_val);
         }
 
         return {2, "Unsupported numeric operator: " + op};

@@ -211,7 +211,24 @@ private:
         if(str_val.size() > 255) {
             return {2, context + " is too long"};
         }
+        auto delim_check = validate_filter_key_component(str_val, context);
+        if(!delim_check.ok()) {
+            return {delim_check.code, delim_check.message};
+        }
         return {SUCCESS, "", std::move(str_val)};
+    }
+
+    // Rejects ':' because it is the MDBX key delimiter for category and numeric
+    // indexes (see format_filter_key, NumericIndex::make_*_key). Allowing ':' in
+    // user input causes byte-level key collisions across distinct (field, value)
+    // pairs.
+    static ndd::OperationResult<>
+    validate_filter_key_component(const std::string& component,
+                                  const std::string& context) {
+        if(component.find(':') != std::string::npos) {
+            return {1, context + " must not contain ':'"};
+        }
+        return {SUCCESS, ""};
     }
 
     static std::string format_filter_key(const std::string& field, const std::string& value) {
@@ -406,6 +423,10 @@ public:
             const auto& expr = condition.begin().value();
             if(field.empty()) {
                 return {1, "Filter field name cannot be empty"};
+            }
+            auto field_check = validate_filter_key_component(field, "Filter field name");
+            if(!field_check.ok()) {
+                return {field_check.code, field_check.message};
             }
             if(!expr.is_object() || expr.size() != 1) {
                 return {1, "Filter operator must be a single-field object"};
@@ -610,6 +631,14 @@ public:
      */
     ndd::OperationResult<>
     add_to_filter(const std::string& field, const std::string& value, ndd::idInt numeric_id) {
+        auto field_check = validate_filter_key_component(field, "Filter field name");
+        if(!field_check.ok()) {
+            return field_check;
+        }
+        auto value_check = validate_filter_key_component(value, "Filter value");
+        if(!value_check.ok()) {
+            return value_check;
+        }
         return category_index_->add(field, value, numeric_id);
     }
 
@@ -668,6 +697,10 @@ public:
             for(const auto& [field, value] : parsed.items()) {
                 if(field.empty()) {
                     return {1, "Filter field name cannot be empty"};
+                }
+                auto field_check = validate_filter_key_component(field, "Filter field name");
+                if(!field_check.ok()) {
+                    return {field_check.code, field_check.message};
                 }
 
                 FieldType type = FieldType::Unknown;
@@ -747,6 +780,14 @@ public:
     remove_from_filter(const std::string& field,
                        const std::string& value,
                        ndd::idInt numeric_id) {
+        auto field_check = validate_filter_key_component(field, "Filter field name");
+        if(!field_check.ok()) {
+            return field_check;
+        }
+        auto value_check = validate_filter_key_component(value, "Filter value");
+        if(!value_check.ok()) {
+            return value_check;
+        }
         return category_index_->remove(field, value, numeric_id);
     }
 
@@ -760,6 +801,14 @@ public:
      */
     ndd::OperationResult<bool>
     contains(const std::string& field, const std::string& value, ndd::idInt numeric_id) const {
+        auto field_check = validate_filter_key_component(field, "Filter field name");
+        if(!field_check.ok()) {
+            return {field_check.code, field_check.message};
+        }
+        auto value_check = validate_filter_key_component(value, "Filter value");
+        if(!value_check.ok()) {
+            return {value_check.code, value_check.message};
+        }
         return category_index_->contains(field, value, numeric_id);
     }
 
@@ -803,6 +852,10 @@ public:
         for(const auto& [field, value] : parsed.items()) {
             if(field.empty()) {
                 return {1, "Filter field name cannot be empty"};
+            }
+            auto field_check = validate_filter_key_component(field, "Filter field name");
+            if(!field_check.ok()) {
+                return {field_check.code, field_check.message};
             }
 
             ndd::OperationResult<> remove_result{SUCCESS, ""};

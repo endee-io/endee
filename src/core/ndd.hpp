@@ -1835,16 +1835,26 @@ public:
             results.reserve(final_candidates.size());
             LOG_DEBUG("Search results size: " << final_candidates.size());
 
-            // Process and filter results
+            // Postfilter strategy:
+            //   Every code path that feeds final_candidates already enforces filter_ptr:
+            //     - Filtered HNSW search drops ids via BitMapFilterFunctor (filter.hpp).
+            //     - Prefilter brute-force only iterates ids drawn from the bitmap.
+            //     - Sparse search drops non-matching ids inside its scoring phase
+            //       (inverted_index.cpp).
+            //   So on the dense-only path the per-result contains() check is dead and
+            //   we skip it. On the hybrid path we keep it as defense-in-depth in case
+            //   sparse search ever stops honoring the filter; either way the check now
+            //   runs before get_meta() so a (defensive) reject does not pay an MDBX read.
+            const bool postfilter_active = filter_ptr != nullptr && run_sparse_search;
+            size_t postfilter_drops = 0;
             size_t filtered_count = 0;
             for(const auto& p : final_candidates) {
-                // Get metadata
-                ndd::VectorMeta meta = entry.vector_storage->get_meta(p.second);
-
-                // Apply filter
-                if(filter_ptr && !filter_ptr->contains(p.second)) {
+                if(postfilter_active && !filter_ptr->contains(p.second)) {
+                    ++postfilter_drops;
                     continue;
                 }
+
+                ndd::VectorMeta meta = entry.vector_storage->get_meta(p.second);
 
                 ndd::VectorResult result;
                 result.id = meta.id;
@@ -1877,6 +1887,15 @@ public:
             // Ensure we don't return more than k results
             if(results.size() > k) {
                 results.resize(k);
+            }
+
+            // A drop here means an upstream filter step failed to honor filter_ptr.
+            // Log once per request rather than per-result to respect the hot-loop rule.
+            if(postfilter_drops > 0) {
+                LOG_WARN(1222,
+                         index_id,
+                         "Postfilter dropped " << postfilter_drops
+                                               << " ids that bypassed upstream filter checks");
             }
             return {SUCCESS, "", std::move(results)};
         } catch(const std::exception& e) {

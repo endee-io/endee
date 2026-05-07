@@ -21,7 +21,27 @@ namespace ndd {
                 return field + ":" + value;
             }
 
-            // Load bitmap from LMDB
+            // Load bitmap using an existing transaction (avoids opening a nested txn)
+            ndd::RoaringBitmap get_bitmap_with_txn(MDBX_txn* txn,
+                                                    const std::string& filter_key) const {
+                MDBX_val key{const_cast<char*>(filter_key.c_str()), filter_key.size()};
+                MDBX_val data;
+
+                int rc = mdbx_get(txn, dbi_, &key, &data);
+                if(rc == MDBX_NOTFOUND) {
+                    return ndd::RoaringBitmap();
+                }
+                if(rc != MDBX_SUCCESS) {
+                    throw std::runtime_error("Failed to read filter key '" + filter_key
+                                             + "': " + std::string(mdbx_strerror(rc)));
+                }
+                if(data.iov_len == 0) {
+                    return ndd::RoaringBitmap();
+                }
+                return ndd::RoaringBitmap::read(static_cast<const char*>(data.iov_base));
+            }
+
+            // Load bitmap from LMDB (opens its own read transaction)
             ndd::RoaringBitmap get_bitmap_internal(const std::string& filter_key) const {
                 MDBX_txn* txn;
                 int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_RDONLY, &txn);
@@ -31,29 +51,7 @@ namespace ndd {
                 }
 
                 try {
-                    MDBX_val key{const_cast<char*>(filter_key.c_str()), filter_key.size()};
-                    MDBX_val data;
-
-                    rc = mdbx_get(txn, dbi_, &key, &data);
-                    if(rc == MDBX_NOTFOUND) {
-                        mdbx_txn_abort(txn);
-                        // LOG_DEBUG("Filter key not found: " << filter_key);
-                        return ndd::RoaringBitmap();  // Return empty bitmap
-                    }
-                    if(rc != MDBX_SUCCESS) {
-                        mdbx_txn_abort(txn);
-                        throw std::runtime_error("Failed to read filter key '" + filter_key
-                                                 + "': " + std::string(mdbx_strerror(rc)));
-                    }
-
-                    if(data.iov_len == 0) {
-                        mdbx_txn_abort(txn);
-                        // LOG_DEBUG("Empty data for filter key: " << filter_key);
-                        return ndd::RoaringBitmap();
-                    }
-
-                    ndd::RoaringBitmap bitmap =
-                            ndd::RoaringBitmap::read(static_cast<const char*>(data.iov_base));
+                    ndd::RoaringBitmap bitmap = get_bitmap_with_txn(txn, filter_key);
                     mdbx_txn_abort(txn);
                     return bitmap;
                 } catch(...) {
@@ -147,7 +145,7 @@ namespace ndd {
                      const std::string& value,
                      ndd::idInt id) {
                 std::string filter_key = format_filter_key(field, value);
-                ndd::RoaringBitmap bitmap = get_bitmap_internal(filter_key);
+                ndd::RoaringBitmap bitmap = get_bitmap_with_txn(txn, filter_key);
                 bitmap.add(id);
                 store_bitmap_internal(txn, filter_key, bitmap);
             }
@@ -178,7 +176,7 @@ namespace ndd {
                         const std::string& value,
                         ndd::idInt id) {
                 std::string filter_key = format_filter_key(field, value);
-                ndd::RoaringBitmap bitmap = get_bitmap_internal(filter_key);
+                ndd::RoaringBitmap bitmap = get_bitmap_with_txn(txn, filter_key);
                 bitmap.remove(id);
                 store_bitmap_internal(txn, filter_key, bitmap);
             }
@@ -225,7 +223,7 @@ namespace ndd {
 
                 try {
                     std::string filter_key = format_filter_key(field, value);
-                    ndd::RoaringBitmap bitmap = get_bitmap_internal(filter_key);
+                    ndd::RoaringBitmap bitmap = get_bitmap_with_txn(txn, filter_key);
                     for(const auto& id : ids) {
                         bitmap.add(id);
                     }
@@ -248,7 +246,7 @@ namespace ndd {
                 if(ids.empty()) {
                     return;
                 }
-                ndd::RoaringBitmap bitmap = get_bitmap_internal(key);
+                ndd::RoaringBitmap bitmap = get_bitmap_with_txn(txn, key);
                 for(const auto& id : ids) {
                     bitmap.add(id);
                 }

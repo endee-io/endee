@@ -332,21 +332,7 @@ Example with debug enabled:
 cmake -DUSE_NEON=ON -DND_DEBUG=ON ..
 ```
 
-**All compile-time flags reference:**
-
-| Flag | Default | Default behaviour | What passing `-DFLAG=ON` changes |
-|---|---|---|---|
-| `-DDEBUG=ON` | `OFF` | Release build compiled with `-O3 -ffast-math` for maximum performance | Switches to debug build: disables all optimisations (`-O0`), adds full debug symbols (`-g3`). Use when debugging crashes or stepping through code with a debugger. |
-| `-DND_DEBUG=ON` | `OFF` | No internal logging — Endee runs silently | Enables Endee's internal debug logging and operation timing output to stdout. Useful for tracing what the server is doing without a full debug build. |
-| `-DND_SPARSE_INSTRUMENT=ON` | `OFF` | No timing data collected for sparse index operations | Adds fine-grained timing instrumentation around sparse index operations. Use to profile and diagnose sparse search performance. |
-| `-DND_MDBX_INSTRUMENT=ON` | `OFF` | No timing data collected for MDBX (the embedded key-value store) | Adds timing instrumentation around MDBX read/write calls. Use to profile storage layer bottlenecks. |
-| `-DNDD_INV_IDX_STORE_FLOATS=ON` | `OFF` | Sparse index stores values as quantized `fp16` — smaller memory footprint | Stores raw `float32` values in the sparse index instead. Higher numerical precision but doubles the memory used by the sparse index. |
-| `-DUSE_AVX2=ON` | `OFF` | Must pick exactly one SIMD flag or the build fails | Compiles with AVX2, FMA, F16C instructions. Target: modern Intel/AMD x86_64 desktops and servers. |
-| `-DUSE_AVX512=ON` | `OFF` | Must pick exactly one SIMD flag or the build fails | Compiles with AVX512F, BW, VNNI, FP16, VPOPCNTDQ instructions. Target: server-grade Intel Xeon / AMD EPYC. The binary exits at startup if the CPU does not support all required extensions. |
-| `-DUSE_NEON=ON` | `OFF` | Must pick exactly one SIMD flag or the build fails | Compiles with NEON, FP16, DotProd. On Apple Silicon uses `-mcpu=native`; on other ARM uses `-march=armv8.2-a+fp16+dotprod`. |
-| `-DUSE_SVE2=ON` | `OFF` | Must pick exactly one SIMD flag or the build fails | Compiles with SVE2, FP16, DotProd (`-march=armv8.6-a+sve2+fp16+dotprod`). Target: ARMv9 servers. |
-
-> **Note:** Exactly one SIMD flag must be set — the build fails if none is provided.
+For every available CMake option and what it changes, see [CMake options](cmake-options.md).
 
 ### Step 3: Compile
 

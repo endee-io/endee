@@ -22,6 +22,42 @@ namespace ndd {
                 return field + ":" + value;
             }
 
+            static ndd::OperationResult<ndd::RoaringBitmap>
+            read_bitmap_payload(const void* data, size_t len) {
+                if(data == nullptr || len == 0) {
+                    return {200, "empty bitmap payload"};
+                }
+
+                const char* bytes = static_cast<const char*>(data);
+                const size_t consumed =
+                        roaring::api::roaring_bitmap_portable_deserialize_size(bytes, len);
+                if(consumed == 0) {
+                    return {200, "invalid or truncated bitmap payload"};
+                }
+                if(consumed != len) {
+                    return {200,
+                            "bitmap payload length mismatch: consumed "
+                                    + std::to_string(consumed) + " of "
+                                    + std::to_string(len) + " bytes"};
+                }
+
+                ndd::RoaringBitmap bitmap;
+                try {
+                    bitmap = ndd::RoaringBitmap::readSafe(bytes, len);
+                } catch(const std::exception& e) {
+                    return {200,
+                            "failed to deserialize bitmap payload: " + std::string(e.what())};
+                }
+
+                const char* reason = nullptr;
+                if(!roaring::api::roaring_bitmap_internal_validate(&bitmap.roaring, &reason)) {
+                    return {200,
+                            std::string("invalid bitmap internals")
+                                    + (reason != nullptr ? ": " + std::string(reason) : "")};
+                }
+                return {SUCCESS, "", std::move(bitmap)};
+            }
+
             /*
              * Loads the bitmap stored for a formatted category filter key.
              *
@@ -55,16 +91,20 @@ namespace ndd {
                                     + "': " + std::string(mdbx_strerror(rc))};
                 }
 
-                try {
-                    ndd::RoaringBitmap bitmap =
-                            ndd::RoaringBitmap::read(static_cast<const char*>(data.iov_base));
+                auto bitmap_result = read_bitmap_payload(data.iov_base, data.iov_len);
+                if(!bitmap_result.ok()) {
                     mdbx_txn_abort(txn);
-                    return {SUCCESS, "", std::move(bitmap)};
-                } catch(const std::exception& e) {
-                    mdbx_txn_abort(txn);
-                    return {200, "Corrupt category bitmap payload for key '" + filter_key
-                                         + "': " + e.what()};
+                    return {bitmap_result.code,
+                            "Corrupt category bitmap payload for key '" + filter_key
+                                    + "': " + bitmap_result.message};
                 }
+                if(!bitmap_result.value.has_value()) {
+                    mdbx_txn_abort(txn);
+                    return {200, "Category bitmap reader succeeded without a bitmap for key '"
+                                         + filter_key + "'"};
+                }
+                mdbx_txn_abort(txn);
+                return {SUCCESS, "", std::move(*bitmap_result.value)};
             }
 
             /*

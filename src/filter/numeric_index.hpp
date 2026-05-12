@@ -76,6 +76,46 @@ namespace ndd {
 
             bool is_dirty = false;
 
+            static ndd::OperationResult<ndd::RoaringBitmap>
+            read_bitmap_payload(const uint8_t* data, size_t len) {
+                if(len == 0) {
+                    return {SUCCESS, "", ndd::RoaringBitmap()};
+                }
+                if(data == nullptr) {
+                    return {200, "empty bitmap payload"};
+                }
+
+                const char* bytes = reinterpret_cast<const char*>(data);
+                const size_t consumed =
+                    roaring::api::roaring_bitmap_portable_deserialize_size(bytes, len);
+                if(consumed == 0) {
+                    return {200, "invalid or truncated bitmap payload"};
+                }
+                if(consumed != len) {
+                    return {200,
+                            "bitmap payload length mismatch: consumed "
+                            + std::to_string(consumed) + " of "
+                            + std::to_string(len) + " bytes"};
+                }
+
+                ndd::RoaringBitmap bitmap;
+                try {
+                    bitmap = ndd::RoaringBitmap::readSafe(bytes, len);
+                } catch(const std::exception& e) {
+                    return {200,
+                            "failed to deserialize bitmap payload: " + std::string(e.what())};
+                }
+
+                const char* reason = nullptr;
+                if(!roaring::api::roaring_bitmap_internal_validate(&bitmap.roaring,
+                                                                    &reason)) {
+                    return {200,
+                            std::string("invalid bitmap internals")
+                            + (reason != nullptr ? ": " + std::string(reason) : "")};
+                }
+                return {SUCCESS, "", std::move(bitmap)};
+            }
+
             // Helper to get actual value
             uint32_t get_value(size_t index) const {
                 return base_value + deltas[index];
@@ -175,16 +215,25 @@ namespace ndd {
                 
                 // 1. Bitmap Size
                 uint32_t bm_size;
-                std::memcpy(&bm_size, ptr, 4); ptr += 4;
-
-                if (ptr + bm_size > end) {
+                std::memcpy(&bm_size, ptr, sizeof(uint32_t));
+                ptr += sizeof(uint32_t);
+                if (bm_size > static_cast<size_t>(end - ptr)) {
                     throw std::runtime_error("Bucket corrupt: invalid bitmap size");
                 }
 
                 // 2. Bitmap
                 if (bm_size > 0) {
-                   b.summary_bitmap = ndd::RoaringBitmap::read(reinterpret_cast<const char*>(ptr));
-                   ptr += bm_size;
+                    auto bitmap_result = read_bitmap_payload(ptr, bm_size);
+                    if(!bitmap_result.ok()) {
+                        throw std::runtime_error("Bucket corrupt: "
+                                                 + bitmap_result.message);
+                    }
+                    if(!bitmap_result.value.has_value()) {
+                        throw std::runtime_error(
+                            "Bucket corrupt: bitmap reader succeeded without a bitmap");
+                    }
+                    b.summary_bitmap = std::move(*bitmap_result.value);
+                    ptr += bm_size;
                 }
 
                 if (ptr + 2 > end) throw std::runtime_error("Bucket corrupt: truncated count");
@@ -212,13 +261,75 @@ namespace ndd {
                 return b;
             }
 
-            // Fast access to just the bitmap (for middle buckets)
-            static ndd::RoaringBitmap read_summary_bitmap(const void* data, size_t len) {
-               const uint8_t* ptr = static_cast<const uint8_t*>(data);
-               uint32_t bm_size;
-               std::memcpy(&bm_size, ptr, 4); ptr += 4;
-               if(bm_size == 0) return ndd::RoaringBitmap();
-               return ndd::RoaringBitmap::read(reinterpret_cast<const char*>(ptr));
+            /**
+             * Fast access to just the bitmap.
+             *
+             * Used by range() when a bucket is fully covered by the query
+             * extent and we don't need the deltas/ids arrays. Skips the
+             * memcpy + vector allocations that full deserialize would do
+             * for those arrays.
+             *
+             * On the `count` field and why it is intentionally ignored here:
+             *
+             * The on-disk bucket layout this function reads is:
+             *
+             *   [bm_size : uint32_t]
+             *   [bitmap  : bm_size bytes]
+             *   [count   : uint16_t]                       <-- not needed by us
+             *   [deltas  : count * sizeof(uint16_t)]       <-- not read here
+             *   [ids     : count * sizeof(idInt)]          <-- not read here
+             *
+             * `count` exists only so the older full-deserialize path knows how
+             * many delta/id entries follow the bitmap. That value can be
+             * recovered without an explicit field by computing
+             *   (record_len - sizeof(uint32_t) - bm_size)
+             *       / (sizeof(uint16_t) + sizeof(idInt))
+             * which is exactly how the next major version of the bucket format
+             * will work -- the `count` field will be dropped to save 2 bytes
+             * per bucket on disk and to remove the redundancy between the
+             * stored count and the byte-length-derived count.
+             *
+             * For now `count` is preserved in the bucket layout to keep
+             * backward compatibility with existing on-disk indexes built by
+             * prior versions: those buckets carry the `count` field, and any
+             * code path that round-trips a bucket (read + modify + write)
+             * must continue to honor it. The full `Bucket::deserialize` /
+             * `Bucket::serialize` pair still reads and writes `count`.
+             *
+             * `read_summary_bitmap` only needs the bitmap, so it stops after
+             * the bitmap bytes and never touches `count` or anything after
+             * it. Skipping over `count` here is safe for both the current
+             * (count-bearing) layout and the future (count-less) layout, so
+             * this code path will continue to work unchanged when `count` is
+             * removed in a subsequent version. The corresponding alignment
+             * sanity check on the trailing bytes is intentionally omitted:
+             * any corruption in the trailing region is caught by the full
+             * `Bucket::deserialize` path that actually consumes those bytes.
+             */
+            static ndd::RoaringBitmap read_summary_bitmap(const void* data,
+                                                          size_t len) {
+                if (len < sizeof(uint32_t)) {
+                    throw std::runtime_error("Bucket corrupt: missing bitmap size");
+                }
+                const uint8_t* ptr = static_cast<const uint8_t*>(data);
+                const uint8_t* end = ptr + len;
+                uint32_t bm_size;
+                std::memcpy(&bm_size, ptr, sizeof(uint32_t));
+                ptr += sizeof(uint32_t);
+                if (bm_size > static_cast<size_t>(end - ptr)) {
+                    throw std::runtime_error("Bucket corrupt: invalid bitmap size");
+                }
+                if (bm_size == 0) return ndd::RoaringBitmap();
+                auto bitmap_result = read_bitmap_payload(ptr, bm_size);
+                if(!bitmap_result.ok()) {
+                    throw std::runtime_error("Bucket corrupt: "
+                                             + bitmap_result.message);
+                }
+                if(!bitmap_result.value.has_value()) {
+                    throw std::runtime_error(
+                        "Bucket corrupt: bitmap reader succeeded without a bitmap");
+                }
+                return std::move(*bitmap_result.value);
             }
 
             bool is_full() const { return ids.size() >= MAX_SIZE; }

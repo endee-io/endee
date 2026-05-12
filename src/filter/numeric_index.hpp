@@ -84,141 +84,196 @@ namespace ndd {
             void add(uint32_t val, ndd::idInt id) {
                 if (val < base_value) {
                      // Should not happen if Key logic is correct
-                     throw std::runtime_error("Insert value < Base Value"); 
+                     throw std::runtime_error("Insert value < Base Value");
                 }
                 uint32_t delta_32 = val - base_value;
                 if (delta_32 > MAX_DELTA) {
                     throw std::runtime_error("Delta overflow");
                 }
-                
-                // Maintain sorted order by Value (Delta)
-                uint16_t delta = static_cast<uint16_t>(delta_32);
-                
-                // Find insertion point
-                auto it = std::lower_bound(deltas.begin(), deltas.end(), delta);
-                size_t index = std::distance(deltas.begin(), it);
 
-                deltas.insert(it, delta);
-                ids.insert(ids.begin() + index, id);
-                
                 summary_bitmap.add(id);
                 is_dirty = true;
+
+                /**
+                 * If the bucket is already at MAX_SIZE in the parallel
+                 * arrays AND the new value equals base_value, route the
+                 * id into summary_bitmap only. Every id in the bitmap
+                 * with no matching delta is implicitly value-tagged by
+                 * base_value, so range queries can recover its value
+                 * without a per-id delta entry. This caps the on-disk
+                 * deltas/ids growth for duplicate-heavy values.
+                 *
+                 * Non-duplicate inserts (delta_32 != 0) still go into
+                 * the sorted arrays even when the bucket is "full" --
+                 * the slide-split fallthrough then pushes the bucket
+                 * one over MAX_SIZE momentarily and the next insert's
+                 * slide-split finds the new value boundary and splits.
+                 */
+                if (delta_32 == 0 && ids.size() >= MAX_SIZE) {
+                    return;
+                }
+
+                uint16_t delta = static_cast<uint16_t>(delta_32);
+                auto it = std::lower_bound(deltas.begin(), deltas.end(), delta);
+                size_t index = std::distance(deltas.begin(), it);
+                deltas.insert(it, delta);
+                ids.insert(ids.begin() + index, id);
             }
 
             bool remove(ndd::idInt id) {
-                // Find index by ID (linear scan needed as ids are not sorted)
+                if (!summary_bitmap.contains(id)) {
+                    return false;
+                }
+                /**
+                 * The id might live only in the bitmap (added past MAX_SIZE).
+                 * The linear scan is best effort to also clear the ordered
+                 * arrays; the bitmap is the source of truth.
+                 */
                 for (size_t i = 0; i < ids.size(); ++i) {
                     if (ids[i] == id) {
                         ids.erase(ids.begin() + i);
                         deltas.erase(deltas.begin() + i);
-                        
-                        // Rebuild or update bitmap? Roaring remove is fast
-                        summary_bitmap.remove(id);
-                        is_dirty = true;
-                        return true;
+                        break;
                     }
                 }
-                return false;
+                summary_bitmap.remove(id);
+                is_dirty = true;
+                return true;
             }
 
-            // Serialization Format:
-            // [BitmapSize (4)]
-            // [Bitmap Bytes]
-            // [Count (2)]
-            // [Deltas (Count * 2)]
-            // [IDs (Count * sizeof(idInt))]
+            /**
+             * Serialization Format:
+             *   [BitmapSize (uint32_t)]
+             *   [Bitmap Bytes]
+             *   [Deltas (nr_array_entries * sizeof(uint16_t))]
+             *   [IDs    (nr_array_entries * sizeof(idInt))]
+             *
+             * nr_array_entries is recovered on read from
+             *   (iov_len - sizeof(uint32_t) - bm_size)
+             *       / (sizeof(uint16_t) + sizeof(idInt))
+             */
             std::vector<uint8_t> serialize() const {
-                // Optimize bitmap
                 const_cast<ndd::RoaringBitmap&>(summary_bitmap).runOptimize();
-                
+
+                /**
+                 * Note: ids.size() can transiently exceed MAX_SIZE when
+                 * the slide-split fallthrough in add_to_buckets has just
+                 * pushed a non-duplicate into a saturated bucket. The
+                 * very next insert into that bucket will trigger a
+                 * standard slide-split that splits on the new boundary,
+                 * so the on-disk over-MAX_SIZE state is short-lived.
+                 * Saturated-with-duplicate inserts go bitmap-only via
+                 * Bucket::add and do not grow ids/deltas.
+                 */
                 size_t bm_size = summary_bitmap.getSizeInBytes();
-                uint16_t count = static_cast<uint16_t>(ids.size());
-                
-                size_t total_size = 4 + bm_size + 2 + (count * 2) + (count * sizeof(ndd::idInt));
+                size_t nr_array_entries = ids.size();
+                size_t total_size = sizeof(uint32_t) + bm_size
+                                    + (nr_array_entries * sizeof(uint16_t))
+                                    + (nr_array_entries * sizeof(ndd::idInt));
                 std::vector<uint8_t> buffer(total_size);
                 uint8_t* ptr = buffer.data();
 
-                // 1. Bitmap Header
                 uint32_t bm_size_32 = static_cast<uint32_t>(bm_size);
-                std::memcpy(ptr, &bm_size_32, 4); ptr += 4;
+                std::memcpy(ptr, &bm_size_32, sizeof(uint32_t));
+                ptr += sizeof(uint32_t);
 
-                // 2. Bitmap Data
                 if (bm_size > 0) {
                     summary_bitmap.write(reinterpret_cast<char*>(ptr));
                     ptr += bm_size;
                 }
 
-                // 3. Count
-                std::memcpy(ptr, &count, 2); ptr += 2;
-
-                // 4. Deltas
-                if (count > 0) {
-                    std::memcpy(ptr, deltas.data(), count * 2); ptr += count * 2;
+                if (nr_array_entries > 0) {
+                    std::memcpy(ptr, deltas.data(),
+                                nr_array_entries * sizeof(uint16_t));
+                    ptr += nr_array_entries * sizeof(uint16_t);
+                    std::memcpy(ptr, ids.data(),
+                                nr_array_entries * sizeof(ndd::idInt));
                 }
 
-                // 5. IDs
-                if (count > 0) {
-                    std::memcpy(ptr, ids.data(), count * sizeof(ndd::idInt)); 
-                }
-                
                 return buffer;
             }
 
             static Bucket deserialize(const void* data, size_t len, uint32_t base_val) {
                 Bucket b;
                 b.base_value = base_val;
-                
-                if (len < 6) return b; // Min valid size
+
+                if (len < sizeof(uint32_t)) return b; // Just the bm_size header
 
                 const uint8_t* ptr = static_cast<const uint8_t*>(data);
                 const uint8_t* end = ptr + len;
-                
-                // 1. Bitmap Size
-                uint32_t bm_size;
-                std::memcpy(&bm_size, ptr, 4); ptr += 4;
 
+                // 1. Bitmap size
+                uint32_t bm_size;
+                std::memcpy(&bm_size, ptr, sizeof(uint32_t));
+                ptr += sizeof(uint32_t);
                 if (ptr + bm_size > end) {
                     throw std::runtime_error("Bucket corrupt: invalid bitmap size");
                 }
 
                 // 2. Bitmap
                 if (bm_size > 0) {
-                   b.summary_bitmap = ndd::RoaringBitmap::read(reinterpret_cast<const char*>(ptr));
-                   ptr += bm_size;
+                    b.summary_bitmap =
+                        ndd::RoaringBitmap::read(reinterpret_cast<const char*>(ptr));
+                    ptr += bm_size;
                 }
 
-                if (ptr + 2 > end) throw std::runtime_error("Bucket corrupt: truncated count");
+                // 3. Derive nr_array_entries from the residual.
+                size_t remaining = static_cast<size_t>(end - ptr);
+                constexpr size_t per_entry =
+                    sizeof(uint16_t) + sizeof(ndd::idInt);
+                if (remaining % per_entry != 0) {
+                    throw std::runtime_error(
+                        "Bucket corrupt: residual bytes not aligned");
+                }
+                size_t nr_array_entries = remaining / per_entry;
 
-                // 3. Count
-                uint16_t count;
-                std::memcpy(&count, ptr, 2); ptr += 2;
-
-                // 4. Deltas & IDs
-                if (count > 0) {
-                    size_t delta_size = count * 2;
-                    size_t id_size = count * sizeof(ndd::idInt);
-                    
+                if (nr_array_entries > 0) {
+                    size_t delta_size = nr_array_entries * sizeof(uint16_t);
+                    size_t id_size = nr_array_entries * sizeof(ndd::idInt);
                     if (ptr + delta_size + id_size > end) {
-                         throw std::runtime_error("Bucket corrupt: truncated Data");
+                        throw std::runtime_error("Bucket corrupt: truncated arrays");
                     }
-
-                    b.deltas.resize(count);
-                    std::memcpy(b.deltas.data(), ptr, delta_size); ptr += delta_size;
-
-                    b.ids.resize(count);
-                    std::memcpy(b.ids.data(), ptr, id_size); 
+                    b.deltas.resize(nr_array_entries);
+                    std::memcpy(b.deltas.data(), ptr, delta_size);
+                    ptr += delta_size;
+                    b.ids.resize(nr_array_entries);
+                    std::memcpy(b.ids.data(), ptr, id_size);
                 }
-                
+
                 return b;
             }
 
-            // Fast access to just the bitmap (for middle buckets)
-            static ndd::RoaringBitmap read_summary_bitmap(const void* data, size_t len) {
-               const uint8_t* ptr = static_cast<const uint8_t*>(data);
-               uint32_t bm_size;
-               std::memcpy(&bm_size, ptr, 4); ptr += 4;
-               if(bm_size == 0) return ndd::RoaringBitmap();
-               return ndd::RoaringBitmap::read(reinterpret_cast<const char*>(ptr));
+            /**
+             * Fast access to just the bitmap.
+             *
+             * Used by range() when a bucket is fully covered by the query
+             * extent and we don't need the deltas/ids arrays. Skips the
+             * memcpy + vector allocations that full deserialize would do
+             * for those arrays.
+             */
+            static ndd::RoaringBitmap read_summary_bitmap(const void* data,
+                                                          size_t len) {
+                if (len < sizeof(uint32_t)) {
+                    throw std::runtime_error("Bucket corrupt: missing bitmap size");
+                }
+                const uint8_t* ptr = static_cast<const uint8_t*>(data);
+                const uint8_t* end = ptr + len;
+                uint32_t bm_size;
+                std::memcpy(&bm_size, ptr, sizeof(uint32_t));
+                ptr += sizeof(uint32_t);
+                if (ptr + bm_size > end) {
+                    throw std::runtime_error("Bucket corrupt: invalid bitmap size");
+                }
+                constexpr size_t per_entry =
+                    sizeof(uint16_t) + sizeof(ndd::idInt);
+                const size_t remaining =
+                    static_cast<size_t>(end - ptr - bm_size);
+                if (remaining % per_entry != 0) {
+                    throw std::runtime_error(
+                        "Bucket corrupt: residual bytes not aligned");
+                }
+                if(bm_size == 0) return ndd::RoaringBitmap();
+                return ndd::RoaringBitmap::read(reinterpret_cast<const char*>(ptr));
             }
 
             bool is_full() const { return ids.size() >= MAX_SIZE; }
@@ -498,12 +553,32 @@ namespace ndd {
                                 mid_idx = probe_left > 0 ? probe_left : bucket.deltas.size();
                             }
 
-                            // If we hit end, we can't split by value uniqueness
+                            /**
+                             * Slide-split could not find a value boundary
+                             * -- the bucket is all duplicates of
+                             * base_value, so there is no clean place to
+                             * cut. Just append the new entry; the bucket
+                             * goes momentarily past MAX_SIZE.
+                             *
+                             * If the new value equals base_value, it
+                             * extends the duplicate run; the next insert
+                             * of any value will fall into the same
+                             * fallthrough.
+                             *
+                             * If the new value is greater than base_value,
+                             * it introduces the boundary that was missing,
+                             * and the very next insert hitting this
+                             * bucket will split cleanly via the standard
+                             * slide-split path below.
+                             *
+                             * The on-disk count field has been removed
+                             * from the bucket payload, so this transient
+                             * over-MAX_SIZE state can no longer cause the
+                             * uint16_t cliff at 65,536 entries -- the
+                             * deserializer derives N from the residual
+                             * bytes after the bitmap.
+                             */
                             if(mid_idx == bucket.deltas.size()) {
-                                /**
-                                 * Fallback: Just append (overfill) or implement logic to handle identicals.
-                                 * For now: Append.
-                                 */
                                 bucket.add(value, id);
                                 auto bytes = bucket.serialize();
                                 MDBX_val k2{const_cast<char*>(target_key_str.data()),
@@ -872,41 +947,88 @@ namespace ndd {
                         }
 
                         /**
-                         * Peek Strategy:
-                         * If bucket_base >= min_val, we know the start is covered.
-                         * If we could know NEXT bucket start, we'd know overlap.
-                         * Since we iterate, we can be greedy on read.
+                         * Coarse full-coverage fast path.
                          *
-                         * For now, always deserialize.
-                         * Potential optimization: Read only bitmap if we are "deep" in the range.
-                         * e.g. min_val=10, max_val=100. Bucket=20.
-                         * If bucket=20. Next Bucket=30.
-                         * Then Bucket 20 covers [20..30).
-                         * Range [10..100] covers [20..30] fully.
-                         * So we need lookahead.
+                         * A bucket can hold values in [base, base+MAX_DELTA]
+                         * by construction. If that whole extent is inside
+                         * [min_val, max_val], we don't need to look at the
+                         * deltas/ids arrays -- the bucket's summary_bitmap
+                         * already enumerates every id that belongs in the
+                         * result. Skip the full deserialize and read just
+                         * the bitmap header.
                          *
-                         * Simple logic without lookahead:
-                         * Just read full bucket. It's 8KB max (2 pages).
-                         * It's fast unless we have millions of buckets.
+                         * This fires on every interior bucket of a wide
+                         * range scan, so for "score >= a AND score <= b"
+                         * with a wide [a,b] only the start and end buckets
+                         * pay the deltas/ids parsing cost.
                          */
+                        if(bucket_base >= min_val
+                           && static_cast<uint64_t>(bucket_base) + Bucket::MAX_DELTA
+                                      <= max_val) {
+                            result |= Bucket::read_summary_bitmap(data.iov_base,
+                                                                  data.iov_len);
+                            rc = mdbx_cursor_get(cursor, &key, &data, MDBX_NEXT);
+                            continue;
+                        }
+
                         Bucket bucket = Bucket::deserialize(data.iov_base,
                                                             data.iov_len,
                                                             bucket_base);
-                        if(!bucket.ids.empty()) {
-                            uint32_t bucket_min = bucket.get_value(0);
-                            uint32_t bucket_max = bucket.get_value(bucket.ids.size() - 1);
 
-                            if(bucket_min >= min_val && bucket_max <= max_val) {
-                                // Full overlap
-                                result |= bucket.summary_bitmap;
-                            } else {
-                                // Partial overlap
+                        if(bucket.ids.empty()) {
+                            rc = mdbx_cursor_get(cursor, &key, &data, MDBX_NEXT);
+                            continue;
+                        }
+
+                        uint32_t bucket_min = bucket.get_value(0);
+                        uint32_t bucket_max = bucket.get_value(bucket.ids.size() - 1);
+
+                        if(bucket_min >= min_val && bucket_max <= max_val) {
+                            /**
+                             * Full overlap. summary_bitmap is a superset
+                             * of bucket.ids (it also carries any bitmap-
+                             * only entries from the saturated-duplicate
+                             * path, all of which have value == base_value
+                             * and therefore lie inside the query since
+                             * bucket_min == base_value is inside).
+                             */
+                            result |= bucket.summary_bitmap;
+                        } else {
+                            // Partial overlap on the parallel arrays.
+                            for(size_t i = 0; i < bucket.ids.size(); ++i) {
+                                uint32_t value = bucket.get_value(i);
+                                if(value >= min_val && value <= max_val) {
+                                    result.add(bucket.ids[i]);
+                                }
+                            }
+                            /**
+                             * Bitmap-only entries (cardinality > ids.size())
+                             * exist when Bucket::add saturated and absorbed
+                             * duplicates of base_value into summary_bitmap
+                             * only. Every such entry has value == base_value
+                             * by construction. Include them iff base_value
+                             * lies in [min_val, max_val].
+                             *
+                             * "bitmap-only" set =
+                             *     summary_bitmap minus { ids[i] : deltas[i] != 0 }
+                             * because the delta-zero ids in ids[] are also
+                             * in the bitmap and would be redundantly added,
+                             * but Roaring set union is idempotent so
+                             * removing only the delta>0 entries is enough
+                             * to leave us with all delta-zero ids (whether
+                             * they live in ids[] or only in the bitmap).
+                             */
+                            if(bucket_base >= min_val && bucket_base <= max_val
+                               && bucket.summary_bitmap.cardinality()
+                                          > bucket.ids.size()) {
+                                ndd::RoaringBitmap bitmap_only =
+                                        bucket.summary_bitmap;
                                 for(size_t i = 0; i < bucket.ids.size(); ++i) {
-                                    uint32_t value = bucket.get_value(i);
-                                    if(value >= min_val && value <= max_val) {
-                                        result.add(bucket.ids[i]);
+                                    if(bucket.deltas[i] != 0) {
+                                        bitmap_only.remove(bucket.ids[i]);
                                     }
                                 }
+                                result |= bitmap_only;
                             }
                         }
 

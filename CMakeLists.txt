@@ -307,8 +307,8 @@ target_include_directories(${NDD_BINARY_NAME} PRIVATE
 
 # Set compiler flags
 if(NOT DEBUG)
-    target_compile_options(ndd_core PRIVATE -O3 -ffast-math -fno-finite-math-only)
-    target_compile_options(${NDD_BINARY_NAME} PRIVATE -O3 -ffast-math -fno-finite-math-only)
+    target_compile_options(ndd_core PRIVATE -O3 -ffast-math -fno-finite-math-only -falign-functions=64)
+    target_compile_options(${NDD_BINARY_NAME} PRIVATE -O3 -ffast-math -fno-finite-math-only -falign-functions=64)
 endif()
 
 # Apply Flags based on selection

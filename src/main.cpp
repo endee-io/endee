@@ -37,6 +37,7 @@
 #include "core/ndd.hpp"
 #include "auth.hpp"
 #include "quant/common.hpp"
+#include "server/request_validation.hpp"
 #include "system_sanity/system_sanity.hpp"
 
 using ndd::quant::quantLevelToString;
@@ -838,14 +839,33 @@ int main(int argc, char** argv) {
 
                 // Extract filter parameters (Option B from chat plan)
                 ndd::FilterParams filter_params;
-                if (body.has("filter_params")) {
-                     auto fp = body["filter_params"];
-                     if (fp.has("prefilter_threshold")) {
-                         filter_params.prefilter_threshold = static_cast<size_t>(fp["prefilter_threshold"].i());
-                     }
-                     if (fp.has("boost_percentage")) {
-                         filter_params.boost_percentage = static_cast<size_t>(fp["boost_percentage"].i());
-                     }
+                if(body.has("filter_params")) {
+                    auto fp = body["filter_params"];
+                    if(fp.t() != crow::json::type::Object) {
+                        return json_error(400, "filter_params must be an object");
+                    }
+                    if(fp.has("prefilter_threshold")) {
+                        auto prefilter_threshold = ndd::server::parse_bounded_size(
+                                fp["prefilter_threshold"],
+                                "filter_params.prefilter_threshold",
+                                0,
+                                settings::MAX_VECTORS_ADMIN);
+                        if(!prefilter_threshold.ok()) {
+                            return json_error(400, prefilter_threshold.message);
+                        }
+                        filter_params.prefilter_threshold = prefilter_threshold.value_or_throw();
+                    }
+                    if(fp.has("boost_percentage")) {
+                        auto boost_percentage =
+                                ndd::server::parse_bounded_size(fp["boost_percentage"],
+                                                                "filter_params.boost_percentage",
+                                                                0,
+                                                                100);
+                        if(!boost_percentage.ok()) {
+                            return json_error(400, boost_percentage.message);
+                        }
+                        filter_params.boost_percentage = boost_percentage.value_or_throw();
+                    }
                 }
 
                 float dense_rrf_weight = body.has("dense_rrf_weight") ? (float)body["dense_rrf_weight"].d() : settings::DEFAULT_DENSE_RRF_WEIGHT;

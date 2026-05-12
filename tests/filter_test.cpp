@@ -1,8 +1,13 @@
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <climits>
+#include <cstdlib>
+#include <cstdio>
 #include <filesystem>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 #include "filter/filter.hpp"
@@ -466,4 +471,569 @@ TEST_F(FilterTest, ComparisonEmptyRangeAtIntegerBoundary) {
     auto r2 = filter->getIdsMatchingFilter(q_gt_max);
     EXPECT_TRUE(r2.ok()) << r2.message;
     EXPECT_EQ(r2.value_or_throw().size(), 0u);
+}
+
+// =================================================================
+// Hypothesis tests for the dirty numeric_index.hpp range() perf work.
+//
+// These tests do NOT modify production code; they probe internal
+// invariants of Bucket and end-to-end behavior of Filter to confirm
+// or refute the claims made about the post_filter_new regression.
+//
+// Naming convention: HypothesisN_*  where N matches the analysis.
+// A failing assertion in these tests means the corresponding
+// hypothesis is correct (the claimed unwanted behavior is observable).
+// =================================================================
+
+// --- Hypothesis 1 ----------------------------------------------------
+// Claim: For VectorDBBench-style packed int data, bucket values are
+// densely packed in a much narrower extent than 65536, so the new
+// "Coarse full-coverage fast path" predicate
+//     bucket_base >= min_val
+//     && bucket_base + Bucket::MAX_DELTA <= max_val
+// is FALSE on the typical bucket -- even when the OLD post-deserialize
+// predicate (bucket_min >= min_val && bucket_max <= max_val) is TRUE.
+// Implication: the fast path does not actually fire on the workload
+// it was meant to optimize, and we keep paying the deserialize cost.
+//
+// PASS = both predicates evaluated below match the hypothesis values.
+// FAIL = the predicates disagree with the hypothesis (analysis is wrong).
+TEST(Hypothesis1, FastPathPredicateMissesPackedBucket) {
+    constexpr uint32_t base = 0x80000000u;  // sortable encoding of int 0
+    constexpr size_t   N = ndd::filter::Bucket::MAX_SIZE;
+    constexpr uint32_t spread = 1023;       // values densely packed in [base, base+1023]
+
+    ndd::filter::Bucket bucket;
+    bucket.base_value = base;
+    for (size_t i = 0; i < N; ++i) {
+        bucket.add(base + static_cast<uint32_t>(i % (spread + 1)),
+                   static_cast<ndd::idInt>(i + 1));
+    }
+    ASSERT_EQ(bucket.ids.size(), N);
+
+    const uint32_t bucket_min = bucket.get_value(0);
+    const uint32_t bucket_max = bucket.get_value(bucket.ids.size() - 1);
+    EXPECT_EQ(bucket_min, base);
+    EXPECT_EQ(bucket_max, base + spread);
+
+    // Query covers exactly the bucket's actual extent.
+    const uint32_t min_val = bucket_min;
+    const uint32_t max_val = bucket_max;
+
+    const bool old_full_overlap = bucket_min >= min_val && bucket_max <= max_val;
+    const bool new_fast_path =
+        bucket.base_value >= min_val
+        && static_cast<uint64_t>(bucket.base_value)
+                   + ndd::filter::Bucket::MAX_DELTA <= max_val;
+
+    EXPECT_TRUE(old_full_overlap)
+        << "OLD code's full-overlap branch would fire on this bucket";
+    EXPECT_FALSE(new_fast_path)
+        << "NEW fast path requires the entire 65536-wide extent to fit "
+           "inside [min,max], so it MISSES on packed buckets";
+}
+
+// Counter-test: when bucket values DO span the full delta range and
+// the query is wide enough, the new fast path predicate is TRUE.
+TEST(Hypothesis1, FastPathFiresOnWidelySpreadBucket) {
+    constexpr uint32_t base = 100'000;
+    ndd::filter::Bucket bucket;
+    bucket.base_value = base;
+    for (size_t i = 0; i < 1024; ++i) {
+        const uint32_t val = base
+            + static_cast<uint32_t>(
+                  (i * static_cast<uint64_t>(ndd::filter::Bucket::MAX_DELTA))
+                  / 1023);
+        bucket.add(val, static_cast<ndd::idInt>(i + 1));
+    }
+
+    const uint32_t min_val = base;
+    const uint32_t max_val = base + ndd::filter::Bucket::MAX_DELTA;
+    const bool new_fast_path =
+        bucket.base_value >= min_val
+        && static_cast<uint64_t>(bucket.base_value)
+                   + ndd::filter::Bucket::MAX_DELTA <= max_val;
+    EXPECT_TRUE(new_fast_path);
+}
+
+// --- Hypothesis 2 ----------------------------------------------------
+// Claim: After bucket saturation with duplicates (the dirty Bucket::add
+// caps deltas/ids at MAX_SIZE for delta_32 == 0 inserts but keeps
+// adding to summary_bitmap), the bucket has cardinality > ids.size,
+// and the new bitmap-only-inclusion branch in range() returns ids
+// that the OLD code would never have surfaced.
+TEST(Hypothesis2, SaturationCreatesBitmapOnlyEntries) {
+    constexpr uint32_t base = 0;
+    constexpr ndd::idInt N_TOTAL = ndd::filter::Bucket::MAX_SIZE + 500;
+
+    ndd::filter::Bucket bucket;
+    bucket.base_value = base;
+    for (ndd::idInt i = 1; i <= N_TOTAL; ++i) {
+        bucket.add(base, i);  // all duplicates of base_value
+    }
+
+    EXPECT_EQ(bucket.ids.size(), ndd::filter::Bucket::MAX_SIZE);
+    EXPECT_EQ(bucket.summary_bitmap.cardinality(), N_TOTAL);
+    EXPECT_GT(bucket.summary_bitmap.cardinality(), bucket.ids.size())
+        << "bitmap-only branch in range() will fire iff cardinality > ids.size";
+}
+
+// End-to-end check through the Filter API: when we insert MAX_SIZE+K
+// rows that all share a numeric value, an $eq query should return all
+// MAX_SIZE+K ids. If saturation drops K of them, this test fails -- but
+// then the recall bump observed in the chart cannot be explained by
+// this branch and we should look elsewhere.
+TEST_F(FilterTest, Hypothesis2_RangeReturnsAllSaturatedDuplicates) {
+    constexpr int VALUE = 42;
+    constexpr ndd::idInt EXTRA = 500;
+    constexpr ndd::idInt N = ndd::filter::Bucket::MAX_SIZE + EXTRA;
+
+    const std::string filter_payload =
+        std::string(R"({"score": )") + std::to_string(VALUE) + "}";
+    for (ndd::idInt i = 1; i <= N; ++i) {
+        expect_ok(filter->add_filters_from_json(i, filter_payload));
+    }
+
+    json query = json::array({{ {"score", {{"$eq", VALUE}}} }});
+    auto ids = unwrap_ok(filter->getIdsMatchingFilter(query));
+    EXPECT_EQ(ids.size(), N)
+        << "If saturation logic is dropping ids, recall would actually go DOWN, "
+           "not up, contradicting the chart.";
+}
+
+// --- Hypothesis 3 ----------------------------------------------------
+// Claim: When a slide-split fires on a saturated bucket, the LEFT
+// bucket's summary_bitmap is rebuilt from `ids` only (see
+// add_to_buckets at numeric_index.hpp:614-617):
+//     bucket.summary_bitmap = ndd::RoaringBitmap();
+//     for (auto bucket_id : bucket.ids) bucket.summary_bitmap.add(bucket_id);
+// Any bitmap-only entries (excess saturated duplicates) that lived on
+// the LEFT side of the split are silently dropped.
+//
+// We reproduce the rebuild step inline because the slide-split lives
+// inside NumericIndex::add_to_buckets (a private path with no test
+// hook). If H3 holds, the data loss is observable on the local Bucket.
+TEST(Hypothesis3, SlideSplitRebuildLosesBitmapOnlyEntries) {
+    constexpr uint32_t base = 0;
+    ndd::filter::Bucket bucket;
+    bucket.base_value = base;
+
+    // Fill with MAX_SIZE unique-delta entries so a real split is possible.
+    for (uint32_t v = 0; v < ndd::filter::Bucket::MAX_SIZE; ++v) {
+        bucket.add(v, static_cast<ndd::idInt>(v + 1));
+    }
+    ASSERT_EQ(bucket.ids.size(), ndd::filter::Bucket::MAX_SIZE);
+
+    // Simulate the saturated-duplicate path: bitmap gains an id but
+    // ids/deltas do not (because Bucket::add returns early for
+    // delta_32 == 0 once ids.size() >= MAX_SIZE).
+    constexpr ndd::idInt BITMAP_ONLY_ID_A = 100'000;
+    constexpr ndd::idInt BITMAP_ONLY_ID_B = 100'001;
+    bucket.summary_bitmap.add(BITMAP_ONLY_ID_A);
+    bucket.summary_bitmap.add(BITMAP_ONLY_ID_B);
+    ASSERT_EQ(bucket.summary_bitmap.cardinality(), bucket.ids.size() + 2);
+
+    // Reproduce the slide-split LEFT-side rebuild.
+    const size_t mid_idx = bucket.ids.size() / 2;
+    bucket.deltas.resize(mid_idx);
+    bucket.ids.resize(mid_idx);
+    bucket.summary_bitmap = ndd::RoaringBitmap();
+    for (auto id : bucket.ids) {
+        bucket.summary_bitmap.add(id);
+    }
+
+    EXPECT_FALSE(bucket.summary_bitmap.contains(BITMAP_ONLY_ID_A));
+    EXPECT_FALSE(bucket.summary_bitmap.contains(BITMAP_ONLY_ID_B));
+    EXPECT_EQ(bucket.summary_bitmap.cardinality(), bucket.ids.size());
+}
+
+// --- Hypothesis 4 ----------------------------------------------------
+// Claim: accepting the OLD on-disk format (legacy uint16_t count
+// between bitmap and arrays) recovers cliff-corrupted bitmap ids and
+// can grow the range result candidate set. The production reader now
+// rejects that payload shape instead of trying to salvage it.
+TEST(Hypothesis4, DeserializeRejectsLegacyCountFormat) {
+    // Manually craft an OLD-format payload:
+    //   [u32 bm_size] [bitmap bytes] [u16 count=0]
+    // i.e. cliff-truncated count, but bitmap retained the lost ids.
+
+    constexpr ndd::idInt LOST_ID_A = 7;
+    constexpr ndd::idInt LOST_ID_B = 9;
+    ndd::RoaringBitmap original;
+    original.add(LOST_ID_A);
+    original.add(LOST_ID_B);
+    original.runOptimize();
+
+    const size_t bm_size = original.getSizeInBytes();
+    std::vector<uint8_t> buffer(sizeof(uint32_t) + bm_size + sizeof(uint16_t), 0);
+    uint8_t* ptr = buffer.data();
+
+    const uint32_t bm_size_32 = static_cast<uint32_t>(bm_size);
+    std::memcpy(ptr, &bm_size_32, sizeof(uint32_t));
+    ptr += sizeof(uint32_t);
+    original.write(reinterpret_cast<char*>(ptr));
+    ptr += bm_size;
+    const uint16_t legacy_count = 0;
+    std::memcpy(ptr, &legacy_count, sizeof(uint16_t));
+
+    EXPECT_THROW(
+        (void)ndd::filter::Bucket::deserialize(
+                buffer.data(), buffer.size(), /*base_val=*/100),
+        std::runtime_error);
+}
+
+// Companion check on the read_summary_bitmap fast-path helper: it must
+// reject the same legacy-format payloads as the full deserializer, so
+// the fast path cannot silently reintroduce compatibility.
+TEST(Hypothesis4, ReadSummaryBitmapRejectsLegacyCountFormat) {
+    ndd::RoaringBitmap original;
+    for (ndd::idInt i = 0; i < 50; ++i) original.add(i * 3);
+    original.runOptimize();
+
+    const size_t bm_size = original.getSizeInBytes();
+    std::vector<uint8_t> buffer(sizeof(uint32_t) + bm_size + sizeof(uint16_t), 0);
+    uint8_t* ptr = buffer.data();
+    const uint32_t bm_size_32 = static_cast<uint32_t>(bm_size);
+    std::memcpy(ptr, &bm_size_32, sizeof(uint32_t));
+    ptr += sizeof(uint32_t);
+    original.write(reinterpret_cast<char*>(ptr));
+    ptr += bm_size;
+    const uint16_t legacy_count = 0;
+    std::memcpy(ptr, &legacy_count, sizeof(uint16_t));
+
+    EXPECT_THROW(
+        (void)ndd::filter::Bucket::deserialize(buffer.data(), buffer.size(), 0),
+        std::runtime_error);
+    EXPECT_THROW(
+        (void)ndd::filter::Bucket::read_summary_bitmap(
+                buffer.data(), buffer.size()),
+        std::runtime_error);
+}
+
+// End-to-end recall check through the Filter API: insert N records
+// with a wide spread of numeric values, run a wide range query, and
+// compare the returned id set against a brute-force enumeration of
+// the same JSON payload. If H4 is the regression cause, the chart's
+// recall bump corresponds to results that match brute force more
+// closely on the dirty branch -- but on a freshly built DB (no cliff
+// state) this test must pass exactly. Mismatch here would mean the
+// dirty range() over-includes even on clean data, which would shift
+// the diagnosis.
+TEST_F(FilterTest, Hypothesis4_RangeMatchesBruteForceOnCleanDb) {
+    constexpr ndd::idInt N = 5000;
+    // Spread values across more than one bucket extent (MAX_DELTA = 65535)
+    // so we exercise both the fast path and the per-bucket scan.
+    auto value_for = [](ndd::idInt i) -> int {
+        return static_cast<int>((i * 37) % 200000);
+    };
+
+    for (ndd::idInt i = 1; i <= N; ++i) {
+        const std::string payload =
+            std::string(R"({"score": )") + std::to_string(value_for(i)) + "}";
+        expect_ok(filter->add_filters_from_json(i, payload));
+    }
+
+    constexpr int LO = 50000;
+    constexpr int HI = 120000;
+    json query = json::array({
+        {{"score", {{"$range", json::array({LO, HI})}}}}
+    });
+    auto got = unwrap_ok(filter->getIdsMatchingFilter(query));
+    std::sort(got.begin(), got.end());
+
+    std::vector<ndd::idInt> expected;
+    for (ndd::idInt i = 1; i <= N; ++i) {
+        const int v = value_for(i);
+        if (v >= LO && v <= HI) expected.push_back(i);
+    }
+    std::sort(expected.begin(), expected.end());
+
+    EXPECT_EQ(got, expected);
+}
+
+// =====================================================================
+// NumericRangeBench: targeted microbench against an EXISTING filter MDBX
+// directory. Runs Filter::computeFilterBitmap (which calls
+// NumericIndex::range) repeatedly for a few canned filter_rates and
+// prints per-call wall time. Compare two builds (dirty vs stashed)
+// against the SAME db path, with no concurrency, no HNSW, no HTTP.
+//
+// Activation: set ENDEE_BENCH_DB to a directory containing mdbx.dat.
+// Optional: ENDEE_BENCH_FIELD (default "id"), ENDEE_BENCH_ITERS (default 200).
+//
+// Caveat: Filter::init_environment opens the env with MDBX_WRITEMAP, so
+// no other process may hold the DB while the bench runs (stop the
+// endee server first). The bench itself only issues read queries.
+// =====================================================================
+namespace {
+struct BenchPoint {
+    const char* label;
+    int lo;
+    int hi;
+};
+
+void run_bench_point(Filter& filter,
+                     const std::string& field,
+                     const BenchPoint& pt,
+                     int iters) {
+    json query = json::array({
+        {{field, {{"$range", json::array({pt.lo, pt.hi})}}}}
+    });
+
+    // Warmup -- prime page cache, schema cache, allocator state.
+    for (int i = 0; i < 3; ++i) {
+        auto r = filter.computeFilterBitmap(query);
+        ASSERT_TRUE(r.ok()) << r.message;
+    }
+
+    size_t result_card = 0;
+    auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < iters; ++i) {
+        auto r = filter.computeFilterBitmap(query);
+        ASSERT_TRUE(r.ok()) << r.message;
+        result_card = r.value_or_throw().cardinality();
+    }
+    auto t1 = std::chrono::steady_clock::now();
+
+    const double total_ms =
+        std::chrono::duration<double, std::milli>(t1 - t0).count();
+    const double per_call_ms = total_ms / iters;
+
+    std::printf("  %-12s [% 8d,% 8d]  iters=%d  per_call=%.3f ms  card=%zu\n",
+                pt.label, pt.lo, pt.hi, iters, per_call_ms, result_card);
+}
+}  // namespace
+
+// Dumps internal structure of the bitmap that range() returns. Compare
+// the output between clean and dirty builds to see whether the dirty
+// path is producing a structurally different (and possibly slower to
+// query) bitmap. Also bench-times a tight contains() loop on that
+// bitmap to mirror what BitMapFilterFunctor does inside HNSW search.
+TEST(NumericRangeBench, BitmapStructureAndContainsCost) {
+    const char* db_path = std::getenv("ENDEE_BENCH_DB");
+    if (!db_path || !*db_path) GTEST_SKIP() << "Set ENDEE_BENCH_DB";
+    const char* field_env = std::getenv("ENDEE_BENCH_FIELD");
+    const std::string field = (field_env && *field_env) ? field_env : "id";
+
+    Filter filter(db_path);
+
+    struct Point { const char* label; long long lo; long long hi; };
+    const Point points[] = {
+        {"rate~0.99", 0, 9'900'000},
+        {"rate~0.80", 0, 8'000'000},
+        {"rate~0.50", 0, 5'000'000},
+        {"rate~0.01", 0,   100'000},
+    };
+
+    for (const auto& p : points) {
+        json q = json::array({{ {field, {{"$range", json::array({p.lo, p.hi})}}} }});
+        auto r = filter.computeFilterBitmap(q);
+        ASSERT_TRUE(r.ok()) << r.message;
+        auto& bm = r.value_or_throw();
+        const uint64_t card = bm.cardinality();
+
+        // Force-serialize to see the structural cost of the bitmap.
+        // The size after runOptimize is the most honest "structural cost"
+        // because OLD writes always runOptimize before persisting.
+        bm.runOptimize();
+        const size_t opt_bytes = bm.getSizeInBytes();
+        // Probe contains() cost on a fixed, stride-based set of ids inside
+        // the range. 1M lookups -- about the same order as HNSW filtered
+        // search visit count at moderate ef.
+        constexpr int N_PROBES = 1'000'000;
+        const long long stride = std::max<long long>(1, (p.hi - p.lo) / N_PROBES);
+        volatile uint64_t sink = 0;
+        auto t0 = std::chrono::steady_clock::now();
+        for (long long v = p.lo; v < p.hi && v < p.lo + (long long)N_PROBES * stride; v += stride) {
+            sink += bm.contains(static_cast<uint32_t>(v)) ? 1 : 0;
+        }
+        auto t1 = std::chrono::steady_clock::now();
+        const double total_us =
+            std::chrono::duration<double, std::micro>(t1 - t0).count();
+        const long long probes_done = (p.hi - p.lo) / stride;
+
+        std::printf("  %-10s card=%llu  bytes_after_runOpt=%zu  "
+                    "contains(%lld probes)=%.1f us  (%.1f ns/probe, hits=%llu)\n",
+                    p.label, (unsigned long long)card, opt_bytes,
+                    probes_done, total_us,
+                    total_us * 1000.0 / std::max<long long>(1, probes_done),
+                    (unsigned long long)sink);
+    }
+}
+
+TEST(NumericRangeBench, ProbeValueDistribution) {
+    const char* db_path = std::getenv("ENDEE_BENCH_DB");
+    if (!db_path || !*db_path) GTEST_SKIP() << "Set ENDEE_BENCH_DB";
+    const char* field_env = std::getenv("ENDEE_BENCH_FIELD");
+    const std::string field = (field_env && *field_env) ? field_env : "id";
+    Filter f(db_path);
+    auto probe = [&](long long lo, long long hi) {
+        json q = json::array({{ {field, {{"$range", json::array({lo, hi})}}} }});
+        auto r = f.computeFilterBitmap(q);
+        ASSERT_TRUE(r.ok()) << r.message;
+        std::printf("  range[% 12lld, % 12lld]  card=%llu\n",
+                    lo, hi, (unsigned long long)r.value_or_throw().cardinality());
+    };
+    probe(-2147483647LL, 2147483647LL);
+    probe(0, 10000000);
+    probe(0, 5000000);
+    probe(2500000, 7500000);
+    probe(-32768, 32767);
+    probe(0, 100000);
+}
+
+TEST(NumericRangeBench, RangeQueryWallClock) {
+    const char* db_path = std::getenv("ENDEE_BENCH_DB");
+    if (!db_path || !*db_path) {
+        GTEST_SKIP() << "Set ENDEE_BENCH_DB to a filter directory to run";
+    }
+    const char* field_env = std::getenv("ENDEE_BENCH_FIELD");
+    const std::string field = (field_env && *field_env) ? field_env : "id";
+    const char* iters_env = std::getenv("ENDEE_BENCH_ITERS");
+    const int iters = (iters_env && *iters_env) ? std::atoi(iters_env) : 200;
+    ASSERT_GT(iters, 0);
+
+    std::printf("NumericRangeBench: db=%s  field=%s  iters=%d\n",
+                db_path, field.c_str(), iters);
+
+    Filter filter(db_path);
+
+    // Chart-aligned filter_rate buckets. The benchmark DB has uint32
+    // values in [0, 10_000_000] with exactly one id per value (probed
+    // via ProbeValueDistribution), so filter_rate ~= (hi - lo) / 1e7.
+    const BenchPoint points[] = {
+        {"rate~0.99", 0, 9'900'000},
+        {"rate~0.80", 0, 8'000'000},
+        {"rate~0.50", 0, 5'000'000},
+        {"rate~0.01", 0,   100'000},
+    };
+
+    for (const auto& pt : points) {
+        run_bench_point(filter, field, pt, iters);
+    }
+}
+
+// =====================================================================
+// NumericRangeBench_MT: same as above, but with N threads hammering
+// range() concurrently against ONE shared Filter. Each thread issues
+// computeFilterBitmap in a tight loop for a fixed wall-clock window.
+//
+// What this tells us: if dirty range() regresses here vs the clean
+// build but the single-threaded NumericRangeBench above does not,
+// the cost is concurrency-related (heap / allocator / cache-line
+// contention triggered by the dirty in-memory layout), not per-call
+// algorithmic.
+//
+// Activation: same env vars as the single-threaded bench, plus:
+//   ENDEE_BENCH_THREADS  (default 16)
+//   ENDEE_BENCH_SECONDS  (default 8)
+// =====================================================================
+namespace {
+struct MtResult {
+    uint64_t total_ops = 0;
+    uint64_t result_card_sample = 0;
+};
+
+void run_bench_point_mt(Filter& filter,
+                        const std::string& field,
+                        const BenchPoint& pt,
+                        int threads,
+                        double seconds) {
+    json query = json::array({
+        {{field, {{"$range", json::array({pt.lo, pt.hi})}}}}
+    });
+
+    // Warmup serially -- prime page cache + schema cache.
+    for (int i = 0; i < 3; ++i) {
+        auto r = filter.computeFilterBitmap(query);
+        ASSERT_TRUE(r.ok()) << r.message;
+    }
+
+    std::atomic<bool> start{false};
+    std::atomic<bool> stop{false};
+    std::vector<MtResult> per_thread(threads);
+
+    auto worker = [&](int tid) {
+        while (!start.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        uint64_t ops = 0;
+        uint64_t card_sample = 0;
+        while (!stop.load(std::memory_order_acquire)) {
+            auto r = filter.computeFilterBitmap(query);
+            if (!r.ok()) {
+                std::fprintf(stderr, "thread %d: %s\n", tid, r.message.c_str());
+                return;
+            }
+            if ((ops & 0xFFF) == 0) {
+                card_sample = r.value_or_throw().cardinality();
+            }
+            ++ops;
+        }
+        per_thread[tid].total_ops = ops;
+        per_thread[tid].result_card_sample = card_sample;
+    };
+
+    std::vector<std::thread> ts;
+    ts.reserve(threads);
+    for (int i = 0; i < threads; ++i) ts.emplace_back(worker, i);
+
+    auto t0 = std::chrono::steady_clock::now();
+    start.store(true, std::memory_order_release);
+
+    std::this_thread::sleep_for(std::chrono::duration<double>(seconds));
+    stop.store(true, std::memory_order_release);
+
+    for (auto& t : ts) t.join();
+    auto t1 = std::chrono::steady_clock::now();
+
+    uint64_t total_ops = 0;
+    uint64_t card = 0;
+    for (const auto& r : per_thread) {
+        total_ops += r.total_ops;
+        if (r.result_card_sample) card = r.result_card_sample;
+    }
+    const double elapsed_s =
+        std::chrono::duration<double>(t1 - t0).count();
+    const double qps = total_ops / elapsed_s;
+    const double per_call_ms = (elapsed_s * 1000.0 * threads) / total_ops;
+
+    std::printf("  %-12s [% 8d,% 8d]  threads=%d  ops=%llu  qps=%.1f  "
+                "per_call_avg=%.3f ms  card=%llu\n",
+                pt.label, pt.lo, pt.hi, threads,
+                (unsigned long long)total_ops, qps, per_call_ms,
+                (unsigned long long)card);
+}
+}  // namespace
+
+TEST(NumericRangeBench, RangeQueryMultiThreaded) {
+    const char* db_path = std::getenv("ENDEE_BENCH_DB");
+    if (!db_path || !*db_path) {
+        GTEST_SKIP() << "Set ENDEE_BENCH_DB to a filter directory to run";
+    }
+    const char* field_env = std::getenv("ENDEE_BENCH_FIELD");
+    const std::string field = (field_env && *field_env) ? field_env : "id";
+    const char* threads_env = std::getenv("ENDEE_BENCH_THREADS");
+    const int threads = (threads_env && *threads_env) ? std::atoi(threads_env) : 16;
+    const char* seconds_env = std::getenv("ENDEE_BENCH_SECONDS");
+    const double seconds =
+        (seconds_env && *seconds_env) ? std::atof(seconds_env) : 8.0;
+    ASSERT_GT(threads, 0);
+    ASSERT_GT(seconds, 0.0);
+
+    std::printf("NumericRangeBench_MT: db=%s  field=%s  threads=%d  seconds=%.1f\n",
+                db_path, field.c_str(), threads, seconds);
+
+    Filter filter(db_path);
+
+    const BenchPoint points[] = {
+        {"rate~0.99", 0, 9'900'000},
+        {"rate~0.80", 0, 8'000'000},
+        {"rate~0.50", 0, 5'000'000},
+        {"rate~0.01", 0,   100'000},
+    };
+
+    for (const auto& pt : points) {
+        run_bench_point_mt(filter, field, pt, threads, seconds);
+    }
 }

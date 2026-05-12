@@ -1105,14 +1105,42 @@ public:
             }
             LOG_DEBUG("QuantVectorObject conversion completed with move semantics");
 
-            // Store quantized vectors using optimized batch function (no double conversion!)
+            /*
+             * Store quantized vectors using optimized batch function (no double
+             * conversion). Two parallel vectors flow into store_vectors_batch:
+             *
+             *   storage_vectors : (numeric_id, QuantVectorObject) pairs — the data.
+             *   is_new_to_db    : per-entry "did the id_mapper already know this
+             *                     str_id?" signal, carried in numeric_ids[i].second
+             *                     (see id_mapper::create_ids_batch).
+             *
+             * The flag matters because store_vectors_batch uses it to decide whether
+             * to run the upsert-cleanup pass for each entry:
+             *   - true  => fresh slot or reuse of a deleted slot. The filter index
+             *              has nothing to clean for this numeric_id (a reuse only
+             *              happens after deleteFilter / deletePoint scrubbed it).
+             *   - false => the str_id was already mapped to this numeric_id, so it
+             *              is a live-point upsert. store_vectors_batch reads the
+             *              prior meta.filter and removes its filter index entries
+             *              before the new ones are written. Without this signal
+             *              the old category / numeric entries would survive and
+             *              keep matching queries against the old filter value.
+             *
+             * Skipping this wiring (passing an empty is_new_to_db) silently disables
+             * the cleanup pass — that fallback exists for back-compat, but inside
+             * the upsert flow we always have the signal, so we always pass it.
+             */
             std::vector<std::pair<idInt, QuantVectorObject>> storage_vectors;
+            std::vector<bool> is_new_to_db;
             storage_vectors.reserve(quantized_vectors.size());
+            is_new_to_db.reserve(quantized_vectors.size());
             for(size_t i = 0; i < quantized_vectors.size(); i++) {
                 // Copy QuantVectorObject for storage (we need to keep original for HNSW)
                 storage_vectors.emplace_back(numeric_ids[i].first, quantized_vectors[i]);
+                is_new_to_db.push_back(numeric_ids[i].second);
             }
-            auto storage_result = entry.vector_storage->store_vectors_batch(storage_vectors);
+            auto storage_result =
+                    entry.vector_storage->store_vectors_batch(storage_vectors, is_new_to_db);
             if(!storage_result.ok()) {
                 if(storage_result.code < 100) {
                     LOG_WARN(1212, index_id, "Insert filters rejected: " << storage_result.message);

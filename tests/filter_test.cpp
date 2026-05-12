@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 #include "filter/filter.hpp"
+#include "filter/category_index.hpp"
 #include "json/nlohmann_json.hpp"
 #include "filter/numeric_index.hpp" // For Bucket test
 
@@ -90,6 +91,135 @@ TEST_F(FilterTest, CategoryFilterBasics) {
     EXPECT_NE(std::find(ids.begin(), ids.end(), 1), ids.end());
     EXPECT_NE(std::find(ids.begin(), ids.end(), 3), ids.end());
     EXPECT_EQ(std::find(ids.begin(), ids.end(), 2), ids.end());
+}
+
+class CategoryIndexCorruptionTest : public ::testing::Test {
+protected:
+    std::string db_path;
+    MDBX_env* env = nullptr;
+    std::unique_ptr<ndd::filter::CategoryIndex> category_index;
+
+    void SetUp() override {
+        db_path = "./category_corrupt_db_" + std::to_string(rand());
+        if(fs::exists(db_path)) {
+            fs::remove_all(db_path);
+        }
+        fs::create_directories(db_path);
+
+        int rc = mdbx_env_create(&env);
+        ASSERT_EQ(rc, MDBX_SUCCESS) << mdbx_strerror(rc);
+
+        rc = mdbx_env_set_maxdbs(env, 10);
+        ASSERT_EQ(rc, MDBX_SUCCESS) << mdbx_strerror(rc);
+
+        rc = mdbx_env_set_geometry(env,
+                                   -1,
+                                   1ULL << settings::FILTER_MAP_SIZE_BITS,
+                                   1ULL << settings::FILTER_MAP_SIZE_MAX_BITS,
+                                   1ULL << settings::FILTER_MAP_SIZE_BITS,
+                                   -1,
+                                   -1);
+        ASSERT_EQ(rc, MDBX_SUCCESS) << mdbx_strerror(rc);
+
+        rc = mdbx_env_open(env,
+                           db_path.c_str(),
+                           MDBX_WRITEMAP | MDBX_MAPASYNC | MDBX_NORDAHEAD,
+                           0664);
+        ASSERT_EQ(rc, MDBX_SUCCESS) << mdbx_strerror(rc);
+
+        category_index = std::make_unique<ndd::filter::CategoryIndex>(env);
+    }
+
+    void TearDown() override {
+        category_index.reset();
+        if(env != nullptr) {
+            mdbx_env_close(env);
+            env = nullptr;
+        }
+        if(fs::exists(db_path)) {
+            fs::remove_all(db_path);
+        }
+    }
+
+    void put_raw_payload(const std::string& key_string, std::vector<char>& payload) {
+        MDBX_txn* txn = nullptr;
+        int rc = mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn);
+        ASSERT_EQ(rc, MDBX_SUCCESS) << mdbx_strerror(rc);
+
+        MDBX_val key{const_cast<char*>(key_string.data()), key_string.size()};
+        MDBX_val data{payload.data(), payload.size()};
+        rc = mdbx_put(txn, category_index->get_dbi(), &key, &data, MDBX_UPSERT);
+        if(rc != MDBX_SUCCESS) {
+            mdbx_txn_abort(txn);
+            ASSERT_EQ(rc, MDBX_SUCCESS) << mdbx_strerror(rc);
+        }
+
+        rc = mdbx_txn_commit(txn);
+        ASSERT_EQ(rc, MDBX_SUCCESS) << mdbx_strerror(rc);
+    }
+};
+
+TEST_F(CategoryIndexCorruptionTest, RejectsTruncatedBitmapPayload) {
+    ndd::RoaringBitmap bitmap;
+    bitmap.add(1);
+    bitmap.add(3);
+
+    std::vector<char> payload(bitmap.getSizeInBytes());
+    bitmap.write(payload.data(), true);
+    ASSERT_GT(payload.size(), 1u);
+    payload.pop_back();
+
+    put_raw_payload(ndd::filter::CategoryIndex::make_key("city", "Paris"), payload);
+
+    auto result = category_index->get_bitmap("city", "Paris");
+    EXPECT_FALSE(result.ok());
+    EXPECT_EQ(result.code, 200u);
+}
+
+TEST_F(CategoryIndexCorruptionTest, ReadsValidRawBitmapPayload) {
+    ndd::RoaringBitmap bitmap;
+    bitmap.add(11);
+    bitmap.add(29);
+    bitmap.runOptimize();
+
+    std::vector<char> payload(bitmap.getSizeInBytes());
+    bitmap.write(payload.data(), true);
+
+    put_raw_payload(ndd::filter::CategoryIndex::make_key("city", "Berlin"), payload);
+
+    auto result = category_index->get_bitmap("city", "Berlin");
+    ASSERT_TRUE(result.ok()) << result.message;
+    ASSERT_TRUE(result.value.has_value());
+    EXPECT_TRUE(result.value->contains(11));
+    EXPECT_TRUE(result.value->contains(29));
+    EXPECT_FALSE(result.value->contains(30));
+}
+
+TEST_F(CategoryIndexCorruptionTest, RejectsGarbageBitmapPayload) {
+    std::vector<char> payload{0, 0, 0, 0, 1, 2, 3, 4};
+
+    put_raw_payload(ndd::filter::CategoryIndex::make_key("city", "Rome"), payload);
+
+    auto result = category_index->get_bitmap("city", "Rome");
+    EXPECT_FALSE(result.ok());
+    EXPECT_EQ(result.code, 200u);
+    EXPECT_NE(result.message.find("invalid or truncated bitmap payload"),
+              std::string::npos);
+}
+
+TEST_F(CategoryIndexCorruptionTest, RejectsTrailingBytesAfterBitmapPayload) {
+    ndd::RoaringBitmap bitmap;
+    bitmap.add(5);
+
+    std::vector<char> payload(bitmap.getSizeInBytes());
+    bitmap.write(payload.data(), true);
+    payload.push_back('\0');
+
+    put_raw_payload(ndd::filter::CategoryIndex::make_key("city", "London"), payload);
+
+    auto result = category_index->get_bitmap("city", "London");
+    EXPECT_FALSE(result.ok());
+    EXPECT_EQ(result.code, 200u);
 }
 
 TEST_F(FilterTest, BooleanFilterBasics) {
@@ -700,6 +830,98 @@ TEST(Hypothesis4, ReadSummaryBitmapRejectsLegacyCountFormat) {
     ptr += bm_size;
     const uint16_t legacy_count = 0;
     std::memcpy(ptr, &legacy_count, sizeof(uint16_t));
+
+    EXPECT_THROW(
+        (void)ndd::filter::Bucket::deserialize(buffer.data(), buffer.size(), 0),
+        std::runtime_error);
+    EXPECT_THROW(
+        (void)ndd::filter::Bucket::read_summary_bitmap(
+                buffer.data(), buffer.size()),
+        std::runtime_error);
+}
+
+TEST(NumericBucketCorruptionTest, RejectsExtraBytesInsideDeclaredBitmapPayload) {
+    ndd::RoaringBitmap original;
+    for(ndd::idInt i = 0; i < 50; ++i) {
+        original.add(i * 5);
+    }
+    original.runOptimize();
+
+    const size_t bm_size = original.getSizeInBytes();
+    const uint32_t declared_bm_size = static_cast<uint32_t>(bm_size + 1);
+    std::vector<uint8_t> buffer(sizeof(uint32_t) + declared_bm_size, 0);
+    uint8_t* ptr = buffer.data();
+
+    std::memcpy(ptr, &declared_bm_size, sizeof(uint32_t));
+    ptr += sizeof(uint32_t);
+    original.write(reinterpret_cast<char*>(ptr));
+
+    EXPECT_THROW(
+        (void)ndd::filter::Bucket::deserialize(buffer.data(), buffer.size(), 0),
+        std::runtime_error);
+    EXPECT_THROW(
+        (void)ndd::filter::Bucket::read_summary_bitmap(
+                buffer.data(), buffer.size()),
+        std::runtime_error);
+}
+
+TEST(NumericBucketCorruptionTest, ReadBitmapPayloadReturnsOperationResultOnSuccess) {
+    ndd::RoaringBitmap original;
+    original.add(101);
+    original.add(202);
+    original.runOptimize();
+
+    std::vector<uint8_t> payload(original.getSizeInBytes());
+    original.write(reinterpret_cast<char*>(payload.data()));
+
+    auto result = ndd::filter::Bucket::read_bitmap_payload(payload.data(),
+                                                           payload.size());
+
+    ASSERT_TRUE(result.ok()) << result.message;
+    ASSERT_TRUE(result.value.has_value());
+    EXPECT_TRUE(result.value->contains(101));
+    EXPECT_TRUE(result.value->contains(202));
+    EXPECT_FALSE(result.value->contains(303));
+}
+
+TEST(NumericBucketCorruptionTest, ReadBitmapPayloadRejectsGarbageWithoutThrowing) {
+    std::vector<uint8_t> payload{0, 0, 0, 0, 7, 8, 9, 10};
+
+    auto result = ndd::filter::Bucket::read_bitmap_payload(payload.data(),
+                                                           payload.size());
+
+    EXPECT_FALSE(result.ok());
+    EXPECT_EQ(result.code, 200u);
+    EXPECT_FALSE(result.value.has_value());
+    EXPECT_NE(result.message.find("invalid or truncated bitmap payload"),
+              std::string::npos);
+}
+
+TEST(NumericBucketCorruptionTest, DeserializesValidBucketAfterPayloadValidation) {
+    ndd::filter::Bucket bucket;
+    bucket.base_value = 1000;
+    bucket.add(1000, 42);
+    bucket.add(1007, 43);
+
+    auto bytes = bucket.serialize();
+    auto decoded = ndd::filter::Bucket::deserialize(bytes.data(),
+                                                    bytes.size(),
+                                                    bucket.base_value);
+    auto bitmap_only = ndd::filter::Bucket::read_summary_bitmap(bytes.data(),
+                                                                bytes.size());
+
+    EXPECT_EQ(decoded.base_value, bucket.base_value);
+    EXPECT_EQ(decoded.ids.size(), 2u);
+    EXPECT_TRUE(decoded.summary_bitmap.contains(42));
+    EXPECT_TRUE(decoded.summary_bitmap.contains(43));
+    EXPECT_TRUE(bitmap_only.contains(42));
+    EXPECT_TRUE(bitmap_only.contains(43));
+}
+
+TEST(NumericBucketCorruptionTest, RejectsGarbageInsideDeclaredBitmapPayload) {
+    const uint32_t declared_bm_size = 8;
+    std::vector<uint8_t> buffer(sizeof(uint32_t) + declared_bm_size, 0);
+    std::memcpy(buffer.data(), &declared_bm_size, sizeof(uint32_t));
 
     EXPECT_THROW(
         (void)ndd::filter::Bucket::deserialize(buffer.data(), buffer.size(), 0),

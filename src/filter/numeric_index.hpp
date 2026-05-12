@@ -76,6 +76,46 @@ namespace ndd {
 
             bool is_dirty = false;
 
+            static ndd::OperationResult<ndd::RoaringBitmap>
+            read_bitmap_payload(const uint8_t* data, size_t len) {
+                if(len == 0) {
+                    return {SUCCESS, "", ndd::RoaringBitmap()};
+                }
+                if(data == nullptr) {
+                    return {200, "empty bitmap payload"};
+                }
+
+                const char* bytes = reinterpret_cast<const char*>(data);
+                const size_t consumed =
+                    roaring::api::roaring_bitmap_portable_deserialize_size(bytes, len);
+                if(consumed == 0) {
+                    return {200, "invalid or truncated bitmap payload"};
+                }
+                if(consumed != len) {
+                    return {200,
+                            "bitmap payload length mismatch: consumed "
+                            + std::to_string(consumed) + " of "
+                            + std::to_string(len) + " bytes"};
+                }
+
+                ndd::RoaringBitmap bitmap;
+                try {
+                    bitmap = ndd::RoaringBitmap::readSafe(bytes, len);
+                } catch(const std::exception& e) {
+                    return {200,
+                            "failed to deserialize bitmap payload: " + std::string(e.what())};
+                }
+
+                const char* reason = nullptr;
+                if(!roaring::api::roaring_bitmap_internal_validate(&bitmap.roaring,
+                                                                    &reason)) {
+                    return {200,
+                            std::string("invalid bitmap internals")
+                            + (reason != nullptr ? ": " + std::string(reason) : "")};
+                }
+                return {SUCCESS, "", std::move(bitmap)};
+            }
+
             // Helper to get actual value
             uint32_t get_value(size_t index) const {
                 return base_value + deltas[index];
@@ -206,14 +246,22 @@ namespace ndd {
                 uint32_t bm_size;
                 std::memcpy(&bm_size, ptr, sizeof(uint32_t));
                 ptr += sizeof(uint32_t);
-                if (ptr + bm_size > end) {
+                if (bm_size > static_cast<size_t>(end - ptr)) {
                     throw std::runtime_error("Bucket corrupt: invalid bitmap size");
                 }
 
                 // 2. Bitmap
                 if (bm_size > 0) {
-                    b.summary_bitmap =
-                        ndd::RoaringBitmap::read(reinterpret_cast<const char*>(ptr));
+                    auto bitmap_result = read_bitmap_payload(ptr, bm_size);
+                    if(!bitmap_result.ok()) {
+                        throw std::runtime_error("Bucket corrupt: "
+                                                 + bitmap_result.message);
+                    }
+                    if(!bitmap_result.value.has_value()) {
+                        throw std::runtime_error(
+                            "Bucket corrupt: bitmap reader succeeded without a bitmap");
+                    }
+                    b.summary_bitmap = std::move(*bitmap_result.value);
                     ptr += bm_size;
                 }
 
@@ -261,7 +309,7 @@ namespace ndd {
                 uint32_t bm_size;
                 std::memcpy(&bm_size, ptr, sizeof(uint32_t));
                 ptr += sizeof(uint32_t);
-                if (ptr + bm_size > end) {
+                if (bm_size > static_cast<size_t>(end - ptr)) {
                     throw std::runtime_error("Bucket corrupt: invalid bitmap size");
                 }
                 constexpr size_t per_entry =
@@ -272,8 +320,16 @@ namespace ndd {
                     throw std::runtime_error(
                         "Bucket corrupt: residual bytes not aligned");
                 }
-                if(bm_size == 0) return ndd::RoaringBitmap();
-                return ndd::RoaringBitmap::read(reinterpret_cast<const char*>(ptr));
+                auto bitmap_result = read_bitmap_payload(ptr, bm_size);
+                if(!bitmap_result.ok()) {
+                    throw std::runtime_error("Bucket corrupt: "
+                                             + bitmap_result.message);
+                }
+                if(!bitmap_result.value.has_value()) {
+                    throw std::runtime_error(
+                        "Bucket corrupt: bitmap reader succeeded without a bitmap");
+                }
+                return std::move(*bitmap_result.value);
             }
 
             bool is_full() const { return ids.size() >= MAX_SIZE; }

@@ -341,6 +341,7 @@ namespace ndd {
             MDBX_env* env_;
             MDBX_dbi forward_dbi_;   // ID -> Value (Field:ID -> Value)
             MDBX_dbi inverted_dbi_;  // BucketKey -> BucketBlob
+            static constexpr size_t BATCH_TXN_CHUNK_SIZE = 256;
 
             std::string make_forward_key(const std::string& field, ndd::idInt id) {
                 return field + ":" + std::to_string(id);
@@ -798,7 +799,7 @@ namespace ndd {
             }
 
             /*
-             * Writes a batch of numeric filter entries in one MDBX write transaction.
+             * Writes a batch of numeric filter entries in bounded MDBX write transaction chunks.
              *
              * Return codes:
              * 0 = success
@@ -811,25 +812,30 @@ namespace ndd {
                     return {SUCCESS, ""};
                 }
 
-                MDBX_txn* txn = nullptr;
-                int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
-                if(rc != MDBX_SUCCESS) {
-                    return {100, "Failed to begin numeric batch write transaction: "
-                                         + std::string(mdbx_strerror(rc))};
-                }
+                for(size_t start = 0; start < entries.size(); start += BATCH_TXN_CHUNK_SIZE) {
+                    size_t end = std::min(start + BATCH_TXN_CHUNK_SIZE, entries.size());
 
-                for(const auto& entry : entries) {
-                    auto put_result = put_internal(txn, entry.field, entry.id, entry.value);
-                    if(!put_result.ok()) {
-                        mdbx_txn_abort(txn);
-                        return put_result;
+                    MDBX_txn* txn = nullptr;
+                    int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
+                    if(rc != MDBX_SUCCESS) {
+                        return {100, "Failed to begin numeric batch write transaction: "
+                                             + std::string(mdbx_strerror(rc))};
                     }
-                }
 
-                rc = mdbx_txn_commit(txn);
-                if(rc != MDBX_SUCCESS) {
-                    return {100, "Failed to commit numeric batch write transaction: "
-                                         + std::string(mdbx_strerror(rc))};
+                    for(size_t i = start; i < end; ++i) {
+                        const auto& entry = entries[i];
+                        auto put_result = put_internal(txn, entry.field, entry.id, entry.value);
+                        if(!put_result.ok()) {
+                            mdbx_txn_abort(txn);
+                            return put_result;
+                        }
+                    }
+
+                    rc = mdbx_txn_commit(txn);
+                    if(rc != MDBX_SUCCESS) {
+                        return {100, "Failed to commit numeric batch write transaction: "
+                                             + std::string(mdbx_strerror(rc))};
+                    }
                 }
                 return {SUCCESS, ""};
             }

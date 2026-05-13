@@ -250,6 +250,15 @@ endif()
 
 message(STATUS "Binary name: ${NDD_BINARY_NAME}")
 
+# Filter sources are split out so filter headers only expose declarations.
+set(NDD_FILTER_SOURCES
+    src/filter/category_index.cpp
+    src/filter/filter.cpp
+    src/filter/numeric_index.cpp
+)
+
+add_library(ndd_filter STATIC ${NDD_FILTER_SOURCES})
+
 # Add new src/*.cpp files here when they should be compiled into ndd.
 set(NDD_CORE_SOURCES
     src/sparse/inverted_index.cpp
@@ -289,6 +298,15 @@ target_include_directories(ndd_core PRIVATE
     ${OPENSSL_INCLUDE_DIR}
     ${CURL_INCLUDE_DIRS}
 )
+target_include_directories(ndd_filter PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/filter
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/utils
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/json
+    ${LMDB_INCLUDE_DIR}
+)
 target_include_directories(${NDD_BINARY_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/src/server
@@ -308,6 +326,7 @@ target_include_directories(${NDD_BINARY_NAME} PRIVATE
 # Set compiler flags
 if(NOT DEBUG)
     target_compile_options(ndd_core PRIVATE -O3 -ffast-math -fno-finite-math-only -falign-functions=64)
+    target_compile_options(ndd_filter PRIVATE -O3 -ffast-math -fno-finite-math-only -falign-functions=64)
     target_compile_options(${NDD_BINARY_NAME} PRIVATE -O3 -ffast-math -fno-finite-math-only -falign-functions=64)
 endif()
 
@@ -355,6 +374,7 @@ target_compile_definitions(ndd_core PRIVATE
     ASIO_HAS_STD_STRING_VIEW
     MDB_MAXKEYSIZE=512
 )
+target_compile_definitions(ndd_filter PRIVATE MDB_MAXKEYSIZE=512)
 target_compile_definitions(${NDD_BINARY_NAME} PRIVATE 
     ASIO_STANDALONE 
     ASIO_HAS_STD_CHRONO 
@@ -364,6 +384,7 @@ target_compile_definitions(${NDD_BINARY_NAME} PRIVATE
 
 # Link libraries
 target_link_libraries(${NDD_BINARY_NAME} PRIVATE
+    ndd_filter
     Threads::Threads
     OpenSSL::SSL
     OpenSSL::Crypto
@@ -382,6 +403,12 @@ option(ENABLE_TESTING "Enable building tests" OFF)
 if(ENABLE_TESTING)
     enable_testing()
     add_subdirectory(tests)
+    if(TARGET ndd_filter_test)
+        target_link_libraries(ndd_filter_test ndd_filter)
+    endif()
+    if(TARGET ndd_vector_storage_test)
+        target_link_libraries(ndd_vector_storage_test ndd_filter)
+    endif()
 endif()
 
 message(STATUS "Processor: ${CMAKE_SYSTEM_PROCESSOR}")

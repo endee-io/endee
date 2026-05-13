@@ -304,7 +304,7 @@ namespace ndd {
         }
 
         bool Bucket::is_empty() const {
-            return ids.empty();
+            return ids.empty() && summary_bitmap.isEmpty();
         }
 
         std::string NumericIndex::make_forward_key(const std::string& field, ndd::idInt id) {
@@ -626,10 +626,17 @@ namespace ndd {
                         // Truncate left
                         bucket.deltas.resize(mid_idx);
                         bucket.ids.resize(mid_idx);
-                        // Rebuild left bitmap
-                        bucket.summary_bitmap = ndd::RoaringBitmap();
-                        for(auto bucket_id : bucket.ids) {
-                            bucket.summary_bitmap.add(bucket_id);
+                        /**
+                         * Left bitmap = original bitmap minus the ids
+                         * that moved to right_bucket. This preserves
+                         * any delta-0 bitmap-only entries on the left
+                         * (their value == base_value and the left
+                         * bucket's base_value is unchanged), where
+                         * rebuilding from bucket.ids alone would drop
+                         * them.
+                         */
+                        for(size_t i = 0; i < right_bucket.ids.size(); ++i) {
+                            bucket.summary_bitmap.remove(right_bucket.ids[i]);
                         }
 
                         // Now add new value to correct bucket
@@ -1002,6 +1009,18 @@ namespace ndd {
                                                         bucket_base);
 
                     if(bucket.ids.empty()) {
+                        /**
+                         * ids[] empty but the bucket survived means the
+                         * bitmap still carries delta-0 (bitmap-only)
+                         * entries that were absorbed past MAX_SIZE by
+                         * the saturated-duplicate path in Bucket::add.
+                         * All such ids have value == base_value, so
+                         * include them iff base_value is in range.
+                         */
+                        if(!bucket.summary_bitmap.isEmpty()
+                           && bucket_base >= min_val && bucket_base <= max_val) {
+                            result |= bucket.summary_bitmap;
+                        }
                         rc = mdbx_cursor_get(cursor, &key, &data, MDBX_NEXT);
                         continue;
                     }

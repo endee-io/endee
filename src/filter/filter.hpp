@@ -78,12 +78,24 @@ private:
      */
     ndd::OperationResult<> register_field_type(const std::string& field, FieldType type);
 
-    /*
+    /**
      * Converts a JSON number into the current sortable numeric filter encoding.
+     * All numeric filter values use one float32 sortable domain, including JSON
+     * integers, so 2 and 2.0 compare equal. Limitations: values are rounded to
+     * float precision before indexing/querying, distinct large integers can
+     * collapse to the same key, and strict comparisons use the next float32
+     * representable value around the rounded query bound. float32 has 24 bits
+     * of integer precision (23 stored mantissa bits plus the hidden bit), so it
+     * represents every integer only up to 2^24 = 16,777,216; above that, not all
+     * consecutive integers are representable. Consecutive integers are also less
+     * dense in the float sortable bit domain than under int_to_sortable, so
+     * integer-heavy fields can create more numeric buckets and make wide range
+     * scans walk more bucket entries. Existing filter DBs that indexed integers
+     * with int_to_sortable must be rebuilt.
      *
      * Return codes:
      * 0 = success
-     * 2 = value is not numeric; caller should return HTTP 400
+     * 2 = value is not numeric or not finite in float32; caller should return HTTP 400
      */
     static ndd::OperationResult<uint32_t> sortable_from_json(const nlohmann::json& value,
                                                             const std::string& context);
@@ -113,7 +125,7 @@ private:
      * Resolves [$lt | $lte | $gt | $gte] on a JSON numeric value into a
      * sortable [min, max] range usable against NumericIndex::range / check_range.
      * A returned pair with min > max signals a provably-empty range
-     * (e.g. $gt INT32_MAX, $lt the smallest float); callers must skip the lookup.
+     * (e.g. $gt the largest finite float32); callers must skip the lookup.
      *
      * Return codes:
      * 0 = success

@@ -35,22 +35,41 @@ Filter::validate_filter_key_component(const std::string& component,
     return {SUCCESS, ""};
 }
 
-/*
+/**
  * Converts a JSON number into the current sortable numeric filter encoding.
+ * All numeric filter values use one float32 sortable domain, including JSON
+ * integers, so 2 and 2.0 compare equal. Limitations: values are rounded to
+ * float precision before indexing/querying, distinct large integers can
+ * collapse to the same key, and strict comparisons use the next float32
+ * representable value around the rounded query bound. float32 has 24 bits of
+ * integer precision (23 stored mantissa bits plus the hidden bit), so it
+ * represents every integer only up to 2^24 = 16,777,216; above that, not all
+ * consecutive integers are representable. Consecutive integers are also less
+ * dense in the float sortable bit domain than under int_to_sortable, so
+ * integer-heavy fields can create more numeric buckets and make wide range
+ * scans walk more bucket entries. Existing filter DBs that indexed integers
+ * with int_to_sortable must be rebuilt.
  *
  * Return codes:
  * 0 = success
- * 2 = value is not numeric; caller should return HTTP 400
+ * 2 = value is not numeric or not finite in float32; caller should return HTTP 400
  */
 ndd::OperationResult<uint32_t> Filter::sortable_from_json(const nlohmann::json& value,
                                                           const std::string& context) {
-    if(value.is_number_integer()) {
-        return {SUCCESS, "", ndd::filter::int_to_sortable(value.get<int>())};
+    if(!value.is_number()) {
+        return {2, context + " must be a finite float32 number"};
     }
-    if(value.is_number()) {
-        return {SUCCESS, "", ndd::filter::float_to_sortable(value.get<float>())};
+
+    float numeric_value = value.get<float>();
+    if(!std::isfinite(numeric_value)) {
+        LOG_WARN(1202, "Rejected numeric filter value outside finite float32 domain");
+        return {2, context + " must be a finite float32 number"};
     }
-    return {2, context + " must be a number"};
+    if(numeric_value == 0.0f) {
+        numeric_value = 0.0f;
+    }
+
+    return {SUCCESS, "", ndd::filter::float_to_sortable(numeric_value)};
 }
 
 /*
@@ -88,7 +107,7 @@ ndd::OperationResult<std::string> Filter::category_value_from_json(
  * Resolves [$lt | $lte | $gt | $gte] on a JSON numeric value into a
  * sortable [min, max] range usable against NumericIndex::range / check_range.
  * A returned pair with min > max signals a provably-empty range
- * (e.g. $gt INT32_MAX, $lt the smallest float); callers must skip the lookup.
+ * (e.g. $gt the largest finite float32); callers must skip the lookup.
  *
  * Return codes:
  * 0 = success
@@ -105,8 +124,13 @@ Filter::numeric_bound_from_comparison(const std::string& op, const nlohmann::jso
     if(!val.is_number()) {
         return {2, op + " value must be a finite number"};
     }
-    if(!val.is_number_integer() && !std::isfinite(val.get<float>())) {
+    float x = val.get<float>();
+    if(!std::isfinite(x)) {
+        LOG_WARN(1203, "Rejected numeric comparison bound outside finite float32 domain");
         return {2, op + " value must be a finite number"};
+    }
+    if(x == 0.0f) {
+        x = 0.0f;
     }
 
     if(op == "$gte") {
@@ -124,14 +148,6 @@ Filter::numeric_bound_from_comparison(const std::string& op, const nlohmann::jso
         return {SUCCESS, "", Bound{SORTABLE_MIN, sortable_result.value_or_throw()}};
     }
     if(op == "$gt") {
-        if(val.is_number_integer()) {
-            int32_t x = val.get<int>();
-            if(x == std::numeric_limits<int32_t>::max()) {
-                return {SUCCESS, "", EMPTY};
-            }
-            return {SUCCESS, "", Bound{ndd::filter::int_to_sortable(x + 1), SORTABLE_MAX}};
-        }
-        float x = val.get<float>();
         float next = std::nextafterf(x, std::numeric_limits<float>::infinity());
         if(!std::isfinite(next)) {
             return {SUCCESS, "", EMPTY};
@@ -139,14 +155,6 @@ Filter::numeric_bound_from_comparison(const std::string& op, const nlohmann::jso
         return {SUCCESS, "", Bound{ndd::filter::float_to_sortable(next), SORTABLE_MAX}};
     }
     if(op == "$lt") {
-        if(val.is_number_integer()) {
-            int32_t x = val.get<int>();
-            if(x == std::numeric_limits<int32_t>::min()) {
-                return {SUCCESS, "", EMPTY};
-            }
-            return {SUCCESS, "", Bound{SORTABLE_MIN, ndd::filter::int_to_sortable(x - 1)}};
-        }
-        float x = val.get<float>();
         float next = std::nextafterf(x, -std::numeric_limits<float>::infinity());
         if(!std::isfinite(next)) {
             return {SUCCESS, "", EMPTY};

@@ -71,6 +71,38 @@ elseif(USE_NEON)
     target_compile_definitions(ndd_vector_storage_test PRIVATE USE_NEON)
 endif()
 
+add_executable(ndd_request_validation_test request_validation_test.cpp)
+
+target_link_libraries(ndd_request_validation_test GTest::gtest_main)
+
+target_include_directories(ndd_request_validation_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/server
+    ${CMAKE_SOURCE_DIR}/src/utils
+    ${CROW_INCLUDE_DIR}
+)
+
+# Numeric index stress test: random churn + drain phase, asserts the
+# forward<->inverted invariant across the bitmap-only / split paths.
+add_executable(ndd_numeric_index_stress_test numeric_index_stress_test.cpp
+    ${LMDB_SOURCES}
+    ${ROARING_SOURCE})
+
+target_link_libraries(ndd_numeric_index_stress_test GTest::gtest_main)
+
+target_include_directories(ndd_numeric_index_stress_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/core
+    ${CMAKE_SOURCE_DIR}/src/filter
+    ${CMAKE_SOURCE_DIR}/src/utils
+    ${CMAKE_SOURCE_DIR}/third_party
+    ${CMAKE_SOURCE_DIR}/third_party/json
+)
+
+target_compile_definitions(ndd_numeric_index_stress_test PRIVATE MDB_MAXKEYSIZE=512)
+
 include(GoogleTest)
 gtest_discover_tests(ndd_filter_test)
 gtest_discover_tests(ndd_vector_storage_test)
+gtest_discover_tests(ndd_request_validation_test)
+gtest_discover_tests(ndd_numeric_index_stress_test)

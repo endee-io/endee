@@ -3,9 +3,13 @@
 #include <atomic>
 #include <chrono>
 #include <climits>
+#include <cmath>
 #include <cstdlib>
 #include <cstdio>
 #include <filesystem>
+#include <iomanip>
+#include <limits>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <utility>
@@ -467,7 +471,57 @@ std::vector<ndd::idInt> sorted_ids(std::vector<ndd::idInt> ids) {
     return ids;
 }
 
+std::string hex32(uint32_t value) {
+    std::ostringstream out;
+    out << "0x" << std::hex << std::uppercase << std::setw(8)
+        << std::setfill('0') << value;
+    return out.str();
+}
+
 }  // namespace
+
+TEST_F(FilterTest, IntegerIndexedNumericFieldCanBeQueriedWithFloatNumber) {
+    expect_ok(filter->add_filters_from_json(1, R"({"score": 1})"));
+    expect_ok(filter->add_filters_from_json(2, R"({"score": 2})"));
+    expect_ok(filter->add_filters_from_json(3, R"({"score": 3})"));
+
+    const uint32_t float_two = ndd::filter::float_to_sortable(2.0f);
+
+    json exact_float_query = json::parse(R"([{"score":{"$eq":2.0}}])");
+    auto exact_ids = sorted_ids(
+            unwrap_ok(filter->getIdsMatchingFilter(exact_float_query)));
+
+    EXPECT_EQ(exact_ids, (std::vector<ndd::idInt>{2}))
+        << "integer JSON values should be indexed through the shared float "
+           "sortable domain: float_to_sortable(2.0)="
+        << hex32(float_two);
+
+    json lt_float_query = json::parse(R"([{"score":{"$lt":2.0}}])");
+    auto lt_ids = sorted_ids(
+            unwrap_ok(filter->getIdsMatchingFilter(lt_float_query)));
+
+    EXPECT_EQ(lt_ids, (std::vector<ndd::idInt>{1}))
+        << "stored integer values and float comparison bounds should share "
+           "the same float sortable domain";
+}
+
+TEST_F(FilterTest, FloatIndexedNumericFieldCanBeQueriedWithIntegerNumber) {
+    expect_ok(filter->add_filters_from_json(1, R"({"score": 1.0})"));
+    expect_ok(filter->add_filters_from_json(2, R"({"score": 2.0})"));
+    expect_ok(filter->add_filters_from_json(3, R"({"score": 3.0})"));
+
+    json exact_int_query = json::parse(R"([{"score":{"$eq":2}}])");
+    auto exact_ids = sorted_ids(
+            unwrap_ok(filter->getIdsMatchingFilter(exact_int_query)));
+
+    EXPECT_EQ(exact_ids, (std::vector<ndd::idInt>{2}));
+
+    json gte_int_query = json::parse(R"([{"score":{"$gte":2}}])");
+    auto gte_ids = sorted_ids(
+            unwrap_ok(filter->getIdsMatchingFilter(gte_int_query)));
+
+    EXPECT_EQ(gte_ids, (std::vector<ndd::idInt>{2, 3}));
+}
 
 TEST_F(FilterTest, ComparisonOperatorsInteger) {
     expect_ok(filter->add_filters_from_json(1, R"({"age": 25})"));
@@ -775,6 +829,123 @@ TEST(Hypothesis3, SlideSplitRebuildLosesBitmapOnlyEntries) {
     EXPECT_FALSE(bucket.summary_bitmap.contains(BITMAP_ONLY_ID_A));
     EXPECT_FALSE(bucket.summary_bitmap.contains(BITMAP_ONLY_ID_B));
     EXPECT_EQ(bucket.summary_bitmap.cardinality(), bucket.ids.size());
+}
+
+// Regression: end-to-end through add_to_buckets. After a real split
+// fires on a saturated-with-duplicates bucket, bitmap-only ids that
+// belong to the left side must survive. Pre-fix the left bitmap was
+// rebuilt from ids[] only and bitmap-only ids were lost; the fix
+// preserves them by subtracting only the ids that moved right.
+//
+// Critical: the warm value must land in the SAME bucket as the anchor.
+// Filter values are floats, and sortable deltas grow ~2^18 per integer
+// unit near small anchors -- so e.g. anchor=42 and warm=47 (delta ~1.3M)
+// would exceed Bucket::MAX_DELTA and create a separate bucket, never
+// triggering the split path. std::nextafterf gives a one-ULP step
+// (sortable delta == 1), guaranteed in-bucket.
+TEST_F(FilterTest, SplitPreservesBitmapOnlyDuplicates) {
+    constexpr float B = 42.0f;
+    const float B_next = std::nextafterf(B, std::numeric_limits<float>::infinity());
+    ASSERT_NE(B, B_next);
+
+    constexpr ndd::idInt EXTRA = 500;
+    constexpr ndd::idInt SATURATION = ndd::filter::Bucket::MAX_SIZE + EXTRA;
+
+    auto payload = [](float v) {
+        std::ostringstream os;
+        os.precision(std::numeric_limits<float>::max_digits10);
+        os << R"({"score": )" << v << "}";
+        return os.str();
+    };
+
+    for (ndd::idInt i = 1; i <= SATURATION; ++i) {
+        expect_ok(filter->add_filters_from_json(i, payload(B)));
+    }
+
+    // First non-base insert: slide-split fallthrough lands it in ids[]
+    // alongside the all-zero deltas, creating the boundary the next
+    // insert will split on.
+    expect_ok(filter->add_filters_from_json(SATURATION + 1, payload(B_next)));
+
+    // Second insert at B: triggers the standard slide-split. Without
+    // the fix the left bitmap rebuild here drops EXTRA bitmap-only ids.
+    expect_ok(filter->add_filters_from_json(SATURATION + 2, payload(B)));
+
+    json query_eq_B = json::array({{ {"score", {{"$eq", B}}} }});
+    auto ids = unwrap_ok(filter->getIdsMatchingFilter(query_eq_B));
+    EXPECT_EQ(ids.size(), SATURATION + 1)
+        << "Split rebuild must preserve bitmap-only delta-0 entries on the left.";
+}
+
+// Regression: removing every id that lives in ids[] must NOT delete a
+// bucket that still has bitmap-only entries. Pre-fix is_empty() only
+// looked at ids[], so the bucket was deleted and the bitmap-only ids
+// vanished from the inverted index even though the forward index kept
+// pointing at them.
+TEST_F(FilterTest, RemoveKeepsBucketAliveWithBitmapOnlyEntries) {
+    constexpr int B = 7;
+    constexpr ndd::idInt EXTRA = 50;
+    constexpr ndd::idInt SATURATION = ndd::filter::Bucket::MAX_SIZE + EXTRA;
+    const std::string payload =
+        std::string(R"({"score": )") + std::to_string(B) + "}";
+
+    for (ndd::idInt i = 1; i <= SATURATION; ++i) {
+        expect_ok(filter->add_filters_from_json(i, payload));
+    }
+
+    // The first MAX_SIZE inserts populated ids[]; the trailing EXTRA
+    // were absorbed bitmap-only. Remove the first MAX_SIZE -- after
+    // the last one, ids[] is empty but the bitmap still holds EXTRA
+    // ids.
+    for (ndd::idInt i = 1;
+         i <= static_cast<ndd::idInt>(ndd::filter::Bucket::MAX_SIZE); ++i) {
+        expect_ok(filter->remove_filters_from_json(i, payload));
+    }
+
+    json query_eq_B = json::array({{ {"score", {{"$eq", B}}} }});
+    auto ids = unwrap_ok(filter->getIdsMatchingFilter(query_eq_B));
+    EXPECT_EQ(ids.size(), EXTRA)
+        << "Bucket must persist while summary_bitmap is non-empty.";
+
+    // Sanity check: ids should be exactly the bitmap-only tail.
+    std::sort(ids.begin(), ids.end());
+    EXPECT_EQ(ids.front(),
+              static_cast<ndd::idInt>(ndd::filter::Bucket::MAX_SIZE + 1));
+    EXPECT_EQ(ids.back(), SATURATION);
+}
+
+// Regression: in the range slow path, a bucket whose ids[] is empty
+// but whose summary_bitmap is non-empty must contribute its
+// bitmap-only entries iff base_value lies in [min_val, max_val].
+// Pre-fix the path unconditionally skipped such buckets.
+TEST_F(FilterTest, RangeSlowPathReturnsBitmapOnlyEntries) {
+    constexpr int B = 1000;
+    constexpr ndd::idInt EXTRA = 30;
+    constexpr ndd::idInt SATURATION = ndd::filter::Bucket::MAX_SIZE + EXTRA;
+    const std::string payload =
+        std::string(R"({"score": )") + std::to_string(B) + "}";
+
+    for (ndd::idInt i = 1; i <= SATURATION; ++i) {
+        expect_ok(filter->add_filters_from_json(i, payload));
+    }
+    for (ndd::idInt i = 1;
+         i <= static_cast<ndd::idInt>(ndd::filter::Bucket::MAX_SIZE); ++i) {
+        expect_ok(filter->remove_filters_from_json(i, payload));
+    }
+
+    // Narrow range covering only B -- forces the slow path (the fast
+    // path needs base + MAX_DELTA <= max_val, which is not the case
+    // here) and lands in the empty-ids branch.
+    json in_range = json::array({{ {"score", {{"$range", {B, B}}}} }});
+    auto in_ids = unwrap_ok(filter->getIdsMatchingFilter(in_range));
+    EXPECT_EQ(in_ids.size(), EXTRA);
+
+    // Same shape but base_value is OUTSIDE the range. Bitmap-only
+    // entries must be excluded.
+    json out_range =
+        json::array({{ {"score", {{"$range", {B + 1, B + 100}}}} }});
+    auto out_ids = unwrap_ok(filter->getIdsMatchingFilter(out_range));
+    EXPECT_EQ(out_ids.size(), 0u);
 }
 
 // --- Hypothesis 4 ----------------------------------------------------
@@ -1132,6 +1303,335 @@ TEST(NumericRangeBench, RangeQueryWallClock) {
 
     for (const auto& pt : points) {
         run_bench_point(filter, field, pt, iters);
+    }
+}
+
+/**
+ * NumericRangeBench.FloatDomainVsIntegerDomain builds two temporary raw
+ * NumericIndex stores with identical integer values:
+ *   - legacy path: int_to_sortable(value)
+ *   - float-domain path: float_to_sortable(static_cast<float>(value))
+ *
+ * This isolates the index-layout and range-query cost of the shared float32
+ * numeric domain without JSON parsing or Filter schema overhead. Expect
+ * integer-heavy fields to have different bucket behavior under the float
+ * domain. Consecutive ints are dense under int_to_sortable, but their
+ * float_to_sortable bit patterns are not equally dense, so wide range scans
+ * may walk more buckets. The sample output prints bucket-count and range-time
+ * ratios to make that visible.
+ *
+ * Precision caveat: float32 has a 24-bit significand (23 stored mantissa bits
+ * plus the hidden bit). It represents every integer only up to 16,777,216; past
+ * that, adjacent integers can round to the same float32 value and therefore the
+ * same sortable key.
+ *
+ * Activation:
+ *   ENDEE_SORTABLE_PERF=1
+ *
+ * Optional:
+ *   ENDEE_SORTABLE_PERF_N      (default 200000)
+ *   ENDEE_SORTABLE_PERF_ITERS  (default 100)
+ */
+namespace {
+struct RawNumericBenchIndex {
+    std::string path;
+    MDBX_env* env = nullptr;
+    std::unique_ptr<ndd::filter::NumericIndex> index;
+
+    ~RawNumericBenchIndex() {
+        index.reset();
+        if(env != nullptr) {
+            mdbx_env_close(env);
+            env = nullptr;
+        }
+        if(!path.empty() && fs::exists(path)) {
+            fs::remove_all(path);
+        }
+    }
+
+    ndd::OperationResult<> open(const std::string& path_in) {
+        path = path_in;
+        if(fs::exists(path)) {
+            fs::remove_all(path);
+        }
+        fs::create_directories(path);
+
+        int rc = mdbx_env_create(&env);
+        if(rc != MDBX_SUCCESS) {
+            return {100, "Failed to create perf MDBX env: "
+                                 + std::string(mdbx_strerror(rc))};
+        }
+
+        rc = mdbx_env_set_maxdbs(env, 10);
+        if(rc != MDBX_SUCCESS) {
+            return {100, "Failed to set perf MDBX maxdbs: "
+                                 + std::string(mdbx_strerror(rc))};
+        }
+
+        rc = mdbx_env_set_geometry(env,
+                                   -1,
+                                   1ULL << settings::FILTER_MAP_SIZE_BITS,
+                                   1ULL << settings::FILTER_MAP_SIZE_MAX_BITS,
+                                   1ULL << settings::FILTER_MAP_SIZE_BITS,
+                                   -1,
+                                   -1);
+        if(rc != MDBX_SUCCESS) {
+            return {100, "Failed to set perf MDBX geometry: "
+                                 + std::string(mdbx_strerror(rc))};
+        }
+
+        rc = mdbx_env_open(env,
+                           path.c_str(),
+                           MDBX_WRITEMAP | MDBX_MAPASYNC | MDBX_NORDAHEAD,
+                           0664);
+        if(rc != MDBX_SUCCESS) {
+            return {100, "Failed to open perf MDBX env: "
+                                 + std::string(mdbx_strerror(rc))};
+        }
+
+        index = std::make_unique<ndd::filter::NumericIndex>(env);
+        return {SUCCESS, ""};
+    }
+};
+
+struct SortablePerfStats {
+    double build_ms = 0.0;
+    double query_ms_total = 0.0;
+    double query_ms_per_call = 0.0;
+    uint64_t cardinality = 0;
+    size_t bitmap_bytes = 0;
+    size_t bucket_count = 0;
+};
+
+ndd::OperationResult<double>
+populate_sortable_perf_index(ndd::filter::NumericIndex& index,
+                             const std::string& field,
+                             ndd::idInt n,
+                             bool use_float_domain) {
+    constexpr size_t CHUNK_SIZE = 4096;
+    std::vector<ndd::filter::NumericBatchEntry> entries;
+    entries.reserve(CHUNK_SIZE);
+
+    auto t0 = std::chrono::steady_clock::now();
+    for(ndd::idInt start = 0; start < n; start += CHUNK_SIZE) {
+        entries.clear();
+        const ndd::idInt end =
+                std::min<ndd::idInt>(n, start + static_cast<ndd::idInt>(CHUNK_SIZE));
+        for(ndd::idInt i = start; i < end; ++i) {
+            const int32_t value = static_cast<int32_t>(i);
+            const uint32_t sortable =
+                    use_float_domain
+                            ? ndd::filter::float_to_sortable(static_cast<float>(value))
+                            : ndd::filter::int_to_sortable(value);
+            entries.emplace_back(field, i + 1, sortable);
+        }
+
+        auto put_result = index.put_batch(entries);
+        if(!put_result.ok()) {
+            return {put_result.code, put_result.message};
+        }
+    }
+    auto t1 = std::chrono::steady_clock::now();
+
+    return {SUCCESS,
+            "",
+            std::chrono::duration<double, std::milli>(t1 - t0).count()};
+}
+
+ndd::OperationResult<size_t>
+count_numeric_inverted_buckets(MDBX_env* env, const std::string& field) {
+    MDBX_txn* txn = nullptr;
+    int rc = mdbx_txn_begin(env, nullptr, MDBX_TXN_RDONLY, &txn);
+    if(rc != MDBX_SUCCESS) {
+        return {100, "Failed to begin bucket-count transaction: "
+                             + std::string(mdbx_strerror(rc))};
+    }
+
+    MDBX_dbi dbi;
+    rc = mdbx_dbi_open(txn, "numeric_inverted", MDBX_DB_DEFAULTS, &dbi);
+    if(rc != MDBX_SUCCESS) {
+        mdbx_txn_abort(txn);
+        return {100, "Failed to open numeric_inverted for bucket count: "
+                             + std::string(mdbx_strerror(rc))};
+    }
+
+    MDBX_cursor* cursor = nullptr;
+    rc = mdbx_cursor_open(txn, dbi, &cursor);
+    if(rc != MDBX_SUCCESS) {
+        mdbx_txn_abort(txn);
+        return {100, "Failed to open bucket-count cursor: "
+                             + std::string(mdbx_strerror(rc))};
+    }
+
+    const std::string prefix = field + ":";
+    size_t buckets = 0;
+    MDBX_val key;
+    MDBX_val data;
+    rc = mdbx_cursor_get(cursor, &key, &data, MDBX_FIRST);
+    while(rc == MDBX_SUCCESS) {
+        std::string key_string(static_cast<char*>(key.iov_base), key.iov_len);
+        if(key_string.rfind(prefix, 0) == 0) {
+            ++buckets;
+        }
+        rc = mdbx_cursor_get(cursor, &key, &data, MDBX_NEXT);
+    }
+
+    mdbx_cursor_close(cursor);
+    mdbx_txn_abort(txn);
+    if(rc != MDBX_NOTFOUND) {
+        return {100, "Failed while counting numeric buckets: "
+                             + std::string(mdbx_strerror(rc))};
+    }
+    return {SUCCESS, "", buckets};
+}
+
+ndd::OperationResult<SortablePerfStats>
+run_sortable_perf_range(ndd::filter::NumericIndex& index,
+                        const std::string& field,
+                        uint32_t lo,
+                        uint32_t hi,
+                        int iters,
+                        double build_ms,
+                        size_t bucket_count) {
+    for(int i = 0; i < 3; ++i) {
+        auto warmup = index.range(field, lo, hi);
+        if(!warmup.ok()) {
+            return {warmup.code, warmup.message};
+        }
+    }
+
+    SortablePerfStats stats;
+    stats.build_ms = build_ms;
+    stats.bucket_count = bucket_count;
+
+    auto t0 = std::chrono::steady_clock::now();
+    for(int i = 0; i < iters; ++i) {
+        auto range_result = index.range(field, lo, hi);
+        if(!range_result.ok()) {
+            return {range_result.code, range_result.message};
+        }
+
+        auto bitmap = std::move(range_result.value_or_throw());
+        stats.cardinality = bitmap.cardinality();
+        bitmap.runOptimize();
+        stats.bitmap_bytes = bitmap.getSizeInBytes();
+    }
+    auto t1 = std::chrono::steady_clock::now();
+
+    stats.query_ms_total =
+            std::chrono::duration<double, std::milli>(t1 - t0).count();
+    stats.query_ms_per_call = stats.query_ms_total / iters;
+    return {SUCCESS, "", stats};
+}
+}  // namespace
+
+TEST(NumericRangeBench, FloatDomainVsIntegerDomain) {
+    const char* enabled = std::getenv("ENDEE_SORTABLE_PERF");
+    if(!enabled || std::string(enabled) != "1") {
+        GTEST_SKIP() << "Set ENDEE_SORTABLE_PERF=1 to run";
+    }
+
+    const char* n_env = std::getenv("ENDEE_SORTABLE_PERF_N");
+    const ndd::idInt n =
+            (n_env && *n_env) ? static_cast<ndd::idInt>(std::strtoul(n_env, nullptr, 10))
+                              : 200000;
+    const char* iters_env = std::getenv("ENDEE_SORTABLE_PERF_ITERS");
+    const int iters = (iters_env && *iters_env) ? std::atoi(iters_env) : 100;
+    ASSERT_GE(n, 1000u);
+    ASSERT_GT(iters, 0);
+    ASSERT_LE(n, static_cast<ndd::idInt>(std::numeric_limits<int32_t>::max()));
+
+    const std::string field = "score";
+    const std::string suffix = std::to_string(std::rand());
+    RawNumericBenchIndex int_index;
+    RawNumericBenchIndex float_index;
+    auto int_open = int_index.open("./numeric_sortable_perf_int_" + suffix);
+    ASSERT_TRUE(int_open.ok()) << int_open.message;
+    auto float_open = float_index.open("./numeric_sortable_perf_float_" + suffix);
+    ASSERT_TRUE(float_open.ok()) << float_open.message;
+
+    auto int_build = populate_sortable_perf_index(*int_index.index, field, n, false);
+    ASSERT_TRUE(int_build.ok()) << int_build.message;
+    auto float_build = populate_sortable_perf_index(*float_index.index, field, n, true);
+    ASSERT_TRUE(float_build.ok()) << float_build.message;
+
+    auto int_buckets = count_numeric_inverted_buckets(int_index.env, field);
+    ASSERT_TRUE(int_buckets.ok()) << int_buckets.message;
+    auto float_buckets = count_numeric_inverted_buckets(float_index.env, field);
+    ASSERT_TRUE(float_buckets.ok()) << float_buckets.message;
+
+    struct Point {
+        const char* label;
+        int32_t lo;
+        int32_t hi;
+    };
+
+    const int32_t max_value = static_cast<int32_t>(n - 1);
+    const Point points[] = {
+        {"rate~0.99", 0, static_cast<int32_t>((static_cast<uint64_t>(n) * 99) / 100)},
+        {"rate~0.50",
+         static_cast<int32_t>(n / 4),
+         static_cast<int32_t>((static_cast<uint64_t>(n) * 3) / 4)},
+        {"rate~0.01",
+         static_cast<int32_t>(n / 2),
+         static_cast<int32_t>(n / 2 + n / 100)},
+    };
+
+    std::printf("NumericRangeBench.FloatDomainVsIntegerDomain: n=%u iters=%d\n",
+                n,
+                iters);
+    std::printf("  build_ms: int=%.3f float=%.3f ratio=%.2fx\n",
+                int_build.value_or_throw(),
+                float_build.value_or_throw(),
+                float_build.value_or_throw() / int_build.value_or_throw());
+    std::printf("  buckets : int=%zu float=%zu ratio=%.2fx\n",
+                int_buckets.value_or_throw(),
+                float_buckets.value_or_throw(),
+                static_cast<double>(float_buckets.value_or_throw())
+                        / std::max<size_t>(1, int_buckets.value_or_throw()));
+
+    for(const auto& point : points) {
+        const int32_t lo = std::min(point.lo, max_value);
+        const int32_t hi = std::min(point.hi, max_value);
+        ASSERT_LE(lo, hi);
+
+        auto int_stats = run_sortable_perf_range(
+                *int_index.index,
+                field,
+                ndd::filter::int_to_sortable(lo),
+                ndd::filter::int_to_sortable(hi),
+                iters,
+                int_build.value_or_throw(),
+                int_buckets.value_or_throw());
+        ASSERT_TRUE(int_stats.ok()) << int_stats.message;
+
+        auto float_stats = run_sortable_perf_range(
+                *float_index.index,
+                field,
+                ndd::filter::float_to_sortable(static_cast<float>(lo)),
+                ndd::filter::float_to_sortable(static_cast<float>(hi)),
+                iters,
+                float_build.value_or_throw(),
+                float_buckets.value_or_throw());
+        ASSERT_TRUE(float_stats.ok()) << float_stats.message;
+
+        ASSERT_EQ(int_stats.value_or_throw().cardinality,
+                  float_stats.value_or_throw().cardinality);
+
+        std::printf("  %-10s [%8d,%8d] card=%llu "
+                    "range_ms: int=%.3f float=%.3f ratio=%.2fx "
+                    "bitmap_bytes: int=%zu float=%zu\n",
+                    point.label,
+                    lo,
+                    hi,
+                    static_cast<unsigned long long>(
+                            int_stats.value_or_throw().cardinality),
+                    int_stats.value_or_throw().query_ms_per_call,
+                    float_stats.value_or_throw().query_ms_per_call,
+                    float_stats.value_or_throw().query_ms_per_call
+                            / int_stats.value_or_throw().query_ms_per_call,
+                    int_stats.value_or_throw().bitmap_bytes,
+                    float_stats.value_or_throw().bitmap_bytes);
     }
 }
 

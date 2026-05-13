@@ -13,7 +13,6 @@
 #include "msgpack_ndd.hpp"
 #include "quant_vector.hpp"
 #include "wal.hpp"
-#include "../utils/search_timing.hpp"
 #include "../quant/dispatch.hpp"
 #include <memory>
 #include <deque>
@@ -1597,7 +1596,6 @@ public:
                 float kDenseRrfWeight = settings::DEFAULT_DENSE_RRF_WEIGHT,
                 float kRrfRankConstant = settings::DEFAULT_RRF_RANK_CONSTANT)
     {
-        ndd::ScopedSearchTiming search_total_timer(ndd::searchTimingStats().search_total);
         const float kSparseRrfWeight = 1.0f - kDenseRrfWeight;
         try {
             auto entry_ptr = getIndexEntry(index_id);
@@ -1625,8 +1623,6 @@ public:
             // 0. Compute Filter Bitmap (Shared)
             std::optional<ndd::RoaringBitmap> active_filter_bitmap;
             if (!filter_array.empty()) {
-                ndd::ScopedSearchTiming filter_bitmap_timer(
-                        ndd::searchTimingStats().filter_bitmap_compute);
                 auto filter_result =
                         entry.vector_storage->filter_store_->computeFilterBitmap(filter_array);
                 if(!filter_result.ok()) {
@@ -1696,15 +1692,9 @@ public:
                     if (card == 0) {
                         // No results match filter
                     } else if (card < params.prefilter_threshold) {
-                        ndd::ScopedSearchTiming prefilter_total_timer(
-                                ndd::searchTimingStats().prefilter_total);
-                        ndd::recordPrefilterCardinality(card);
-
                         // Strategy A: Brute Force on Small Subset
                         std::vector<ndd::idInt> valid_ids;
                         {
-                            ndd::ScopedSearchTiming bitmap_to_ids_timer(
-                                    ndd::searchTimingStats().prefilter_bitmap_to_ids);
                             valid_ids.reserve(card);
                             bitmap.iterate(
                                     [](ndd::idInt id, void* ptr) {
@@ -1715,8 +1705,6 @@ public:
                         }
 
                         {
-                            ndd::ScopedSearchTiming direct_score_timer(
-                                    ndd::searchTimingStats().prefilter_direct_mdbx_score);
                             auto distance_func = space->get_dist_func();
                             void* dist_func_param = space->get_dist_func_param();
                             std::priority_queue<std::pair<float, ndd::idInt>> top_results;
@@ -1748,8 +1736,6 @@ public:
 
                     } else {
                         // Strategy B: Filtered HNSW Search
-                        ndd::ScopedSearchTiming filtered_hnsw_timer(
-                                ndd::searchTimingStats().filtered_hnsw_search);
                         BitMapFilterFunctor functor(bitmap);
                         size_t effective_ef = ef > 0 ? ef : settings::DEFAULT_EF_SEARCH;
 

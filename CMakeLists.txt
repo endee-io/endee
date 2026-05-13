@@ -1,54 +1,56 @@
-# For Server x86_64 install clang for fp16 support and use the following commands
 cmake_minimum_required(VERSION 3.14)
+
+# Select a Clang toolchain before project() so CMake configures the matching
+# standard library and platform SDK paths.
+if(NOT DEFINED CMAKE_C_COMPILER AND NOT DEFINED ENV{CC})
+    if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
+        execute_process(
+            COMMAND xcrun --find clang
+            OUTPUT_VARIABLE CLANG_CANDIDATE_C
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+        )
+    else()
+        find_program(CLANG_CANDIDATE_C NAMES clang-21 clang-20 clang-19 clang)
+    endif()
+
+    if(CLANG_CANDIDATE_C)
+        set(CMAKE_C_COMPILER "${CLANG_CANDIDATE_C}" CACHE FILEPATH "C compiler")
+    endif()
+endif()
+
+if(NOT DEFINED CMAKE_CXX_COMPILER AND NOT DEFINED ENV{CXX})
+    if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
+        execute_process(
+            COMMAND xcrun --find clang++
+            OUTPUT_VARIABLE CLANG_CANDIDATE_CXX
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+        )
+    else()
+        find_program(CLANG_CANDIDATE_CXX NAMES clang++-21 clang++-20 clang++-19 clang++)
+    endif()
+
+    if(CLANG_CANDIDATE_CXX)
+        set(CMAKE_CXX_COMPILER "${CLANG_CANDIDATE_CXX}" CACHE FILEPATH "C++ compiler")
+    endif()
+endif()
+
 project(ndd)
 
-
-#check for the correct clang version
-find_program(CLANG_CANDIDATE_C
-    NAMES clang-21 clang-20 clang-19 clang
-)
-
-find_program(CLANG_CANDIDATE_CXX
-    NAMES clang++-21 clang++-20 clang++-19 clang++
-)
-
-if (NOT CLANG_CANDIDATE_C OR NOT CLANG_CANDIDATE_CXX)
-    message(FATAL_ERROR "Clang not found. Please install clang >= 19.")
+if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang" OR NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR "Clang >= 17 is required. Set CC/CXX or CMAKE_C_COMPILER/CMAKE_CXX_COMPILER to a Clang toolchain.")
 endif()
 
-# Query clang version
-execute_process(
-    COMMAND ${CLANG_CANDIDATE_C} --version
-    OUTPUT_VARIABLE CLANG_VERSION_OUTPUT
-    ERROR_VARIABLE CLANG_VERSION_ERROR
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-)
-
-if (NOT CLANG_VERSION_OUTPUT)
-    message(FATAL_ERROR "Failed to query clang version.")
+if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 17)
+    message(FATAL_ERROR "Clang ${CMAKE_CXX_COMPILER_VERSION} detected, but Clang >= 17 is required.")
 endif()
 
-# Extract major version
-string(REGEX MATCH "clang version ([0-9]+)" _match "${CLANG_VERSION_OUTPUT}")
-set(CLANG_VERSION_MAJOR "${CMAKE_MATCH_1}")
-
-if (NOT CLANG_VERSION_MAJOR)
-    message(FATAL_ERROR
-        "Unable to determine clang version from:\n${CLANG_VERSION_OUTPUT}\n"
-    )
+if(APPLE AND (CMAKE_C_COMPILER MATCHES "[/\\\\]Android[/\\\\].*[/\\\\]ndk[/\\\\]" OR CMAKE_CXX_COMPILER MATCHES "[/\\\\]Android[/\\\\].*[/\\\\]ndk[/\\\\]"))
+    message(FATAL_ERROR "Android NDK Clang was selected for a macOS build. Use Xcode Command Line Tools Clang, for example: CC=$(xcrun --find clang) CXX=$(xcrun --find clang++) cmake ...")
 endif()
 
-if (CLANG_VERSION_MAJOR LESS 17)
-    message(FATAL_ERROR
-        "Clang ${CLANG_VERSION_MAJOR} detected, but clang >= 17 is required "
-    )
-endif()
-
-# Lock compilers
-set(CMAKE_C_COMPILER   "${CLANG_CANDIDATE_C}"   CACHE STRING "" FORCE)
-set(CMAKE_CXX_COMPILER "${CLANG_CANDIDATE_CXX}" CACHE STRING "" FORCE)
-
-message(STATUS "Using Clang ${CLANG_VERSION_MAJOR}")
+message(STATUS "Using ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
 message(STATUS "C compiler : ${CMAKE_C_COMPILER}")
 message(STATUS "C++ compiler: ${CMAKE_CXX_COMPILER}")
 

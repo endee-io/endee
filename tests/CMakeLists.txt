@@ -36,5 +36,17 @@ target_include_directories(ndd_filter_test PRIVATE
 # Add other necessary definitions
 target_compile_definitions(ndd_filter_test PRIVATE MDB_MAXKEYSIZE=512)
 
+add_executable(ndd_request_validation_test request_validation_test.cpp)
+
+target_link_libraries(ndd_request_validation_test GTest::gtest_main)
+
+target_include_directories(ndd_request_validation_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/server
+    ${CMAKE_SOURCE_DIR}/src/utils
+    ${CROW_INCLUDE_DIR}
+)
+
 include(GoogleTest)
 gtest_discover_tests(ndd_filter_test)
+gtest_discover_tests(ndd_request_validation_test)

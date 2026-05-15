@@ -14,7 +14,12 @@ file(GLOB LMDB_SOURCES ${CMAKE_SOURCE_DIR}/third_party/mdbx/*.c)
 set(ROARING_SOURCE ${CMAKE_SOURCE_DIR}/third_party/roaring_bitmap/roaring.c)
 
 # Create the test executable
-add_executable(ndd_filter_test filter_test.cpp ${LMDB_SOURCES} ${ROARING_SOURCE})
+add_executable(ndd_filter_test
+    filter_test.cpp
+    ${NDD_FILTER_SOURCES}
+    ${LMDB_SOURCES}
+    ${ROARING_SOURCE}
+)
 
 # Link against GTest
 target_link_libraries(ndd_filter_test GTest::gtest_main)

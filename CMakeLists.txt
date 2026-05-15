@@ -252,10 +252,20 @@ endif()
 
 message(STATUS "Binary name: ${NDD_BINARY_NAME}")
 
+# Filter sources are split out so filter headers expose declarations only.
+# Tests and the main binary both pull these in via NDD_FILTER_SOURCES.
+# Use absolute paths so the list is portable to subdirectories like tests/.
+set(NDD_FILTER_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/filter/category_index.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/filter/filter.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/filter/numeric_index.cpp
+)
+
 # Add new src/*.cpp files here when they should be compiled into ndd.
 set(NDD_CORE_SOURCES
     src/sparse/inverted_index.cpp
     src/utils/system_sanity/system_sanity.cpp
+    ${NDD_FILTER_SOURCES}
 )
 
 # Build non-main project sources separately so they can be compiled in parallel

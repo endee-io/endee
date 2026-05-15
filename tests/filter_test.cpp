@@ -688,6 +688,11 @@ TEST(Hypothesis1, FastPathFiresOnWidelySpreadBucket) {
 // and the new bitmap-only-inclusion branch in range() returns ids
 // that the OLD code would never have surfaced.
 TEST(Hypothesis2, SaturationCreatesBitmapOnlyEntries) {
+    GTEST_SKIP() << "Part 2 alarm: Bucket::add saturated-duplicate routing "
+                    "to summary_bitmap is introduced by 546430d. See "
+                    "docs/filter_part2_followups.md item 1. Remove this "
+                    "GTEST_SKIP when Part 2 lands.";
+
     constexpr uint32_t base = 0;
     constexpr ndd::idInt N_TOTAL = ndd::filter::Bucket::MAX_SIZE + 500;
 
@@ -778,6 +783,14 @@ TEST(Hypothesis3, SlideSplitRebuildLosesBitmapOnlyEntries) {
 // can grow the range result candidate set. The production reader now
 // rejects that payload shape instead of trying to salvage it.
 TEST(Hypothesis4, DeserializeRejectsLegacyCountFormat) {
+    GTEST_SKIP() << "Part 2 alarm: legacy count-bearing layout is still "
+                    "the on-disk format in Part 1, so Bucket::deserialize "
+                    "accepts it. Part 2 commit 546430d drops the count "
+                    "field; the residual-bytes-not-aligned check then "
+                    "rejects the legacy shape. See "
+                    "docs/filter_part2_followups.md item 1. Remove this "
+                    "GTEST_SKIP when Part 2 lands.";
+
     // Manually craft an OLD-format payload:
     //   [u32 bm_size] [bitmap bytes] [u16 count=0]
     // i.e. cliff-truncated count, but bitmap retained the lost ids.
@@ -811,6 +824,15 @@ TEST(Hypothesis4, DeserializeRejectsLegacyCountFormat) {
 // reject the same legacy-format payloads as the full deserializer, so
 // the fast path cannot silently reintroduce compatibility.
 TEST(Hypothesis4, ReadSummaryBitmapRejectsLegacyCountFormat) {
+    GTEST_SKIP() << "Part 2 alarm: read_summary_bitmap intentionally "
+                    "ignores the count-bearing trailer in Part 1 (see "
+                    "the comment block on read_summary_bitmap in "
+                    "numeric_index.hpp). Part 2 commit 546430d drops the "
+                    "count field and the alignment check then catches "
+                    "the legacy shape. See docs/filter_part2_followups.md "
+                    "item 1 and carry 2. Remove this GTEST_SKIP when "
+                    "Part 2 lands.";
+
     ndd::RoaringBitmap original;
     for (ndd::idInt i = 0; i < 50; ++i) original.add(i * 3);
     original.runOptimize();

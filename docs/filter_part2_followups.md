@@ -47,6 +47,7 @@ Cross-cutting items that Part 1 *temporarily* preserved to stay backward compati
 - [ ] Provide a migration path: either bump a stored version sentinel and refuse to open old buckets, or perform an on-open conversion. Currently Part 1 silently rounds-trips old buckets through Part-1 serialize/deserialize.
 - [ ] Pair this commit with item 4 (`4cb445d`) — query / range / split semantics depend on bitmap-only state existing.
 - [ ] Remove the `Why count is intentionally ignored here` comment block in `read_summary_bitmap` (see [carry 2](#carry-2-read_summary_bitmap-comment)) — after this commit the comment is obsolete; replace it with a one-line note that residual bytes are pure data arrays.
+- [ ] Remove the `GTEST_SKIP()` calls from `Hypothesis2.SaturationCreatesBitmapOnlyEntries`, `Hypothesis4.DeserializeRejectsLegacyCountFormat`, and `Hypothesis4.ReadSummaryBitmapRejectsLegacyCountFormat` in `tests/filter_test.cpp` — these are Part-2 regression alarms that Part 1 silenced because they assert behavior that doesn't exist yet. After this commit they must pass.
 
 ---
 

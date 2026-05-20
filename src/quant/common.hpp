@@ -7,6 +7,7 @@
 #include <map>
 #include <vector>
 #include <mutex>
+#include <memory>
 
 #if defined(USE_AVX512) || defined(USE_AVX2)
 #    include <immintrin.h>

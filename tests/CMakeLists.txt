@@ -14,7 +14,12 @@ file(GLOB LMDB_SOURCES ${CMAKE_SOURCE_DIR}/third_party/mdbx/*.c)
 set(ROARING_SOURCE ${CMAKE_SOURCE_DIR}/third_party/roaring_bitmap/roaring.c)
 
 # Create the test executable
-add_executable(ndd_filter_test filter_test.cpp ${LMDB_SOURCES} ${ROARING_SOURCE})
+add_executable(ndd_filter_test
+    filter_test.cpp
+    ${NDD_FILTER_SOURCES}
+    ${LMDB_SOURCES}
+    ${ROARING_SOURCE}
+)
 
 # Link against GTest
 target_link_libraries(ndd_filter_test GTest::gtest_main)
@@ -36,5 +41,17 @@ target_include_directories(ndd_filter_test PRIVATE
 # Add other necessary definitions
 target_compile_definitions(ndd_filter_test PRIVATE MDB_MAXKEYSIZE=512)
 
+add_executable(ndd_request_validation_test request_validation_test.cpp)
+
+target_link_libraries(ndd_request_validation_test GTest::gtest_main)
+
+target_include_directories(ndd_request_validation_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/server
+    ${CMAKE_SOURCE_DIR}/src/utils
+    ${CROW_INCLUDE_DIR}
+)
+
 include(GoogleTest)
 gtest_discover_tests(ndd_filter_test)
+gtest_discover_tests(ndd_request_validation_test)

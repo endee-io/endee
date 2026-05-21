@@ -172,7 +172,7 @@ jobs:
           git clone https://x-access-token:${{ secrets.PAT }}@github.com/Endee-Pro/ndd-docker.git
           cd ndd-docker
 
-          git checkout main
+          git checkout development
           mkdir -p build
 
           # copy all 4 binaries at once
@@ -193,5 +193,5 @@ jobs:
             echo "No changes to commit"
           else
             git commit -m "Add binaries from release ${{ github.event.inputs.tag_name }}"
-            git push -u origin main
+            git push -u origin development
           fi

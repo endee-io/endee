@@ -1381,21 +1381,23 @@ public:
                               << stored_ids[0] << " != " << numeric_id);
                     continue;
                 }
-                // Remove the filter
-                auto filter_result = entry.vector_storage->deleteFilter(numeric_id, meta.filter);
-                if(!filter_result.ok()) {
-                    if(filter_result.code < 100) {
-                        LOG_WARN(1216,
-                                 entry.index_id,
-                                 "Delete-vector filter removal rejected: "
-                                         << filter_result.message);
-                    } else {
-                        LOG_ERROR(1217,
-                                  entry.index_id,
-                                  "Delete-vector filter removal failed: "
-                                          << filter_result.message);
+                // Remove the filter (only if vector had one - insert path skips empty filters)
+                if(!meta.filter.empty()) {
+                    auto filter_result = entry.vector_storage->deleteFilter(numeric_id, meta.filter);
+                    if(!filter_result.ok()) {
+                        if(filter_result.code < 100) {
+                            LOG_WARN(1216,
+                                     entry.index_id,
+                                     "Delete-vector filter removal rejected: "
+                                             << filter_result.message);
+                        } else {
+                            LOG_ERROR(1217,
+                                      entry.index_id,
+                                      "Delete-vector filter removal failed: "
+                                              << filter_result.message);
+                        }
+                        return {filter_result.code, filter_result.message};
                     }
-                    return {filter_result.code, filter_result.message};
                 }
 
                 // Mark as deleted in HNSW index

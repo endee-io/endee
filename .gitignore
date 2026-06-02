@@ -46,3 +46,36 @@ scripts/*
 !.env.example
 !.env.dev
 !.env.prod
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+*.egg
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Editor temporaries
+*.swp
+*.swo
+*~
+*.orig
+
+# OS temporaries
+*.log
+*.tmp

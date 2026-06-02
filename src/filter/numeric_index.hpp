@@ -198,6 +198,11 @@ namespace ndd {
                                                 const std::string& field,
                                                 ndd::idInt id,
                                                 uint32_t value);
+            ndd::OperationResult<> put_batch_txn_range(
+                    MDBX_txn* txn,
+                    const std::vector<NumericBatchEntry>& entries,
+                    size_t start,
+                    size_t end);
 
         public:
             NumericIndex(MDBX_env* env);
@@ -213,6 +218,14 @@ namespace ndd {
              */
             ndd::OperationResult<> put_batch(const std::vector<NumericBatchEntry>& entries);
 
+            ndd::OperationResult<> put_batch(MDBX_txn* txn,
+                                                 const std::vector<NumericBatchEntry>& entries);
+
+            ndd::OperationResult<> put(MDBX_txn* txn,
+                                       const std::string& field,
+                                       ndd::idInt id,
+                                       uint32_t value);
+
             /*
              * Removes one id from the numeric forward and inverted indexes for a field.
              *
@@ -225,8 +238,15 @@ namespace ndd {
              */
             ndd::OperationResult<> remove(const std::string& field, ndd::idInt id);
 
-            /*
-             * Computes a bitmap of ids whose numeric field value falls within an inclusive sortable range.
+            ndd::OperationResult<> remove(MDBX_txn* txn,
+                                          const std::string& field,
+                                          ndd::idInt id);
+
+            /**
+             * Computes a bitmap of ids whose numeric field value falls
+             * within an inclusive sortable range. Reads through the
+             * caller's MDBX read transaction so multiple lookups in one
+             * search request share a single snapshot.
              *
              * Return codes:
              * 0 = success
@@ -234,7 +254,10 @@ namespace ndd {
              * 200 = corrupt numeric bucket payload; caller should log ERROR and return HTTP 500
              */
             ndd::OperationResult<ndd::RoaringBitmap>
-            range(const std::string& field, uint32_t min_val, uint32_t max_val);
+            range(MDBX_txn* txn,
+                      const std::string& field,
+                      uint32_t min_val,
+                      uint32_t max_val);
 
             /*
              * Checks whether one id has a numeric field value inside an inclusive sortable range.

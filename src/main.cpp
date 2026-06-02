@@ -952,7 +952,7 @@ int main(int argc, char** argv) {
                 }
                 LOG_DEBUG("Filter: " << filter_array.dump());
                 try {
-                    auto search_response = index_manager.searchKNN(index_id,
+                    auto search_response = index_manager.search(index_id,
                                                                     query,
                                                                     sparse_indices,
                                                                     sparse_values,
@@ -1074,7 +1074,7 @@ int main(int argc, char** argv) {
                     }
 
                     try {
-                        auto insert_result = index_manager.addVectors(index_id, vectors);
+                        auto insert_result = index_manager.addVectors(index_id, std::move(vectors));
                         if(!insert_result.ok()) {
                             if(operation_error_is_client_error(insert_result)) {
                                 LOG_WARN(1069,
@@ -1112,7 +1112,7 @@ int main(int argc, char** argv) {
                             // Try HybridVectorObject first
                             auto vectors = obj.as<std::vector<ndd::HybridVectorObject>>();
                             LOG_DEBUG("Batch size (Hybrid): " << vectors.size());
-                            auto insert_result = index_manager.addVectors(index_id, vectors);
+                            auto insert_result = index_manager.addVectors(index_id, std::move(vectors));
                             if(!insert_result.ok()) {
                                 if(operation_error_is_client_error(insert_result)) {
                                     LOG_WARN(1070,
@@ -1138,7 +1138,7 @@ int main(int argc, char** argv) {
                             // Fallback to VectorObject
                             auto vectors = obj.as<std::vector<ndd::VectorObject>>();
                             LOG_DEBUG("Batch size (Dense): " << vectors.size());
-                            auto insert_result = index_manager.addVectors(index_id, vectors);
+                            auto insert_result = index_manager.addVectors(index_id, std::move(vectors));
                             if(!insert_result.ok()) {
                                 if(operation_error_is_client_error(insert_result)) {
                                     LOG_WARN(1071,

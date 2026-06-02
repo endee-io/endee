@@ -2,12 +2,12 @@
 
 ## What this subsystem does
 
-This is a sparse vector similarity search engine. Given a collection of documents — each represented as a sparse vector of `(term_id, weight)` pairs — it answers "which documents have the highest dot-product with this query vector?" efficiently.
+This is a sparse vector similarity search engine. Given a collection of documents - each represented as a sparse vector of `(term_id, weight)` pairs - it answers "which documents have the highest dot-product with this query vector?" efficiently.
 
 It stores everything in MDBX (an embedded key-value database, similar to LMDB). There are two layers:
 
-1. **Raw document store** — the source-of-truth sparse vectors, one row per document.
-2. **Inverted index** — a derived structure that maps each term to the list of documents containing it, organized into fixed-size blocks for efficient streaming.
+1. **Raw document store** - the source-of-truth sparse vectors, one row per document.
+2. **Inverted index** - a derived structure that maps each term to the list of documents containing it, organized into fixed-size blocks for efficient streaming.
 
 Both layers live in the same MDBX environment and are updated atomically within a single transaction.
 
@@ -16,13 +16,13 @@ Both layers live in the same MDBX environment and are updated atomically within 
 | File | What it does |
 |---|---|
 | [sparse_vector.hpp](../src/sparse/sparse_vector.hpp) | `SparseVector` struct: holds `(term_id, weight)` pairs, packs/unpacks them to a compact binary format |
-| [sparse_storage.hpp](../src/sparse/sparse_storage.hpp) | `SparseVectorStorage`: public API — open the DB, store/delete/search vectors, manage transactions |
+| [sparse_storage.hpp](../src/sparse/sparse_storage.hpp) | `SparseVectorStorage`: public API - open the DB, store/delete/search vectors, manage transactions |
 | [inverted_index.hpp](../src/sparse/inverted_index.hpp) | `InvertedIndex` class declaration, on-disk structs (`BlockHeader`, `PostingListHeader`), iterator |
-| [inverted_index.cpp](../src/sparse/inverted_index.cpp) | All the logic — search algorithm, block merge/save/load, quantization, SIMD helpers, pruning |
+| [inverted_index.cpp](../src/sparse/inverted_index.cpp) | All the logic - search algorithm, block merge/save/load, quantization, SIMD helpers, pruning |
 
 ## Data types
 
-`ndd::idInt` is `uint32_t` — this is the document ID type used throughout.
+`ndd::idInt` is `uint32_t` - this is the document ID type used throughout.
 
 ## SparseVector
 
@@ -47,7 +47,7 @@ When stored in MDBX, vectors are packed as:
 - Values are stored as IEEE FP16 (half-precision float) in the raw document table. Conversion is done inline (`float_to_fp16` / `fp16_to_float`).
 - Constructor `SparseVector(const uint8_t*, size_t)` unpacks; `pack()` repacks.
 
-## SparseVectorStorage — the public API
+## SparseVectorStorage - the public API
 
 This is the class users interact with. It wraps the MDBX environment and exposes:
 
@@ -58,11 +58,13 @@ SparseVectorStorage storage("/path/to/db");
 storage.initialize();  // opens MDBX env, creates DBIs, loads term cache
 ```
 
-MDBX is opened with flags `MDBX_NOSTICKYTHREADS | MDBX_NORDAHEAD | MDBX_LIFORECLAIM`, max size 1TB, max 10 named databases.
+MDBX is opened with flags `MDBX_NORDAHEAD | MDBX_LIFORECLAIM` (sticky-thread mode), max size 1TB, max 10 named databases.
+
+Sparse search dispatches via `std::async` in `IndexManager::searchKNN` (see `src/core/ndd.hpp`). The sparse env transaction must begin, run, and end on the same OS thread because sticky-thread mode is in effect. The worker lambda opens its own `MDBX_TXN_RDONLY` on the sparse env and passes it as the first arg to `SparseVectorStorage::search`, so begin/use/end all happen on the worker thread and the invariant holds. A future refactor that begins the txn on the request thread and uses it on the worker thread would fail with `MDBX_THREAD_MISMATCH`; reconsidering `MDBX_NOSTICKYTHREADS` for sparse would only make sense after weighing its read-concurrency cost (see "Durability Flags" in `docs/mdbx_shared_env_acid_revamp.md`).
 
 Two named databases (DBIs) are created:
-- `sparse_docs` — raw vector store, keyed by `doc_id` (integer key)
-- `blocked_term_postings` — inverted index blocks, keyed by packed `(term_id, block_nr)` (integer key)
+- `sparse_docs` - raw vector store, keyed by `doc_id` (integer key)
+- `blocked_term_postings` - inverted index blocks, keyed by packed `(term_id, block_nr)` (integer key)
 
 ### Storing vectors
 
@@ -72,7 +74,7 @@ auto txn = storage.begin_transaction();
 txn->store_vector(doc_id, sparse_vec);
 txn->commit();
 
-// Batch insert (preferred — fewer transactions)
+// Batch insert (preferred - fewer transactions)
 storage.store_vectors_batch({{doc_id1, vec1}, {doc_id2, vec2}, ...});
 ```
 
@@ -90,12 +92,19 @@ Delete order is reversed: read the raw vector, remove its terms from the inverte
 
 ### Searching
 
+Search now requires a caller-owned MDBX read transaction as the first
+argument - the no-txn overload was removed when the read-txn redesign
+landed.
+
 ```cpp
-auto results = storage.search(query_vec, k);
+MDBX_txn* txn = nullptr;
+mdbx_txn_begin(storage.env(), nullptr, MDBX_TXN_RDONLY, &txn);
+auto results = storage.search(txn, query_vec, k);
 // returns vector<pair<doc_id, score>> sorted by score descending
 
 // With a filter (only consider docs in the bitmap):
-auto results = storage.search(query_vec, k, &roaring_filter);
+auto results = storage.search(txn, query_vec, k, &roaring_filter);
+mdbx_txn_abort(txn);
 ```
 
 ### Concurrency
@@ -104,7 +113,7 @@ auto results = storage.search(query_vec, k, &roaring_filter);
 - Writes (`store_vectors_batch`, `delete_vector`) take an exclusive lock.
 - Search is delegated directly to `InvertedIndex`, which has its own `shared_mutex` (shared for search, exclusive for add/remove).
 
-MDBX transactions and cursors are single-threaded — the search loop is not parallelized.
+MDBX transactions and cursors are single-threaded - the search loop is not parallelized.
 
 ## Inverted index internals
 
@@ -120,7 +129,7 @@ This puts all rows for one term next to each other in MDBX's sorted key order, s
 
 Reserved keys:
 - `block_nr = UINT32_MAX` → this row is the **metadata row** for the term (stores `PostingListHeader`)
-- `(term_id = UINT32_MAX, block_nr = 0)` → the **superblock** — a single row storing `SuperBlock` (format version metadata)
+- `(term_id = UINT32_MAX, block_nr = 0)` → the **superblock** - a single row storing `SuperBlock` (format version metadata)
 - `term_id = UINT32_MAX` is otherwise a reserved sentinel, rejected by all code paths
 
 ### Blocks
@@ -134,7 +143,7 @@ block_offset = doc_id % 65535    (uint16_t)
 
 `kBlockCapacity = 65535` (`std::numeric_limits<uint16_t>::max()`). This means block offsets fit in 16 bits.
 
-Each MDBX row for `(term_id, block_nr)` stores exactly the postings from that term that fall into that block's doc-id range. This is the fundamental design choice — writes are block-local merges, not whole-list rewrites.
+Each MDBX row for `(term_id, block_nr)` stores exactly the postings from that term that fall into that block's doc-id range. This is the fundamental design choice - writes are block-local merges, not whole-list rewrites.
 
 ### SuperBlock
 
@@ -182,7 +191,7 @@ struct BlockHeader {             // 8 bytes, packed
 };
 ```
 
-- `doc_offsets[]` are sorted `uint16_t` values — the offset within the block (`doc_id % 65535`).
+- `doc_offsets[]` are sorted `uint16_t` values - the offset within the block (`doc_id % 65535`).
 - `values[]` are the posting weights, either `uint8_t` (default, quantized) or `float` (when `NDD_INV_IDX_STORE_FLOATS` is defined).
 
 ### Quantization
@@ -196,7 +205,7 @@ quantize(val, max_val) = round(val / max_val * 255)
 dequantize(val, max_val) = val * (max_val / 255)
 ```
 
-The value `0` is reserved as a tombstone marker — it means the entry has been deleted but not yet compacted out of the block.
+The value `0` is reserved as a tombstone marker - it means the entry has been deleted but not yet compacted out of the block.
 
 If `NDD_INV_IDX_STORE_FLOATS` is defined at compile time, values are stored as raw `float` and no quantization happens. The value `0.0f` (or ≤ 0) is still the tombstone.
 
@@ -222,13 +231,13 @@ Given a batch of `(doc_id, SparseVector)` pairs:
    - Sort updates by `doc_id`, deduplicate (keep last value for duplicate doc_ids).
    - Split into sub-ranges by `block_nr`.
    - For each `(term_id, block_nr)` slice:
-     - `loadBlockEntries()` — read and decode the existing block (if any) into a `vector<PostingListEntry>`.
+     - `loadBlockEntries()` - read and decode the existing block (if any) into a `vector<PostingListEntry>`.
      - Merge the existing entries and incoming updates as two sorted streams (classic merge-sort merge).
      - Recompute `new_live_count` and `new_block_max`.
-     - `saveBlockEntries()` — serialize and write the merged block back to MDBX (or delete the block if empty).
+     - `saveBlockEntries()` - serialize and write the merged block back to MDBX (or delete the block if empty).
    - Update the `PostingListHeader`:
      - Adjust `nr_entries` and `nr_live_entries` using deltas.
-     - If the old global max might have been invalidated (the block that held it now has a lower max), call `recomputeGlobalMaxFromBlocks()` — a full scan of that term's block headers.
+     - If the old global max might have been invalidated (the block that held it now has a lower max), call `recomputeGlobalMaxFromBlocks()` - a full scan of that term's block headers.
    - Update `term_info_`.
 
 ### Single delete: removeDocumentInternal()
@@ -272,7 +281,7 @@ batch_end   = batch_start + batch_size - 1
 
 A dense `float` array `scores_buf[batch_size]` is zeroed. Then for each iterator:
 
-**`accumulateBatchScores<StoreFloats>()`** — the hot inner loop:
+**`accumulateBatchScores<StoreFloats>()`** - the hot inner loop:
 - Walk through the current block's `doc_offsets[]` and `values[]`.
 - For each live entry within `[batch_start, batch_end]`:
   - `local = block_base_doc_id - batch_start + offset`
@@ -302,7 +311,7 @@ Close all cursors, abort the read-only transaction. Pop the heap into a vector a
 
 ## PostingListIterator
 
-A cursor-backed streaming iterator over one term's posting list. It never loads the entire list into memory — it reads one block at a time via zero-copy MDBX pointers.
+A cursor-backed streaming iterator over one term's posting list. It never loads the entire list into memory - it reads one block at a time via zero-copy MDBX pointers.
 
 Key methods:
 
@@ -314,9 +323,9 @@ Key methods:
 | `parseCurrentKV()` | Validate key, parse block payload into `BlockView`, set up zero-copy pointers |
 | `advanceToNextLive()` | Skip tombstones in current block (uses SIMD for uint8 mode), load next block if needed |
 | `next()` | Move to next live entry |
-| `advance(target_doc_id)` | Block-aware seek — skip whole blocks if target is ahead, `lower_bound` within a block |
+| `advance(target_doc_id)` | Block-aware seek - skip whole blocks if target is ahead, `lower_bound` within a block |
 | `valueAt(idx)` | Dequantize and return the weight at position `idx` |
-| `upperBound()` | `global_max * term_weight` — used for pruning decisions |
+| `upperBound()` | `global_max * term_weight` - used for pruning decisions |
 
 ### BlockView
 
@@ -336,8 +345,8 @@ struct BlockView {
 
 Two SIMD-accelerated functions with implementations for AVX-512, AVX2, NEON, and SVE2 (plus scalar fallback):
 
-- **`findNextLiveSIMD(values, size, start_idx)`** — finds the next non-zero byte in a `uint8_t` array. Used by `advanceToNextLive()` to skip tombstones quickly.
-- **`findDocIdSIMD(doc_ids, size, start_idx, target)`** — finds the first `uint32_t` ≥ target. Currently not used by the main search path but available.
+- **`findNextLiveSIMD(values, size, start_idx)`** - finds the next non-zero byte in a `uint8_t` array. Used by `advanceToNextLive()` to skip tombstones quickly.
+- **`findDocIdSIMD(doc_ids, size, start_idx, target)`** - finds the first `uint32_t` ≥ target. Currently not used by the main search path but available.
 
 ## Compile-time flags
 
@@ -356,7 +365,7 @@ Two SIMD-accelerated functions with implementations for AVX-512, AVX2, NEON, and
 | `NEAR_ZERO` | 1e-9 | Epsilon for float comparisons. |
 | `SPARSE_ONDISK_VERSION` | 1 | Format version written to the superblock. Checked on load; mismatch throws. |
 
-## Putting it all together — data flow diagram
+## Putting it all together - data flow diagram
 
 ```
                     User code

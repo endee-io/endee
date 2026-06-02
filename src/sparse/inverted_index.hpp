@@ -26,11 +26,24 @@
 #include "../core/types.hpp"
 #include "../utils/log.hpp"
 #include "../utils/settings.hpp"
+#include "../utils/types.hpp"
 #include "sparse_vector.hpp"
+
+#include <optional>
+#include <utility>
 
 namespace ndd {
 
     static constexpr ndd::idInt EXHAUSTED_DOC_ID = std::numeric_limits<ndd::idInt>::max();
+
+    /*
+     * A deferred mutation to InvertedIndex::term_info_. `nullopt` means erase
+     * the key, a set value means upsert. Collected by the txn-taking write
+     * functions and applied by apply_term_info_changes() only AFTER the caller
+     * commits. See docs/single_txn_bug_investigation.md and
+     * tests/acid_regression_test.cpp for the ACID atomicity rationale.
+     */
+    using TermInfoChange = std::pair<uint32_t, std::optional<float>>;
 
 #pragma pack(push, 1)
     // Per-term metadata stored under the reserved metadata key for that term.
@@ -89,22 +102,52 @@ namespace ndd {
 
         bool initialize();
 
-        bool addDocumentsBatch(MDBX_txn* txn,
-                                const std::vector<std::pair<ndd::idInt, SparseVector>>& docs);
+        /*
+         * Apply a batch of pending term_info_ mutations collected by the
+         * txn-taking write methods. Must only be called after the caller's
+         * MDBX txn has committed successfully; on abort the caller simply
+         * drops the vector and the in-memory cache stays in lockstep with
+         * the rolled-back MDBX state.
+         */
+        void apply_term_info_changes(const std::vector<TermInfoChange>& changes);
 
-        bool removeDocument(MDBX_txn* txn, ndd::idInt doc_id, const SparseVector& vec);
+        /*
+         * ACID note: these txn-taking writers return the intended term_info_
+         * mutations alongside the success/error code via OperationResult.value.
+         * The caller MUST call apply_term_info_changes(.value_or_throw()) only
+         * after mdbx_txn_commit(txn) returns MDBX_SUCCESS. If the caller aborts,
+         * the OperationResult is dropped and term_info_ is left untouched, which
+         * keeps the in-memory cache atomic with the MDBX rollback.
+         */
+        ndd::OperationResult<std::vector<TermInfoChange>> addDocumentsBatch(
+                MDBX_txn* txn,
+                const std::vector<std::pair<ndd::idInt, SparseVector>>& docs);
+
+        ndd::OperationResult<std::vector<TermInfoChange>> removeDocument(
+                MDBX_txn* txn, ndd::idInt doc_id, const SparseVector& vec);
 
         size_t getTermCount() const;
         size_t getVocabSize() const;
 
-        std::vector<std::pair<ndd::idInt, float>>search(const SparseVector& query,
-                                                        size_t k,
-                                                        const ndd::RoaringBitmap* filter = nullptr);
+        /**
+         * Reads posting blocks through the caller's MDBX read transaction
+         * so a single shared search request observes one snapshot.
+         *
+         * The internal shared_lock on the in-memory term_info_ cache still
+         * applies; only the MDBX txn ownership moves out to the caller.
+         */
+        std::vector<std::pair<ndd::idInt, float>>
+        search(MDBX_txn* txn,
+                   const SparseVector& query,
+                   size_t k,
+                   size_t total_nr_docs,
+                   const ndd::RoaringBitmap* filter = nullptr);
 
-        std::vector<std::pair<ndd::idInt, float>>search(const SparseVector& query,
-                                                        size_t k,
-                                                        size_t total_nr_docs,
-                                                        const ndd::RoaringBitmap* filter = nullptr);
+        std::vector<std::pair<ndd::idInt, float>>
+        search(MDBX_txn* txn,
+                   const SparseVector& query,
+                   size_t k,
+                   const ndd::RoaringBitmap* filter = nullptr);
 
     private:
         friend class InvertedIndexTestPeer;
@@ -337,13 +380,21 @@ namespace ndd {
         bool writeSuperBlock(MDBX_txn* txn, const SuperBlock& sb);
         bool validateSuperBlock(MDBX_txn* txn);
 
+        /*
+         * The internal write helpers collect deferred term_info_ mutations into
+         * `term_info_changes` instead of touching term_info_ directly. The
+         * public wrappers own the vector; on abort it goes out of scope, on
+         * commit they pass it to apply_term_info_changes().
+         */
         bool addDocumentsBatchInternal(
             MDBX_txn* txn,
-            const std::vector<std::pair<ndd::idInt, SparseVector>>& docs);
+            const std::vector<std::pair<ndd::idInt, SparseVector>>& docs,
+            std::vector<TermInfoChange>* term_info_changes);
 
         bool removeDocumentInternal(MDBX_txn* txn,
                                     ndd::idInt doc_id,
-                                    const SparseVector& vec);
+                                    const SparseVector& vec,
+                                    std::vector<TermInfoChange>* term_info_changes);
 
         void pruneLongest(std::vector<PostingListIterator*>& iters, float min_score);
     };

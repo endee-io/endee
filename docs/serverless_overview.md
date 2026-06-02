@@ -211,17 +211,22 @@ Used in `src/main.cpp` for:
 
 ```
 data_dir/
-+-- auth/                 MDBX database (users + tokens)
-+-- meta/                 MDBX database (index metadata)
++-- auth/                 MDBX env (users + tokens)
++-- meta/                 MDBX env (index metadata catalog)
 +-- backups/              System-wide backups
 +-- alice/                Per-user directory
 |   +-- my-index/         Index directory
-|       +-- main.idx      HNSW index
-|       +-- wal.bin       Write-ahead log
-|       +-- ids/          ID mapper (LMDB)
-|       +-- vectors/      Quantized vector storage
+|       +-- main.idx      HNSW index (outside MDBX)
+|       +-- id_bloom.bin  Bloom filter for id_mapper lookups (flat file)
+|       +-- vectors/      Shared MDBX env, holds all per-index DBIs:
+|                           default (vector bytes), vector_meta, id_map,
+|                           filter_schema, category_idx, numeric_forward,
+|                           numeric_inverted, sparse_docs,
+|                           blocked_term_postings, op_log, layout_meta
 +-- bob/
     +-- ...
 ```
+
+The shared-env layout was introduced with the `single_txn` refactor. WAL (`op_log`) and the id_mapper (`id_map`) live inside the shared `vectors/` env, not as separate `wal.bin` / `ids/` paths. See [docs/mdbx_shared_env_acid_revamp.md](mdbx_shared_env_acid_revamp.md) for the full layout.
 
 Indexes are scoped as `username/index_name` -- users can only access their own.

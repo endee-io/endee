@@ -16,8 +16,21 @@ namespace settings {
     // === Compile-time constants ===
     inline const std::string VERSION = "1.1.0";
     inline uint16_t INDEX_VERSION = 1;
+    inline uint32_t INDEX_LAYOUT_VERSION = 2;
+    inline constexpr uint32_t LEGACY_INDEX_LAYOUT_VERSION = 0;
     inline uint16_t SPARSE_ONDISK_VERSION = 1;
     inline const std::string DEFAULT_SPACE_TYPE = "cosine";
+    inline const std::string LEGACY_INDEX_LAYOUT_ERROR =
+            "Index was created with an old storage layout. Create a backup and restore it to migrate.";
+    inline const std::string NEWER_INDEX_LAYOUT_ERROR =
+            "Index was created with a newer storage layout. Upgrade this binary before opening it.";
+    inline const std::string INCOMPLETE_INDEX_MIGRATION_ERROR =
+            "Index storage migration was interrupted. Restore the backup again to rebuild this index.";
+    inline const std::string INDEX_MIGRATION_MARKER = "migration.inprogress";
+    inline const std::string& indexLayoutError(uint32_t layout_version) {
+        return layout_version > INDEX_LAYOUT_VERSION ? NEWER_INDEX_LAYOUT_ERROR
+                                                     : LEGACY_INDEX_LAYOUT_ERROR;
+    }
 
     constexpr size_t MIN_DIMENSION = 2;
     constexpr size_t MAX_DIMENSION = 16'384;
@@ -45,17 +58,9 @@ namespace settings {
     // System tables
     constexpr size_t DEFAULT_INDEX_META_MAP_SIZE_BITS = 21;      // 2 MiB
     constexpr size_t DEFAULT_INDEX_META_MAP_SIZE_MAX_BITS = 27;  // 128 MiB
-    // Index-related tables
-    constexpr size_t DEFAULT_ID_MAPPER_MAP_SIZE_BITS = 24;      // 16 MiB
-    constexpr size_t DEFAULT_ID_MAPPER_MAP_SIZE_MAX_BITS = 33;  // 8 GiB
-    constexpr size_t DEFAULT_FILTER_MAP_SIZE_BITS = 24;         // 16 MiB
-    constexpr size_t DEFAULT_FILTER_MAP_SIZE_MAX_BITS = 36;     // 64 GiB
-    constexpr size_t DEFAULT_METADATA_MAP_SIZE_BITS = 27;       // 128 MiB
-    constexpr size_t DEFAULT_METADATA_MAP_SIZE_MAX_BITS = 39;   // 512 GiB
+    // Shared per-index env (vectors, metadata, filters, sparse docs, op_log)
     constexpr size_t DEFAULT_VECTOR_MAP_SIZE_BITS = 30;         // 1 GiB
     constexpr size_t DEFAULT_VECTOR_MAP_SIZE_MAX_BITS = 40;     // 1 TiB
-    // Sparse storage
-    constexpr size_t DEFAULT_SPARSE_MAP_SIZE_MAX_BITS = 40;    // 1 TiB
 
     constexpr size_t MAX_LINK_LIST_LOCKS = 65536;
 
@@ -109,6 +114,11 @@ namespace settings {
     const std::string DEFAULT_DATA_DIR = "/mnt/data";
     const std::string DEFAULT_SUBINDEX = "default";
     constexpr size_t MAX_NR_SUBINDEX = 100; //Maximum number of subindexes
+    // One shared index currently opens 11 named DBIs. MDBX maxdbs is fixed at env-open time,
+    // so keep spare capacity for future storage features without silently hitting the ceiling.
+    constexpr size_t SHARED_INDEX_NAMED_DBI_COUNT = 11;
+    constexpr size_t SHARED_INDEX_MAX_DBS = 32;
+    constexpr size_t SHARED_INDEX_MAX_DBS_WARNING_MARGIN = 4;
     constexpr size_t DEFAULT_MAX_ELEMENTS = 100'000;
     constexpr size_t DEFAULT_MAX_ELEMENTS_INCREMENT = 100'000;
     constexpr size_t DEFAULT_MAX_ELEMENTS_INCREMENT_TRIGGER = 50'000;
@@ -235,30 +245,6 @@ namespace settings {
         const char* env = std::getenv("NDD_INDEX_META_MAP_SIZE_MAX_BITS");
         return env ? std::stoull(env) : DEFAULT_INDEX_META_MAP_SIZE_MAX_BITS;
     }();
-    inline static size_t ID_MAPPER_MAP_SIZE_BITS = [] {
-        const char* env = std::getenv("NDD_ID_MAPPER_MAP_SIZE_BITS");
-        return env ? std::stoull(env) : DEFAULT_ID_MAPPER_MAP_SIZE_BITS;
-    }();
-    inline static size_t ID_MAPPER_MAP_SIZE_MAX_BITS = [] {
-        const char* env = std::getenv("NDD_ID_MAPPER_MAP_SIZE_MAX_BITS");
-        return env ? std::stoull(env) : DEFAULT_ID_MAPPER_MAP_SIZE_MAX_BITS;
-    }();
-    inline static size_t FILTER_MAP_SIZE_BITS = [] {
-        const char* env = std::getenv("NDD_FILTER_MAP_SIZE_BITS");
-        return env ? std::stoull(env) : DEFAULT_FILTER_MAP_SIZE_BITS;
-    }();
-    inline static size_t FILTER_MAP_SIZE_MAX_BITS = [] {
-        const char* env = std::getenv("NDD_FILTER_MAP_SIZE_MAX_BITS");
-        return env ? std::stoull(env) : DEFAULT_FILTER_MAP_SIZE_MAX_BITS;
-    }();
-    inline static size_t METADATA_MAP_SIZE_BITS = [] {
-        const char* env = std::getenv("NDD_METADATA_MAP_SIZE_BITS");
-        return env ? std::stoull(env) : DEFAULT_METADATA_MAP_SIZE_BITS;
-    }();
-    inline static size_t METADATA_MAP_SIZE_MAX_BITS = [] {
-        const char* env = std::getenv("NDD_METADATA_MAP_SIZE_MAX_BITS");
-        return env ? std::stoull(env) : DEFAULT_METADATA_MAP_SIZE_MAX_BITS;
-    }();
     inline static size_t VECTOR_MAP_SIZE_BITS = [] {
         const char* env = std::getenv("NDD_VECTOR_MAP_SIZE_BITS");
         return env ? std::stoull(env) : DEFAULT_VECTOR_MAP_SIZE_BITS;
@@ -266,10 +252,6 @@ namespace settings {
     inline static size_t VECTOR_MAP_SIZE_MAX_BITS = [] {
         const char* env = std::getenv("NDD_VECTOR_MAP_SIZE_MAX_BITS");
         return env ? std::stoull(env) : DEFAULT_VECTOR_MAP_SIZE_MAX_BITS;
-    }();
-    inline static size_t SPARSE_MAP_SIZE_MAX_BITS = [] {
-        const char* env = std::getenv("NDD_SPARSE_MAP_SIZE_MAX_BITS");
-        return env ? std::stoull(env) : DEFAULT_SPARSE_MAP_SIZE_MAX_BITS;
     }();
 
     /**
@@ -312,27 +294,6 @@ namespace settings {
                                   "NDD_INDEX_META_MAP_SIZE_MAX_BITS",
                                   INDEX_META_MAP_SIZE_MAX_BITS);
         }
-        if(ID_MAPPER_MAP_SIZE_BITS >= ID_MAPPER_MAP_SIZE_MAX_BITS) {
-            appendComparisonError("NDD_ID_MAPPER_MAP_SIZE_BITS",
-                                  ID_MAPPER_MAP_SIZE_BITS,
-                                  "must be less than",
-                                  "NDD_ID_MAPPER_MAP_SIZE_MAX_BITS",
-                                  ID_MAPPER_MAP_SIZE_MAX_BITS);
-        }
-        if(FILTER_MAP_SIZE_BITS >= FILTER_MAP_SIZE_MAX_BITS) {
-            appendComparisonError("NDD_FILTER_MAP_SIZE_BITS",
-                                  FILTER_MAP_SIZE_BITS,
-                                  "must be less than",
-                                  "NDD_FILTER_MAP_SIZE_MAX_BITS",
-                                  FILTER_MAP_SIZE_MAX_BITS);
-        }
-        if(METADATA_MAP_SIZE_BITS >= METADATA_MAP_SIZE_MAX_BITS) {
-            appendComparisonError("NDD_METADATA_MAP_SIZE_BITS",
-                                  METADATA_MAP_SIZE_BITS,
-                                  "must be less than",
-                                  "NDD_METADATA_MAP_SIZE_MAX_BITS",
-                                  METADATA_MAP_SIZE_MAX_BITS);
-        }
         if(VECTOR_MAP_SIZE_BITS >= VECTOR_MAP_SIZE_MAX_BITS) {
             appendComparisonError("NDD_VECTOR_MAP_SIZE_BITS",
                                   VECTOR_MAP_SIZE_BITS,
@@ -347,40 +308,12 @@ namespace settings {
                                   "DEFAULT_INDEX_META_MAP_SIZE_MAX_BITS",
                                   DEFAULT_INDEX_META_MAP_SIZE_MAX_BITS);
         }
-        if(ID_MAPPER_MAP_SIZE_MAX_BITS > DEFAULT_ID_MAPPER_MAP_SIZE_MAX_BITS) {
-            appendComparisonError("NDD_ID_MAPPER_MAP_SIZE_MAX_BITS",
-                                  ID_MAPPER_MAP_SIZE_MAX_BITS,
-                                  "exceeds",
-                                  "DEFAULT_ID_MAPPER_MAP_SIZE_MAX_BITS",
-                                  DEFAULT_ID_MAPPER_MAP_SIZE_MAX_BITS);
-        }
-        if(FILTER_MAP_SIZE_MAX_BITS > DEFAULT_FILTER_MAP_SIZE_MAX_BITS) {
-            appendComparisonError("NDD_FILTER_MAP_SIZE_MAX_BITS",
-                                  FILTER_MAP_SIZE_MAX_BITS,
-                                  "exceeds",
-                                  "DEFAULT_FILTER_MAP_SIZE_MAX_BITS",
-                                  DEFAULT_FILTER_MAP_SIZE_MAX_BITS);
-        }
-        if(METADATA_MAP_SIZE_MAX_BITS > DEFAULT_METADATA_MAP_SIZE_MAX_BITS) {
-            appendComparisonError("NDD_METADATA_MAP_SIZE_MAX_BITS",
-                                  METADATA_MAP_SIZE_MAX_BITS,
-                                  "exceeds",
-                                  "DEFAULT_METADATA_MAP_SIZE_MAX_BITS",
-                                  DEFAULT_METADATA_MAP_SIZE_MAX_BITS);
-        }
         if(VECTOR_MAP_SIZE_MAX_BITS > DEFAULT_VECTOR_MAP_SIZE_MAX_BITS) {
             appendComparisonError("NDD_VECTOR_MAP_SIZE_MAX_BITS",
                                   VECTOR_MAP_SIZE_MAX_BITS,
                                   "exceeds",
                                   "DEFAULT_VECTOR_MAP_SIZE_MAX_BITS",
                                   DEFAULT_VECTOR_MAP_SIZE_MAX_BITS);
-        }
-        if(SPARSE_MAP_SIZE_MAX_BITS > DEFAULT_SPARSE_MAP_SIZE_MAX_BITS) {
-            appendComparisonError("NDD_SPARSE_MAP_SIZE_MAX_BITS",
-                                  SPARSE_MAP_SIZE_MAX_BITS,
-                                  "exceeds",
-                                  "DEFAULT_SPARSE_MAP_SIZE_MAX_BITS",
-                                  DEFAULT_SPARSE_MAP_SIZE_MAX_BITS);
         }
         return error;
     }
@@ -390,6 +323,7 @@ namespace settings {
         std::ostringstream oss;
         oss << "\n=== NDD Server ===\n";
         oss << "VERSION: " << VERSION << "\n";
+        oss << "INDEX_LAYOUT_VERSION: " << INDEX_LAYOUT_VERSION << "\n";
         oss << "SERVER_ID: " << SERVER_ID << "\n";
         oss << "SERVER_PORT: " << SERVER_PORT << "\n";
         oss << "DATA_DIR: " << DATA_DIR << "\n";
@@ -407,15 +341,8 @@ namespace settings {
         oss << "\n=== MDBX Map Sizes (bit shifts) ===\n";
         oss << "INDEX_META_MAP_SIZE_BITS: " << INDEX_META_MAP_SIZE_BITS << "\n";
         oss << "INDEX_META_MAP_SIZE_MAX_BITS: " << INDEX_META_MAP_SIZE_MAX_BITS << "\n";
-        oss << "ID_MAPPER_MAP_SIZE_BITS: " << ID_MAPPER_MAP_SIZE_BITS << "\n";
-        oss << "ID_MAPPER_MAP_SIZE_MAX_BITS: " << ID_MAPPER_MAP_SIZE_MAX_BITS << "\n";
-        oss << "FILTER_MAP_SIZE_BITS: " << FILTER_MAP_SIZE_BITS << "\n";
-        oss << "FILTER_MAP_SIZE_MAX_BITS: " << FILTER_MAP_SIZE_MAX_BITS << "\n";
-        oss << "METADATA_MAP_SIZE_BITS: " << METADATA_MAP_SIZE_BITS << "\n";
-        oss << "METADATA_MAP_SIZE_MAX_BITS: " << METADATA_MAP_SIZE_MAX_BITS << "\n";
         oss << "VECTOR_MAP_SIZE_BITS: " << VECTOR_MAP_SIZE_BITS << "\n";
         oss << "VECTOR_MAP_SIZE_MAX_BITS: " << VECTOR_MAP_SIZE_MAX_BITS << "\n";
-        oss << "SPARSE_MAP_SIZE_MAX_BITS: " << SPARSE_MAP_SIZE_MAX_BITS << "\n";
         oss << "\n=== End Settings ===\n";
         return oss.str();
     }

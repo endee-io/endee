@@ -3,13 +3,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
-#include <filesystem>
 #include <limits>
 #include <stdexcept>
 #include <utility>
 
 #include "../utils/log.hpp"
-#include "../utils/settings.hpp"
 
 ndd::OperationResult<> Filter::load_schema() {
     MDBX_txn* txn = nullptr;
@@ -24,6 +22,8 @@ ndd::OperationResult<> Filter::load_schema() {
     rc = mdbx_get(txn, dbi_, &key, &data);
 
     if(rc == MDBX_NOTFOUND || (rc == MDBX_SUCCESS && data.iov_len == 0)) {
+        std::lock_guard<std::mutex> lock(schema_mutex_);
+        schema_cache_.clear();
         mdbx_txn_abort(txn);
         return {SUCCESS, ""};
     }
@@ -50,12 +50,15 @@ ndd::OperationResult<> Filter::load_schema() {
 }
 
 ndd::OperationResult<> Filter::save_schema_internal() {
-    nlohmann::json schema_json;
-    for(const auto& [field, type] : schema_cache_) {
-        schema_json[field] = static_cast<int>(type);
+    SchemaCache schema_snapshot;
+    {
+        std::lock_guard<std::mutex> lock(schema_mutex_);
+        schema_snapshot = schema_cache_;
     }
-    std::string json_str = schema_json.dump();
+    return save_schema_blob_internal(serialize_schema(schema_snapshot));
+}
 
+ndd::OperationResult<> Filter::save_schema_blob_internal(const std::string& schema_json) {
     MDBX_txn* txn = nullptr;
     int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
     if(rc != MDBX_SUCCESS) {
@@ -64,7 +67,7 @@ ndd::OperationResult<> Filter::save_schema_internal() {
     }
 
     MDBX_val key{const_cast<char*>(SCHEMA_KEY), std::strlen(SCHEMA_KEY)};
-    MDBX_val data{const_cast<char*>(json_str.c_str()), json_str.size()};
+    MDBX_val data{const_cast<char*>(schema_json.c_str()), schema_json.size()};
 
     rc = mdbx_put(txn, dbi_, &key, &data, MDBX_UPSERT);
     if(rc != MDBX_SUCCESS) {
@@ -81,21 +84,173 @@ ndd::OperationResult<> Filter::save_schema_internal() {
     return {SUCCESS, ""};
 }
 
-ndd::OperationResult<> Filter::register_field_type(const std::string& field, FieldType type) {
-    std::lock_guard<std::mutex> lock(schema_mutex_);
-    auto it = schema_cache_.find(field);
-    if(it != schema_cache_.end()) {
+ndd::OperationResult<> Filter::save_schema_internal(MDBX_txn* txn) {
+    SchemaCache schema_snapshot;
+    {
+        std::lock_guard<std::mutex> lock(schema_mutex_);
+        schema_snapshot = schema_cache_;
+    }
+    return save_schema_internal(txn, schema_snapshot);
+}
+
+ndd::OperationResult<> Filter::save_schema_internal(MDBX_txn* txn,
+                                                    const SchemaCache& schema_cache) {
+    return save_schema_blob_internal(txn, serialize_schema(schema_cache));
+}
+
+ndd::OperationResult<> Filter::save_schema_blob_internal(MDBX_txn* txn,
+                                                         const std::string& schema_json) {
+    MDBX_val key{const_cast<char*>(SCHEMA_KEY), std::strlen(SCHEMA_KEY)};
+    MDBX_val data{const_cast<char*>(schema_json.c_str()), schema_json.size()};
+
+    int rc = mdbx_put(txn, dbi_, &key, &data, MDBX_UPSERT);
+    if(rc != MDBX_SUCCESS) {
+        return {100, "Failed to persist filter schema: "
+                             + std::string(mdbx_strerror(rc))};
+    }
+    return {SUCCESS, ""};
+}
+
+std::string Filter::serialize_schema(const SchemaCache& schema_cache) {
+    nlohmann::json schema_json;
+    for(const auto& [field, type] : schema_cache) {
+        schema_json[field] = static_cast<int>(type);
+    }
+    return schema_json.dump();
+}
+
+ndd::OperationResult<> Filter::stage_field_type(SchemaCache& schema_cache,
+                                                const std::string& field,
+                                                FieldType type,
+                                                bool* changed) {
+    if(changed) {
+        *changed = false;
+    }
+    auto it = schema_cache.find(field);
+    if(it != schema_cache.end()) {
         if(it->second == type) {
             return {SUCCESS, ""};
         }
         return {3, "Filter field '" + field + "' has a different existing type"};
     }
 
-    schema_cache_[field] = type;
-    auto save_result = save_schema_internal();
-    if(!save_result.ok()) {
-        schema_cache_.erase(field);
-        return save_result;
+    schema_cache[field] = type;
+    if(changed) {
+        *changed = true;
+    }
+    return {SUCCESS, ""};
+}
+
+ndd::OperationResult<> Filter::add_filters_from_json_batch(
+        MDBX_txn* txn,
+        const std::vector<std::pair<ndd::idInt, std::string>>& id_filter_pairs,
+        bool* schema_changed) {
+    if(id_filter_pairs.empty()) {
+        return {SUCCESS, ""};
+    }
+
+    SchemaCache staged_schema;
+    {
+        std::lock_guard<std::mutex> lock(schema_mutex_);
+        staged_schema = schema_cache_;
+    }
+
+    // Create a map to collect IDs for each label filter
+    std::unordered_map<std::string, std::vector<ndd::idInt>> label_filter_to_ids;
+    label_filter_to_ids.reserve(id_filter_pairs.size());
+    std::vector<ndd::filter::NumericBatchEntry> numeric_filter_entries;
+    numeric_filter_entries.reserve(id_filter_pairs.size());
+    bool local_schema_changed = false;
+
+    // Group IDs by filter
+    for(const auto& [numeric_id, filter_json] : id_filter_pairs) {
+        nlohmann::json parsed;
+        try {
+            parsed = nlohmann::json::parse(filter_json);
+        } catch(const std::exception& e) {
+            return {1, "Invalid filter JSON: " + std::string(e.what())};
+        }
+
+        if(!parsed.is_object()) {
+            return {1, "Filter JSON document must be an object"};
+        }
+
+        for(const auto& [field, value] : parsed.items()) {
+            if(field.empty()) {
+                return {1, "Filter field name cannot be empty"};
+            }
+            auto field_check = validate_filter_key_component(field, "Filter field name");
+            if(!field_check.ok()) {
+                return {field_check.code, field_check.message};
+            }
+
+            FieldType type = FieldType::Unknown;
+            if(value.is_boolean()) {
+                type = FieldType::Bool;
+            } else if(value.is_number()) {
+                type = FieldType::Number;
+            } else if(value.is_string()) {
+                type = FieldType::String;
+            }
+
+            if(type == FieldType::Unknown) {
+                return {2, "Unsupported filter type for field '" + field + "'"};
+            }
+
+            bool field_added = false;
+            auto register_result = stage_field_type(staged_schema, field, type, &field_added);
+            if(!register_result.ok()) {
+                return register_result;
+            }
+            local_schema_changed = local_schema_changed || field_added;
+
+            if(type == FieldType::String) {
+                auto category_result = category_value_from_json(value, "Filter value");
+                if(!category_result.ok()) {
+                    return {category_result.code,
+                            category_result.message + " for field '" + field + "'"};
+                }
+                label_filter_to_ids[format_filter_key(field, category_result.value_or_throw())]
+                        .emplace_back(numeric_id);
+            } else if(type == FieldType::Bool) {
+                label_filter_to_ids[format_filter_key(field, value.get<bool>() ? "1" : "0")]
+                        .emplace_back(numeric_id);
+            } else if(type == FieldType::Number) {
+                auto sortable_result = sortable_from_json(value, "Numeric filter value");
+                if(!sortable_result.ok()) {
+                    return {sortable_result.code,
+                            sortable_result.message + " for field '" + field + "'"};
+                }
+                numeric_filter_entries.emplace_back(
+                        field, numeric_id, sortable_result.value_or_throw());
+            }
+        }
+    }
+
+    if(local_schema_changed) {
+        auto schema_result = save_schema_internal(txn, staged_schema);
+        if(!schema_result.ok()) {
+            return schema_result;
+        }
+    }
+
+    if(!numeric_filter_entries.empty()) {
+        auto numeric_result = numeric_index_->put_batch(txn, numeric_filter_entries);
+        if(!numeric_result.ok()) {
+            return numeric_result;
+        }
+    }
+
+    // Process each filter with its batch of IDs
+    for(const auto& [filter_key, ids] : label_filter_to_ids) {
+        auto add_result = category_index_->add_batch_by_key(txn, filter_key, ids);
+        if(!add_result.ok()) {
+            return add_result;
+        }
+    }
+
+    if(schema_changed && local_schema_changed) {
+        *schema_changed = true;
     }
     return {SUCCESS, ""};
 }
@@ -209,50 +364,16 @@ Filter::numeric_bound_from_comparison(const std::string& op, const nlohmann::jso
     return {2, "Unsupported numeric comparison operator: " + op};
 }
 
-void Filter::init_environment() {
-    int rc = mdbx_env_create(&env_);
-    if(rc != MDBX_SUCCESS) {
-        throw std::runtime_error(std::string("Failed to create LMDB env for filters: ")
-                                 + mdbx_strerror(rc));
-    }
-
-    // max DBs to allow multiple databases (main + schema + numeric_forward + numeric_inverted)
-    rc = mdbx_env_set_maxdbs(env_, 10);
-    if(rc != MDBX_SUCCESS) {
-        throw std::runtime_error(std::string("Failed to configure max DBs for filters: ")
-                                 + mdbx_strerror(rc));
-    }
-
-    // Set geometry for auto-grow using the filter map size settings
-    rc = mdbx_env_set_geometry(env_,
-                               -1,
-                               1ULL << settings::FILTER_MAP_SIZE_BITS,
-                               1ULL << settings::FILTER_MAP_SIZE_MAX_BITS,
-                               1ULL << settings::FILTER_MAP_SIZE_BITS,
-                               -1,
-                               -1);
-    if(rc != MDBX_SUCCESS) {
-        throw std::runtime_error(std::string("Failed to set geometry for filters: ")
-                                 + mdbx_strerror(rc));
-    }
-
-    rc = mdbx_env_open(env_,
-                       path_.c_str(),
-                       MDBX_WRITEMAP | MDBX_MAPASYNC | MDBX_NORDAHEAD,
-                       0664);
-    if(rc != MDBX_SUCCESS) {
-        throw std::runtime_error(std::string("Failed to open filter environment: ")
-                                 + mdbx_strerror(rc));
-    }
-
+void Filter::init_dbis() {
     MDBX_txn* txn = nullptr;
-    rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
+    int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
     if(rc != MDBX_SUCCESS) {
         throw std::runtime_error(std::string("Failed to begin filter transaction: ")
                                  + mdbx_strerror(rc));
     }
 
-    rc = mdbx_dbi_open(txn, nullptr, MDBX_CREATE, &dbi_);
+    const char* schema_name = schema_dbi_name_.empty() ? nullptr : schema_dbi_name_.c_str();
+    rc = mdbx_dbi_open(txn, schema_name, MDBX_CREATE, &dbi_);
     if(rc != MDBX_SUCCESS) {
         mdbx_txn_abort(txn);
         throw std::runtime_error(std::string("Failed to open filter database: ")
@@ -276,23 +397,21 @@ void Filter::init_environment() {
     }
 }
 
-Filter::Filter(const std::string& path, const std::string& index_id) :
+Filter::Filter(MDBX_env* env,
+               const std::string& index_id,
+               const std::string& schema_dbi_name) :
+    env_(env),
     index_id_(index_id),
-    path_(path) {
-    std::filesystem::create_directories(path);
-    init_environment();
+    schema_dbi_name_(schema_dbi_name) {
+    init_dbis();
 }
-
-Filter::Filter(const std::string& path) :
-    Filter(path, "-/-") {}
 
 Filter::~Filter() {
     mdbx_dbi_close(env_, dbi_);
-    mdbx_env_close(env_);
 }
 
 ndd::OperationResult<ndd::RoaringBitmap>
-Filter::computeFilterBitmap(const nlohmann::json& filter_array) const {
+Filter::computeFilterBitmap(MDBX_txn* txn, const nlohmann::json& filter_array) const {
     if(!filter_array.is_array()) {
         return {1, "Filter must be an array"};
     }
@@ -343,7 +462,7 @@ Filter::computeFilterBitmap(const nlohmann::json& filter_array) const {
                     return {sortable_result.code, sortable_result.message};
                 }
                 auto range_result =
-                        numeric_index_->range(field, sortable_result.value_or_throw(), sortable_result.value_or_throw());
+                        numeric_index_->range(txn, field, sortable_result.value_or_throw(), sortable_result.value_or_throw());
                 if(!range_result.ok()) {
                     return {range_result.code, range_result.message};
                 }
@@ -354,7 +473,7 @@ Filter::computeFilterBitmap(const nlohmann::json& filter_array) const {
                     return {value_result.code, value_result.message};
                 }
                 auto bitmap_result = category_index_->get_bitmap_by_key(
-                        format_filter_key(field, value_result.value_or_throw()));
+                        txn, format_filter_key(field, value_result.value_or_throw()));
                 if(!bitmap_result.ok()) {
                     return {bitmap_result.code, bitmap_result.message};
                 }
@@ -372,9 +491,10 @@ Filter::computeFilterBitmap(const nlohmann::json& filter_array) const {
                     if(!sortable_result.ok()) {
                         return {sortable_result.code, sortable_result.message};
                     }
-                    auto range_result = numeric_index_->range(field,
-                                                              sortable_result.value_or_throw(),
-                                                              sortable_result.value_or_throw());
+                    auto range_result = numeric_index_->range(txn,
+                                                                  field,
+                                                                  sortable_result.value_or_throw(),
+                                                                  sortable_result.value_or_throw());
                     if(!range_result.ok()) {
                         return {range_result.code, range_result.message};
                     }
@@ -386,7 +506,7 @@ Filter::computeFilterBitmap(const nlohmann::json& filter_array) const {
                     }
                     if(!value_result.value_or_throw().empty()) {
                         auto bitmap_result = category_index_->get_bitmap_by_key(
-                                format_filter_key(field, value_result.value_or_throw()));
+                                txn, format_filter_key(field, value_result.value_or_throw()));
                         if(!bitmap_result.ok()) {
                             return {bitmap_result.code, bitmap_result.message};
                         }
@@ -415,7 +535,7 @@ Filter::computeFilterBitmap(const nlohmann::json& filter_array) const {
             }
 
             auto range_result =
-                    numeric_index_->range(field, start_result.value_or_throw(), end_result.value_or_throw());
+                    numeric_index_->range(txn, field, start_result.value_or_throw(), end_result.value_or_throw());
             if(!range_result.ok()) {
                 return {range_result.code, range_result.message};
             }
@@ -430,7 +550,7 @@ Filter::computeFilterBitmap(const nlohmann::json& filter_array) const {
             }
             auto [min_val, max_val] = bound_result.value_or_throw();
             if(min_val <= max_val) {
-                auto range_result = numeric_index_->range(field, min_val, max_val);
+                auto range_result = numeric_index_->range(txn, field, min_val, max_val);
                 if(!range_result.ok()) {
                     return {range_result.code, range_result.message};
                 }
@@ -469,7 +589,14 @@ Filter::computeFilterBitmap(const nlohmann::json& filter_array) const {
 
 ndd::OperationResult<std::vector<ndd::idInt>>
 Filter::getIdsMatchingFilter(const nlohmann::json& filter_array) const {
-    auto bitmap_result = computeFilterBitmap(filter_array);
+    MDBX_txn* txn = nullptr;
+    int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_RDONLY, &txn);
+    if(rc != MDBX_SUCCESS) {
+        return {100, "Failed to begin filter ids read transaction: "
+                             + std::string(mdbx_strerror(rc))};
+    }
+    auto bitmap_result = computeFilterBitmap(txn, filter_array);
+    mdbx_txn_abort(txn);
     if(!bitmap_result.ok()) {
         return {bitmap_result.code, bitmap_result.message};
     }
@@ -485,173 +612,16 @@ Filter::getIdsMatchingFilter(const nlohmann::json& filter_array) const {
     return {SUCCESS, "", std::move(ids)};
 }
 
-ndd::OperationResult<size_t>
-Filter::countIdsMatchingFilter(const nlohmann::json& filter_array) const {
-    auto bitmap_result = computeFilterBitmap(filter_array);
-    if(!bitmap_result.ok()) {
-        return {bitmap_result.code, bitmap_result.message};
-    }
-    return {SUCCESS, "", bitmap_result.value_or_throw().cardinality()};
+ndd::OperationResult<> Filter::add_filters_from_json(MDBX_txn* txn,
+                                                         ndd::idInt numeric_id,
+                                                         const std::string& filter_json,
+                                                         bool* schema_changed) {
+    return add_filters_from_json_batch(txn, {{numeric_id, filter_json}}, schema_changed);
 }
 
-ndd::OperationResult<>
-Filter::add_to_filter(const std::string& field, const std::string& value, ndd::idInt numeric_id) {
-    auto field_check = validate_filter_key_component(field, "Filter field name");
-    if(!field_check.ok()) {
-        return field_check;
-    }
-    auto value_check = validate_filter_key_component(value, "Filter value");
-    if(!value_check.ok()) {
-        return value_check;
-    }
-    return category_index_->add(field, value, numeric_id);
-}
-
-ndd::OperationResult<>
-Filter::add_to_filter_batch(const std::string& filter_key,
-                            const std::vector<ndd::idInt>& numeric_ids) {
-    if(numeric_ids.empty()) {
-        return {SUCCESS, ""};
-    }
-    return category_index_->add_batch_by_key(filter_key, numeric_ids);
-}
-
-ndd::OperationResult<> Filter::add_filters_from_json_batch(
-        const std::vector<std::pair<ndd::idInt, std::string>>& id_filter_pairs) {
-    if(id_filter_pairs.empty()) {
-        return {SUCCESS, ""};
-    }
-
-    // Create a map to collect IDs for each label filter
-    std::unordered_map<std::string, std::vector<ndd::idInt>> label_filter_to_ids;
-    label_filter_to_ids.reserve(id_filter_pairs.size());
-    std::vector<ndd::filter::NumericBatchEntry> numeric_filter_entries;
-    numeric_filter_entries.reserve(id_filter_pairs.size());
-
-    // Group IDs by filter
-    for(const auto& [numeric_id, filter_json] : id_filter_pairs) {
-        nlohmann::json parsed;
-        try {
-            parsed = nlohmann::json::parse(filter_json);
-        } catch(const std::exception& e) {
-            return {1, "Invalid filter JSON: " + std::string(e.what())};
-        }
-
-        if(!parsed.is_object()) {
-            return {1, "Filter JSON document must be an object"};
-        }
-
-        for(const auto& [field, value] : parsed.items()) {
-            if(field.empty()) {
-                return {1, "Filter field name cannot be empty"};
-            }
-            auto field_check = validate_filter_key_component(field, "Filter field name");
-            if(!field_check.ok()) {
-                return {field_check.code, field_check.message};
-            }
-
-            FieldType type = FieldType::Unknown;
-            if(value.is_boolean()) {
-                type = FieldType::Bool;
-            } else if(value.is_number()) {
-                type = FieldType::Number;
-            } else if(value.is_string()) {
-                type = FieldType::String;
-            }
-
-            if(type == FieldType::Unknown) {
-                return {2, "Unsupported filter type for field '" + field + "'"};
-            }
-
-            auto register_result = register_field_type(field, type);
-            if(!register_result.ok()) {
-                return register_result;
-            }
-
-            if(type == FieldType::String) {
-                auto category_result = category_value_from_json(value, "Filter value");
-                if(!category_result.ok()) {
-                    return {category_result.code,
-                            category_result.message + " for field '" + field + "'"};
-                }
-                label_filter_to_ids[format_filter_key(field, category_result.value_or_throw())]
-                        .emplace_back(numeric_id);
-            } else if(type == FieldType::Bool) {
-                label_filter_to_ids[format_filter_key(field, value.get<bool>() ? "1" : "0")]
-                        .emplace_back(numeric_id);
-            } else if(type == FieldType::Number) {
-                auto sortable_result = sortable_from_json(value, "Numeric filter value");
-                if(!sortable_result.ok()) {
-                    return {sortable_result.code,
-                            sortable_result.message + " for field '" + field + "'"};
-                }
-                numeric_filter_entries.emplace_back(field, numeric_id, sortable_result.value_or_throw());
-            }
-        }
-    }
-
-    /**
-     * XXX: For transactional correctness of filter adds, all the filters
-     * should be added in a single transaction.
-     * For now, they are being added in two different transactions.
-     * one for numeric_index and other for labels.
-     */
-
-    if(!numeric_filter_entries.empty()) {
-        auto numeric_result = numeric_index_->put_batch(numeric_filter_entries);
-        if(!numeric_result.ok()) {
-            return numeric_result;
-        }
-    }
-
-    // Process each filter with its batch of IDs
-    for(const auto& [filter_key, ids] : label_filter_to_ids) {
-        auto add_result = add_to_filter_batch(filter_key, ids);
-        if(!add_result.ok()) {
-            return add_result;
-        }
-    }
-
-    return {SUCCESS, ""};
-}
-
-ndd::OperationResult<>
-Filter::remove_from_filter(const std::string& field,
-                           const std::string& value,
-                           ndd::idInt numeric_id) {
-    auto field_check = validate_filter_key_component(field, "Filter field name");
-    if(!field_check.ok()) {
-        return field_check;
-    }
-    auto value_check = validate_filter_key_component(value, "Filter value");
-    if(!value_check.ok()) {
-        return value_check;
-    }
-    return category_index_->remove(field, value, numeric_id);
-}
-
-ndd::OperationResult<bool>
-Filter::contains(const std::string& field,
-                 const std::string& value,
-                 ndd::idInt numeric_id) const {
-    auto field_check = validate_filter_key_component(field, "Filter field name");
-    if(!field_check.ok()) {
-        return {field_check.code, field_check.message};
-    }
-    auto value_check = validate_filter_key_component(value, "Filter value");
-    if(!value_check.ok()) {
-        return {value_check.code, value_check.message};
-    }
-    return category_index_->contains(field, value, numeric_id);
-}
-
-ndd::OperationResult<> Filter::add_filters_from_json(ndd::idInt numeric_id,
-                                                     const std::string& filter_json) {
-    return add_filters_from_json_batch({{numeric_id, filter_json}});
-}
-
-ndd::OperationResult<> Filter::remove_filters_from_json(ndd::idInt numeric_id,
-                                                        const std::string& filter_json) {
+ndd::OperationResult<> Filter::remove_filters_from_json(MDBX_txn* txn,
+                                                            ndd::idInt numeric_id,
+                                                            const std::string& filter_json) {
     nlohmann::json parsed;
     try {
         parsed = nlohmann::json::parse(filter_json);
@@ -679,14 +649,14 @@ ndd::OperationResult<> Filter::remove_filters_from_json(ndd::idInt numeric_id,
                 return {category_result.code,
                         category_result.message + " for field '" + field + "'"};
             }
-            remove_result = remove_from_filter(field, category_result.value_or_throw(), numeric_id);
+            remove_result = category_index_->remove(
+                    txn, field, category_result.value_or_throw(), numeric_id);
         } else if(value.is_number()) {
             // Remove from Numeric Index
-            remove_result = numeric_index_->remove(field, numeric_id);
+            remove_result = numeric_index_->remove(txn, field, numeric_id);
         } else if(value.is_boolean()) {
-            remove_result = remove_from_filter(field,
-                                               value.get<bool>() ? "1" : "0",
-                                               numeric_id);
+            remove_result = category_index_->remove(
+                    txn, field, value.get<bool>() ? "1" : "0", numeric_id);
         } else {
             return {2, "Unsupported filter type for field '" + field + "'"};
         }
@@ -699,37 +669,6 @@ ndd::OperationResult<> Filter::remove_filters_from_json(ndd::idInt numeric_id,
     return {SUCCESS, ""};
 }
 
-ndd::OperationResult<ndd::RoaringBitmap> Filter::combine_filters_and(
-        const std::vector<std::pair<std::string, std::string>>& filters) const {
-    ndd::RoaringBitmap result;
-    bool first = true;
-    for(const auto& [field, value] : filters) {
-        auto bitmap_result = category_index_->get_bitmap(field, value);
-        if(!bitmap_result.ok()) {
-            return {bitmap_result.code, bitmap_result.message};
-        }
-        if(first) {
-            result = std::move(bitmap_result.value_or_throw());
-            first = false;
-        } else {
-            result &= bitmap_result.value_or_throw();
-        }
-    }
-    return {SUCCESS, "", std::move(result)};
-}
-
-ndd::OperationResult<ndd::RoaringBitmap> Filter::combine_filters_or(
-        const std::vector<std::pair<std::string, std::string>>& filters) const {
-    ndd::RoaringBitmap result;
-    for(const auto& [field, value] : filters) {
-        auto bitmap_result = category_index_->get_bitmap(field, value);
-        if(!bitmap_result.ok()) {
-            return {bitmap_result.code, bitmap_result.message};
-        }
-        result |= bitmap_result.value_or_throw();
-    }
-    return {SUCCESS, "", std::move(result)};
-}
 
 ndd::OperationResult<bool> Filter::check_numeric(const std::string& field,
                                                  ndd::idInt id,

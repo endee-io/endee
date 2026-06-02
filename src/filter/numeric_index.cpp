@@ -643,6 +643,35 @@ namespace ndd {
         }
 
         ndd::OperationResult<>
+        NumericIndex::put(MDBX_txn* txn,
+                          const std::string& field,
+                          ndd::idInt id,
+                          uint32_t value) {
+            return put_internal(txn, field, id, value);
+        }
+
+        ndd::OperationResult<>
+        NumericIndex::put_batch_txn_range(MDBX_txn* txn,
+                                          const std::vector<NumericBatchEntry>& entries,
+                                          size_t start,
+                                          size_t end) {
+            for(size_t i = start; i < end; ++i) {
+                const auto& entry = entries[i];
+                auto put_result = put_internal(txn, entry.field, entry.id, entry.value);
+                if(!put_result.ok()) {
+                    return put_result;
+                }
+            }
+            return {SUCCESS, ""};
+        }
+
+        ndd::OperationResult<>
+        NumericIndex::put_batch(MDBX_txn* txn,
+                                    const std::vector<NumericBatchEntry>& entries) {
+            return put_batch_txn_range(txn, entries, 0, entries.size());
+        }
+
+        ndd::OperationResult<>
         NumericIndex::put_batch(const std::vector<NumericBatchEntry>& entries) {
             if(entries.empty()) {
                 return {SUCCESS, ""};
@@ -658,13 +687,10 @@ namespace ndd {
                                          + std::string(mdbx_strerror(rc))};
                 }
 
-                for(size_t i = start; i < end; ++i) {
-                    const auto& entry = entries[i];
-                    auto put_result = put_internal(txn, entry.field, entry.id, entry.value);
-                    if(!put_result.ok()) {
-                        mdbx_txn_abort(txn);
-                        return put_result;
-                    }
+                auto put_result = put_batch_txn_range(txn, entries, start, end);
+                if(!put_result.ok()) {
+                    mdbx_txn_abort(txn);
+                    return put_result;
                 }
 
                 rc = mdbx_txn_commit(txn);
@@ -672,6 +698,39 @@ namespace ndd {
                     return {100, "Failed to commit numeric batch write transaction: "
                                          + std::string(mdbx_strerror(rc))};
                 }
+            }
+            return {SUCCESS, ""};
+        }
+
+        ndd::OperationResult<>
+        NumericIndex::remove(MDBX_txn* txn, const std::string& field, ndd::idInt id) {
+            std::string fwd_key_str = make_forward_key(field, id);
+            MDBX_val fwd_key{const_cast<char*>(fwd_key_str.data()), fwd_key_str.size()};
+            MDBX_val fwd_val;
+
+            int rc = mdbx_get(txn, forward_dbi_, &fwd_key, &fwd_val);
+            if(rc == MDBX_NOTFOUND) {
+                return {SUCCESS, ""};
+            }
+            if(rc != MDBX_SUCCESS) {
+                return {100, "Failed to read numeric forward value for remove: "
+                                     + std::string(mdbx_strerror(rc))};
+            }
+            if(fwd_val.iov_len != sizeof(uint32_t)) {
+                return {200, "Corrupt numeric forward value for field '" + field + "'"};
+            }
+
+            uint32_t old_val;
+            std::memcpy(&old_val, fwd_val.iov_base, sizeof(uint32_t));
+            auto remove_result = remove_from_buckets(txn, field, old_val, id);
+            if(!remove_result.ok()) {
+                return remove_result;
+            }
+
+            rc = mdbx_del(txn, forward_dbi_, &fwd_key, nullptr);
+            if(rc != MDBX_SUCCESS && rc != MDBX_NOTFOUND) {
+                return {100, "Failed to delete numeric forward value: "
+                                     + std::string(mdbx_strerror(rc))};
             }
             return {SUCCESS, ""};
         }
@@ -685,38 +744,10 @@ namespace ndd {
                                      + std::string(mdbx_strerror(rc))};
             }
 
-            std::string fwd_key_str = make_forward_key(field, id);
-            MDBX_val fwd_key{const_cast<char*>(fwd_key_str.data()), fwd_key_str.size()};
-            MDBX_val fwd_val;
-
-            rc = mdbx_get(txn, forward_dbi_, &fwd_key, &fwd_val);
-            if(rc == MDBX_NOTFOUND) {
-                mdbx_txn_abort(txn);
-                return {SUCCESS, ""};
-            }
-            if(rc != MDBX_SUCCESS) {
-                mdbx_txn_abort(txn);
-                return {100, "Failed to read numeric forward value for remove: "
-                                     + std::string(mdbx_strerror(rc))};
-            }
-            if(fwd_val.iov_len != sizeof(uint32_t)) {
-                mdbx_txn_abort(txn);
-                return {200, "Corrupt numeric forward value for field '" + field + "'"};
-            }
-
-            uint32_t old_val;
-            std::memcpy(&old_val, fwd_val.iov_base, sizeof(uint32_t));
-            auto remove_result = remove_from_buckets(txn, field, old_val, id);
+            auto remove_result = remove(txn, field, id);
             if(!remove_result.ok()) {
                 mdbx_txn_abort(txn);
                 return remove_result;
-            }
-
-            rc = mdbx_del(txn, forward_dbi_, &fwd_key, nullptr);
-            if(rc != MDBX_SUCCESS && rc != MDBX_NOTFOUND) {
-                mdbx_txn_abort(txn);
-                return {100, "Failed to delete numeric forward value: "
-                                     + std::string(mdbx_strerror(rc))};
             }
 
             rc = mdbx_txn_commit(txn);
@@ -728,19 +759,15 @@ namespace ndd {
         }
 
         ndd::OperationResult<ndd::RoaringBitmap>
-        NumericIndex::range(const std::string& field, uint32_t min_val, uint32_t max_val) {
+        NumericIndex::range(MDBX_txn* txn,
+                                const std::string& field,
+                                uint32_t min_val,
+                                uint32_t max_val) {
             ndd::RoaringBitmap result;
-            MDBX_txn* txn = nullptr;
-            int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_RDONLY, &txn);
-            if(rc != MDBX_SUCCESS) {
-                return {100, "Failed to begin numeric range transaction: "
-                                     + std::string(mdbx_strerror(rc))};
-            }
 
             MDBX_cursor* cursor = nullptr;
-            rc = mdbx_cursor_open(txn, inverted_dbi_, &cursor);
+            int rc = mdbx_cursor_open(txn, inverted_dbi_, &cursor);
             if(rc != MDBX_SUCCESS) {
-                mdbx_txn_abort(txn);
                 return {100, "Failed to open numeric range cursor: "
                                      + std::string(mdbx_strerror(rc))};
             }
@@ -769,7 +796,6 @@ namespace ndd {
                         }
                     } else if(prev_rc != MDBX_NOTFOUND) {
                         mdbx_cursor_close(cursor);
-                        mdbx_txn_abort(txn);
                         return {100, "Failed to seek previous numeric range bucket: "
                                              + std::string(mdbx_strerror(prev_rc))};
                     }
@@ -783,13 +809,11 @@ namespace ndd {
                     }
                 } else if(rc != MDBX_NOTFOUND) {
                     mdbx_cursor_close(cursor);
-                    mdbx_txn_abort(txn);
                     return {100, "Failed to seek last numeric range bucket: "
                                          + std::string(mdbx_strerror(rc))};
                 }
             } else {
                 mdbx_cursor_close(cursor);
-                mdbx_txn_abort(txn);
                 return {100, "Failed to seek numeric range bucket: "
                                      + std::string(mdbx_strerror(rc))};
             }
@@ -850,13 +874,11 @@ namespace ndd {
                 }
             } catch(const std::exception& e) {
                 mdbx_cursor_close(cursor);
-                mdbx_txn_abort(txn);
                 return {200, "Corrupt numeric bucket during range scan: "
                                      + std::string(e.what())};
             }
 
             mdbx_cursor_close(cursor);
-            mdbx_txn_abort(txn);
             if(rc != MDBX_SUCCESS && rc != MDBX_NOTFOUND) {
                 return {100, "Failed during numeric range scan: "
                                      + std::string(mdbx_strerror(rc))};

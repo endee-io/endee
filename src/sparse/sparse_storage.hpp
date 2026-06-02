@@ -12,6 +12,7 @@
 #include <filesystem>
 #include "mdbx/mdbx.h"
 #include "inverted_index.hpp"
+#include "../storage/shared_mdbx.hpp"
 #include "../utils/log.hpp"
 
 namespace ndd {
@@ -20,22 +21,25 @@ namespace ndd {
     // inverted index in the same MDBX environment and updates them transactionally.
     class SparseVectorStorage {
     public:
-        SparseVectorStorage(const std::string& db_path,
+        SparseVectorStorage(MDBX_env* env,
                             const std::string& index_id,
                             ndd::SparseScoringModel sparse_model =
                                 ndd::SparseScoringModel::DEFAULT) :
-            db_path_(db_path),
             index_id_(index_id),
             sparse_model_(sparse_model),
-            env_(nullptr) {
+            env_(env) {
             sparse_index_ = nullptr;
         }
 
-        ~SparseVectorStorage() { closeMDBX(); }
+        ~SparseVectorStorage() {
+            if(env_ && docs_dbi_) {
+                mdbx_dbi_close(env_, docs_dbi_);
+            }
+        }
 
         // Initialize storage
         bool initialize() {
-            if(!initializeMDBX()) {
+            if(!initializeDBIs()) {
                 return false;
             }
 
@@ -48,201 +52,112 @@ namespace ndd {
             updateVectorCount();
             LOG_INFO(2241,
                      index_id_,
-                     "SparseVectorStorage initialized at " << db_path_ << " with " << vector_count_ << " vectors");
+                     "SparseVectorStorage initialized with " << vector_count_ << " vectors");
             return true;
         }
 
-        // Transaction support
-        class Transaction {
-        public:
-            Transaction(SparseVectorStorage* storage, bool read_only = false) :
-                storage_(storage),
-                read_only_(read_only),
-                committed_(false),
-                vector_count_delta_(0) {
-                int flags = read_only ? MDBX_TXN_RDONLY : MDBX_TXN_READWRITE;
-                int rc = mdbx_txn_begin(
-                        storage_->env_, nullptr, static_cast<MDBX_txn_flags_t>(flags), &txn_);
-                if(rc != 0) {
-                    throw std::runtime_error("Failed to begin transaction: "
-                                                + std::string(mdbx_strerror(rc)));
-                }
-            }
-
-            ~Transaction() {
-                if(!committed_) {
-                    abort();
-                }
-            }
-
-            bool commit() {
-                if(committed_) {
-                    return true;
-                }
-                int rc = mdbx_txn_commit(txn_);
-                if(rc == 0) {
-                    storage_->applyVectorCountDelta(vector_count_delta_);
-                    committed_ = true;
-                    return true;
-                }
-                return false;
-            }
-
-            void abort() {
-                if(!committed_) {
-                    mdbx_txn_abort(txn_);
-                    committed_ = true;  // effectively closed
-                }
-            }
-
-            MDBX_txn* getTxn() { return txn_; }
-
-            /**
-             * Replace one document's sparse state inside the current transaction.
-             * Used by single-doc writes and batch upserts so missing terms are removed from the
-             * inverted index and empty vectors clear sparse state instead of leaving stale postings.
-             */
-            bool store_vector(ndd::idInt doc_id, const SparseVector& vec) {
-                if(read_only_) {
-                    return false;
-                }
-
-                const auto existing_vec = storage_->getVectorInternal(txn_, doc_id);
-                const bool had_sparse_terms = existing_vec.has_value() && !existing_vec->empty();
-                const bool has_sparse_terms = !vec.empty();
-
-                // Sparse upserts must behave as replacements: remove the old postings first,
-                // then write and index the new vector if it still has sparse terms.
-                if(had_sparse_terms
-                   && !storage_->sparse_index_->removeDocument(txn_, doc_id, *existing_vec)) {
-                    return false;
-                }
-
-                if(existing_vec.has_value() && !storage_->deleteVectorInternal(txn_, doc_id)) {
-                    return false;
-                }
-
-                if(has_sparse_terms) {
-                    if(!storage_->storeVectorInternal(txn_, doc_id, vec)) {
-                        return false;
-                    }
-
-                    if(!storage_->sparse_index_->addDocumentsBatch(txn_, {{doc_id, vec}})) {
-                        return false;
-                    }
-                }
-
-                vector_count_delta_ += static_cast<int64_t>(has_sparse_terms)
-                                     - static_cast<int64_t>(had_sparse_terms);
-                return true;
-            }
-
-            std::optional<SparseVector> get_vector(ndd::idInt doc_id) const {
-                return storage_->getVectorInternal(txn_, doc_id);
-            }
-
-
-            /**
-             * Remove one document's sparse state from both the inverted index and the raw sparse
-             * doc table inside the current transaction.
-             * Used for explicit deletes and when an upsert transitions a document to an empty
-             * sparse vector.
-             */
-            bool delete_vector(ndd::idInt doc_id) {
-                if(read_only_) {
-                    return false;
-                }
-
-                // Deletion runs in the opposite order: look up the stored vector, remove its
-                // terms from the inverted index, then delete the raw payload row.
-                auto vec = get_vector(doc_id);
-                if(!vec) {
-                    LOG_WARN(2242, storage_->index_id_, "delete_vector could not find doc_id=" << doc_id);
-                    return false;
-                }
-
-                const bool had_sparse_terms = !vec->empty();
-                if(had_sparse_terms
-                   && !storage_->sparse_index_->removeDocument(txn_, doc_id, *vec)) {
-                    return false;
-                }
-
-                if(!storage_->deleteVectorInternal(txn_, doc_id)) {
-                    return false;
-                }
-
-                if(had_sparse_terms) {
-                    vector_count_delta_--;
-                }
-                return true;
-            }
-
-        private:
-            SparseVectorStorage* storage_;
-            MDBX_txn* txn_;
-            bool committed_;
-            bool read_only_;
-            int64_t vector_count_delta_;
-        };
-
-        std::unique_ptr<Transaction> begin_transaction(bool read_only = false) {
-            return std::make_unique<Transaction>(this, read_only);
-        }
-
-        // Vector management
-        bool delete_vector(ndd::idInt doc_id) {
-            std::unique_lock<std::shared_mutex> lock(mutex_);
-            auto txn = begin_transaction(false);
-            if(!txn->delete_vector(doc_id)) {
-                txn->abort();
-                return false;
-            }
-            return txn->commit();
-        }
-
-        /**
-         * Apply a batch of sparse upserts as document replacements inside one MDBX transaction.
-         * The hybrid ingest path uses this so repeated IDs do not accumulate stale postings or
-         * overcount the sparse-doc total used as N for server-side IDF.
+        /*
+         * Public txn-taking delete. The returned OperationResult.value carries
+         * the term_info_ mutations that must be applied via
+         * apply_term_info_changes() only after the caller's mdbx_txn_commit
+         * succeeds. If the caller aborts, the result is dropped and term_info_
+         * stays in sync with the rolled-back MDBX state - that is the ACID
+         * atomicity invariant tests/acid_regression_test.cpp pins down.
+         *
+         * Return codes:
+         * 0 = success; value carries the deferred term_info_ changes
+         * 100 = propagated MDBX/storage failure from the inverted index or
+         *       the raw sparse doc table; caller should log ERROR and return
+         *       HTTP 500
          */
-        bool store_vectors_batch(const std::vector<std::pair<ndd::idInt, SparseVector>>& batch) {
+        ndd::OperationResult<std::vector<ndd::TermInfoChange>>
+        delete_vector(MDBX_txn* txn,
+                          ndd::idInt doc_id,
+                          int64_t* vector_count_delta = nullptr,
+                          bool missing_ok = true) {
             std::unique_lock<std::shared_mutex> lock(mutex_);
-            auto txn = begin_transaction(false);
+            std::vector<ndd::TermInfoChange> term_info_changes;
+            int64_t delta = 0;
+            if(!deleteVectorTxn(txn, doc_id, &delta, missing_ok, &term_info_changes)) {
+                return {100, "delete_vector failed for doc_id=" + std::to_string(doc_id)};
+            }
+            if(vector_count_delta) {
+                *vector_count_delta += delta;
+            }
+            return {SUCCESS, "", std::move(term_info_changes)};
+        }
+
+        /*
+         * Public txn-taking batch upsert. Same ACID contract as
+         * delete_vector - the value member of the returned OperationResult
+         * carries deferred term_info_ mutations that the caller must apply via
+         * apply_term_info_changes() ONLY after their own mdbx_txn_commit
+         * returns success. On abort the result object is dropped.
+         *
+         * Return codes:
+         * 0 = success; value carries the deferred term_info_ changes
+         * 100 = propagated MDBX/storage failure from the inverted index or
+         *       the raw sparse doc table; caller should log ERROR and return
+         *       HTTP 500
+         */
+        ndd::OperationResult<std::vector<ndd::TermInfoChange>>
+        store_vectors_batch(
+                MDBX_txn* txn,
+                const std::vector<std::pair<ndd::idInt, SparseVector>>& batch,
+                int64_t* vector_count_delta = nullptr) {
+            std::unique_lock<std::shared_mutex> lock(mutex_);
+            std::vector<ndd::TermInfoChange> term_info_changes;
+            int64_t delta = 0;
 
             for(const auto& [doc_id, sparse_vec] : batch) {
-                if(!txn->store_vector(doc_id, sparse_vec)) {
+                if(!storeVectorTxn(txn, doc_id, sparse_vec, &delta, &term_info_changes)) {
                     LOG_ERROR(2243,
                               index_id_,
                               "store_vectors_batch failed to replace doc_id=" << doc_id);
-                    txn->abort();
-                    return false;
+                    return {100,
+                            "store_vectors_batch failed to replace doc_id="
+                                    + std::to_string(doc_id)};
                 }
             }
 
-            return txn->commit();
-        }
-
-        /*NOT BEING USED FOR NOW*/
-#if 0
-        bool delete_vectors_batch(const std::vector<ndd::idInt>& doc_ids) {
-            std::unique_lock<std::shared_mutex> lock(mutex_);
-            auto txn = begin_transaction(false);
-
-            for(ndd::idInt doc_id : doc_ids) {
-                if(!txn->delete_vector(doc_id)) {
-                    // Continue or abort? Usually continue for batch delete
-                }
+            if(vector_count_delta) {
+                *vector_count_delta += delta;
             }
-            return txn->commit();
+            return {SUCCESS, "", std::move(term_info_changes)};
         }
-#endif //if 0
 
-        std::vector<std::pair<ndd::idInt, float>> search(const SparseVector& query,
-                                                        size_t k,
-                                                        const ndd::RoaringBitmap* filter = nullptr)
+        /*
+         * Forwarder for InvertedIndex::apply_term_info_changes. The caller
+         * passes the OperationResult.value returned by the txn-taking writers
+         * here only AFTER they have committed the MDBX txn that produced
+         * those rows. See the ACID note on the writers above.
+         */
+        void apply_term_info_changes(const std::vector<ndd::TermInfoChange>& changes) {
+            sparse_index_->apply_term_info_changes(changes);
+        }
+
+        std::optional<SparseVector> get_vector(MDBX_txn* txn, ndd::idInt doc_id) const {
+            std::shared_lock<std::shared_mutex> lock(mutex_);
+            return getVectorInternal(txn, doc_id);
+        }
+
+        void apply_vector_count_delta(int64_t delta) { applyVectorCountDelta(delta); }
+
+        MDBX_env* env() const { return env_; }
+
+        /**
+         * Routes the inverted-index posting reads through the caller's
+         * MDBX read transaction so a single shared search request stays
+         * on one snapshot.
+         */
+        std::vector<std::pair<ndd::idInt, float>>
+        search(MDBX_txn* txn,
+                   const SparseVector& query,
+                   size_t k,
+                   const ndd::RoaringBitmap* filter = nullptr)
         {
             return sparse_index_->search(
-                query, k, vector_count_.load(std::memory_order_relaxed), filter);
+                txn, query, k, vector_count_.load(std::memory_order_relaxed), filter);
         }
 
         // Statistics
@@ -250,7 +165,6 @@ namespace ndd {
         size_t get_term_count() const { return sparse_index_ ? sparse_index_->getTermCount() : 0; }
 
     private:
-        std::string db_path_;
         std::string index_id_;
         ndd::SparseScoringModel sparse_model_;
         MDBX_env* env_;
@@ -262,48 +176,9 @@ namespace ndd {
         std::atomic<size_t> vector_count_{0};
         std::unordered_set<ndd::idInt> deleted_docs_;
 
-        // Helper methods
-        bool initializeMDBX() {
-            int rc = mdbx_env_create(&env_);
-            if(rc != 0) {
-                LOG_ERROR(2245, index_id_, "mdbx_env_create failed: " << mdbx_strerror(rc));
-                return false;
-            }
-
-            // Set geometry - max size configurable via NDD_SPARSE_MAP_SIZE_MAX_BITS
-            rc = mdbx_env_set_geometry(env_, -1, -1, 1ULL << settings::SPARSE_MAP_SIZE_MAX_BITS, -1, -1, -1);
-            if(rc != 0) {
-                LOG_ERROR(2246, index_id_, "mdbx_env_set_geometry failed: " << mdbx_strerror(rc));
-                return false;
-            }
-
-            // Set maxdbs to allow named databases
-            rc = mdbx_env_set_maxdbs(env_, 10);
-            if(rc != 0) {
-                LOG_ERROR(2247, index_id_, "mdbx_env_set_maxdbs failed: " << mdbx_strerror(rc));
-                return false;
-            }
-
-            std::error_code ec;
-            std::filesystem::create_directories(db_path_, ec);
-            if(ec) {
-                LOG_ERROR(2248, index_id_, "create_directories failed for " << db_path_ << ": " << ec.message());
-                return false;
-            }
-
-            rc = mdbx_env_open(env_,
-                               db_path_.c_str(),
-                               MDBX_NOSTICKYTHREADS | MDBX_NORDAHEAD | MDBX_LIFORECLAIM,
-                               0664);
-            if(rc != 0) {
-                LOG_ERROR(2249,
-                          index_id_,
-                          "mdbx_env_open failed for " << db_path_ << ": " << mdbx_strerror(rc));
-                return false;
-            }
-
+        bool initializeDBIs() {
             MDBX_txn* txn;
-            rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
+            int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
             if(rc != 0) {
                 LOG_ERROR(2250, index_id_, "mdbx_txn_begin failed: " << mdbx_strerror(rc));
                 return false;
@@ -324,11 +199,94 @@ namespace ndd {
             return true;
         }
 
-        void closeMDBX() {
-            if(env_) {
-                mdbx_env_close(env_);
-                env_ = nullptr;
+        /*
+         * Internal helper. `term_info_changes` MUST be non-null. Term-info
+         * mutations from the InvertedIndex calls are appended to it; the
+         * caller is responsible for applying those changes only AFTER the
+         * MDBX txn commits successfully.
+         */
+        bool storeVectorTxn(MDBX_txn* txn,
+                            ndd::idInt doc_id,
+                            const SparseVector& vec,
+                            int64_t* vector_count_delta,
+                            std::vector<ndd::TermInfoChange>* term_info_changes) {
+            const auto existing_vec = getVectorInternal(txn, doc_id);
+            const bool had_sparse_terms = existing_vec.has_value() && !existing_vec->empty();
+            const bool has_sparse_terms = !vec.empty();
+
+            // Sparse upserts must behave as replacements: remove old postings first,
+            // then write and index the new vector only if it still has sparse terms.
+            if(had_sparse_terms) {
+                auto remove_result = sparse_index_->removeDocument(txn, doc_id, *existing_vec);
+                if(!remove_result.ok()) {
+                    return false;
+                }
+                auto& changes = remove_result.value_or_throw();
+                term_info_changes->insert(term_info_changes->end(),
+                                          std::make_move_iterator(changes.begin()),
+                                          std::make_move_iterator(changes.end()));
             }
+
+            if(existing_vec.has_value() && !deleteVectorInternal(txn, doc_id)) {
+                return false;
+            }
+
+            if(has_sparse_terms) {
+                if(!storeVectorInternal(txn, doc_id, vec)) {
+                    return false;
+                }
+
+                auto add_result = sparse_index_->addDocumentsBatch(txn, {{doc_id, vec}});
+                if(!add_result.ok()) {
+                    return false;
+                }
+                auto& changes = add_result.value_or_throw();
+                term_info_changes->insert(term_info_changes->end(),
+                                          std::make_move_iterator(changes.begin()),
+                                          std::make_move_iterator(changes.end()));
+            }
+
+            if(vector_count_delta) {
+                *vector_count_delta += static_cast<int64_t>(has_sparse_terms)
+                                     - static_cast<int64_t>(had_sparse_terms);
+            }
+            return true;
+        }
+
+        /*
+         * Internal helper. `term_info_changes` MUST be non-null. See storeVectorTxn.
+         */
+        bool deleteVectorTxn(MDBX_txn* txn,
+                             ndd::idInt doc_id,
+                             int64_t* vector_count_delta,
+                             bool missing_ok,
+                             std::vector<ndd::TermInfoChange>* term_info_changes) {
+            auto vec = getVectorInternal(txn, doc_id);
+            if(!vec) {
+                LOG_WARN(2242, index_id_, "delete_vector could not find doc_id=" << doc_id);
+                return missing_ok;
+            }
+
+            const bool had_sparse_terms = !vec->empty();
+            if(had_sparse_terms) {
+                auto remove_result = sparse_index_->removeDocument(txn, doc_id, *vec);
+                if(!remove_result.ok()) {
+                    return false;
+                }
+                auto& changes = remove_result.value_or_throw();
+                term_info_changes->insert(term_info_changes->end(),
+                                          std::make_move_iterator(changes.begin()),
+                                          std::make_move_iterator(changes.end()));
+            }
+
+            if(!deleteVectorInternal(txn, doc_id)) {
+                return false;
+            }
+
+            if(had_sparse_terms && vector_count_delta) {
+                (*vector_count_delta)--;
+            }
+            return true;
         }
 
         bool storeVectorInternal(MDBX_txn* txn, ndd::idInt doc_id, const SparseVector& vec) {

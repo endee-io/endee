@@ -2,145 +2,203 @@
 #pragma once
 
 #include <string>
-#include <fstream>
 #include <vector>
-#include <mutex>
 #include <atomic>
-#include <filesystem>
 #include <cstring>
-#include <cerrno>
+#include <array>
 #include "../core/types.hpp"
 #include "../utils/log.hpp"
+#include "mdbx/mdbx.h"
 
 enum class WALOperationType : uint8_t { VECTOR_ADD = 1, VECTOR_DELETE = 2, VECTOR_UPDATE = 3 };
 
 class WriteAheadLog {
-private:
-    std::string index_id_;
-    std::string log_path_;
-    std::ofstream log_file_;
-    std::mutex file_mutex_;
-    std::atomic<bool> enabled_{true};
-    std::atomic<size_t> entry_count_{0};
-
 public:
+    static constexpr size_t PACKED_ENTRY_SIZE = 1 + sizeof(ndd::idInt);
+
     // WAL entry structure for operations
     struct WALEntry {
         WALOperationType op_type;
         ndd::idInt numeric_id;
     };
 
-    WriteAheadLog(const std::string& index_dir, const std::string& index_id) :
-        index_id_(index_id) {
-        log_path_ = index_dir + "/wal.bin";
-        // Open in append mode
-        log_file_.open(log_path_, std::ios::binary | std::ios::app);
-        if(!log_file_) {
-            std::string err_string;
-            err_string = "Failed to open WAL file: " + log_path_
-                         + " errno: " + std::to_string(errno) + " errcode: " + std::strerror(errno);
+private:
+    std::string index_id_;
+    std::atomic<bool> enabled_{true};
 
-            LOG_ERROR(1401, index_id_, err_string);
-            throw std::runtime_error(err_string);
+    // XXX entry_count_ can drift on abort — see docs/followups.md.
+    std::atomic<size_t> entry_count_{0};
+    MDBX_env* env_ = nullptr;
+    MDBX_dbi dbi_ = 0;
+
+    static std::array<uint8_t, PACKED_ENTRY_SIZE> packEntry(const WALEntry& entry) {
+        std::array<uint8_t, PACKED_ENTRY_SIZE> bytes{};
+        bytes[0] = static_cast<uint8_t>(entry.op_type);
+        std::memcpy(bytes.data() + 1, &entry.numeric_id, sizeof(entry.numeric_id));
+        return bytes;
+    }
+
+    static bool unpackEntry(const MDBX_val& data, WALEntry& out) {
+        if(data.iov_len != PACKED_ENTRY_SIZE) {
+            return false;
         }
-        // Check if WAL has existing entries (no need to count them)
-        std::error_code ec;
-        auto file_size = std::filesystem::file_size(log_path_, ec);
-        if(!ec && file_size > 0) {
-            // Set entry_count_ to 1 to indicate there are entries needing recovery
-            // The exact count doesn't matter - we just need to know recovery is needed
-            entry_count_ = 1;
+        const auto* bytes = static_cast<const uint8_t*>(data.iov_base);
+        out.op_type = static_cast<WALOperationType>(bytes[0]);
+        std::memcpy(&out.numeric_id, bytes + 1, sizeof(out.numeric_id));
+        return true;
+    }
+
+    void init_mdbx_dbi() {
+        MDBX_txn* txn = nullptr;
+        int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
+        if(rc != MDBX_SUCCESS) {
+            throw std::runtime_error("Failed to begin op_log init transaction: "
+                                     + std::string(mdbx_strerror(rc)));
+        }
+
+        rc = mdbx_dbi_open(txn, "op_log", MDBX_CREATE | MDBX_INTEGERKEY, &dbi_);
+        if(rc != MDBX_SUCCESS) {
+            mdbx_txn_abort(txn);
+            throw std::runtime_error("Failed to open op_log DBI: "
+                                     + std::string(mdbx_strerror(rc)));
+        }
+
+        MDBX_stat stat{};
+        rc = mdbx_dbi_stat(txn, dbi_, &stat, sizeof(stat));
+        if(rc == MDBX_SUCCESS && stat.ms_entries > 0) {
+            entry_count_ = stat.ms_entries;
+        }
+
+        rc = mdbx_txn_commit(txn);
+        if(rc != MDBX_SUCCESS) {
+            throw std::runtime_error("Failed to commit op_log init transaction: "
+                                     + std::string(mdbx_strerror(rc)));
         }
     }
 
-    ~WriteAheadLog() { log_file_.close(); }
+    uint64_t next_sequence(MDBX_txn* txn) {
+        MDBX_cursor* cursor = nullptr;
+        int rc = mdbx_cursor_open(txn, dbi_, &cursor);
+        if(rc != MDBX_SUCCESS) {
+            throw std::runtime_error("Failed to open op_log cursor: "
+                                     + std::string(mdbx_strerror(rc)));
+        }
+
+        MDBX_val key{};
+        MDBX_val data{};
+        rc = mdbx_cursor_get(cursor, &key, &data, MDBX_LAST);
+        uint64_t next = 0;
+        if(rc == MDBX_SUCCESS && key.iov_len == sizeof(uint64_t)) {
+            uint64_t last = 0;
+            std::memcpy(&last, key.iov_base, sizeof(last));
+            next = last + 1;
+        } else if(rc != MDBX_NOTFOUND) {
+            mdbx_cursor_close(cursor);
+            throw std::runtime_error("Failed to seek op_log cursor: "
+                                     + std::string(mdbx_strerror(rc)));
+        }
+        mdbx_cursor_close(cursor);
+        return next;
+    }
+
+public:
+    WriteAheadLog(MDBX_env* env, const std::string& index_id) :
+        index_id_(index_id),
+        env_(env) {
+        init_mdbx_dbi();
+    }
+
+    ~WriteAheadLog() {
+        if(env_ && dbi_) {
+            mdbx_dbi_close(env_, dbi_);
+        }
+    }
 
     // Check if WAL has entries that need recovery
     bool hasEntries() const { return entry_count_ > 0; }
     // Get the number of entries added since last clear
     size_t getEntryCount() const { return entry_count_.load(); }
-    // Unified log function that handles a vector of entries
-    void log(const std::vector<WALEntry>& entries) {
+    void log(MDBX_txn* txn, const std::vector<WALEntry>& entries) {
         if(!enabled_ || entries.empty()) {
             return;
         }
 
-        std::lock_guard<std::mutex> lock(file_mutex_);
-
+        uint64_t seq = next_sequence(txn);
         for(const auto& entry : entries) {
-            // Write operation type
-            uint8_t op = static_cast<uint8_t>(entry.op_type);
-            log_file_.write(reinterpret_cast<const char*>(&op), sizeof(op));
-
-            // Write numeric ID (always included)
-            log_file_.write(reinterpret_cast<const char*>(&entry.numeric_id),
-                            sizeof(entry.numeric_id));
+            auto packed = packEntry(entry);
+            MDBX_val key{&seq, sizeof(seq)};
+            MDBX_val data{packed.data(), packed.size()};
+            int rc = mdbx_put(txn, dbi_, &key, &data, MDBX_APPEND);
+            if(rc != MDBX_SUCCESS) {
+                throw std::runtime_error("Failed to append op_log entry: "
+                                         + std::string(mdbx_strerror(rc)));
+            }
+            ++seq;
         }
-
-        log_file_.flush();
         entry_count_ += entries.size();
     }
 
-    // Convenience method for logging a single entry
-    void log(const WALEntry& entry) { log(std::vector<WALEntry>{entry}); }
-
-    // Read all entries from the WAL file
     std::vector<WALEntry> readEntries() {
         std::vector<WALEntry> entries;
 
-        std::ifstream infile(log_path_, std::ios::binary);
-        if(!infile) {
-            return entries;  // Return empty if file can't be opened
+        MDBX_txn* txn = nullptr;
+        int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_RDONLY, &txn);
+        if(rc != MDBX_SUCCESS) {
+            return entries;
         }
 
-        while(true) {
-            uint8_t op;
-            ndd::idInt numeric_id;
-
-            // Read operation type
-            infile.read(reinterpret_cast<char*>(&op), sizeof(op));
-            if(infile.eof()) {
-                break;
-            }
-
-            // Read numeric ID
-            infile.read(reinterpret_cast<char*>(&numeric_id), sizeof(numeric_id));
-            if(infile.eof()) {
-                break;
-            }
-
-            std::string string_id;
-            // Only VECTOR_ADD has string_id
-            if(static_cast<WALOperationType>(op) == WALOperationType::VECTOR_ADD) {
-                // Read string length
-                size_t str_len;
-                infile.read(reinterpret_cast<char*>(&str_len), sizeof(str_len));
-                if(infile.eof()) {
-                    break;
-                }
-
-                // Read string content
-                string_id.resize(str_len);
-                infile.read(&string_id[0], str_len);
-                if(infile.eof()) {
-                    break;
-                }
-            }
-
-            entries.push_back({static_cast<WALOperationType>(op), numeric_id});
+        MDBX_cursor* cursor = nullptr;
+        rc = mdbx_cursor_open(txn, dbi_, &cursor);
+        if(rc != MDBX_SUCCESS) {
+            mdbx_txn_abort(txn);
+            return entries;
         }
 
+        MDBX_val key{};
+        MDBX_val data{};
+        rc = mdbx_cursor_get(cursor, &key, &data, MDBX_FIRST);
+        while(rc == MDBX_SUCCESS) {
+            WALEntry entry{};
+            if(unpackEntry(data, entry)) {
+                entries.push_back(entry);
+            }
+            rc = mdbx_cursor_get(cursor, &key, &data, MDBX_NEXT);
+        }
+
+        mdbx_cursor_close(cursor);
+        mdbx_txn_abort(txn);
         return entries;
     }
-    // Clear the WAL file
-    void clear() {
-        log_file_.close();
-        std::filesystem::remove(log_path_);
-        log_file_.open(log_path_, std::ios::binary | std::ios::app);
+
+    void clear(MDBX_txn* txn) {
+        MDBX_cursor* cursor = nullptr;
+        int rc = mdbx_cursor_open(txn, dbi_, &cursor);
+        if(rc != MDBX_SUCCESS) {
+            throw std::runtime_error("Failed to open op_log clear cursor: "
+                                     + std::string(mdbx_strerror(rc)));
+        }
+
+        MDBX_val key{};
+        MDBX_val data{};
+        rc = mdbx_cursor_get(cursor, &key, &data, MDBX_FIRST);
+        while(rc == MDBX_SUCCESS) {
+            int del_rc = mdbx_cursor_del(cursor, static_cast<MDBX_put_flags_t>(0));
+            if(del_rc != MDBX_SUCCESS) {
+                mdbx_cursor_close(cursor);
+                throw std::runtime_error("Failed to delete op_log entry: "
+                                         + std::string(mdbx_strerror(del_rc)));
+            }
+            rc = mdbx_cursor_get(cursor, &key, &data, MDBX_NEXT);
+        }
+        mdbx_cursor_close(cursor);
+        if(rc != MDBX_NOTFOUND) {
+            throw std::runtime_error("Failed while clearing op_log: "
+                                     + std::string(mdbx_strerror(rc)));
+        }
         entry_count_ = 0;
     }
 
     void disable() { enabled_ = false; }
-
     void enable() { enabled_ = true; }
+    MDBX_env* env() const { return env_; }
 };

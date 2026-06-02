@@ -37,16 +37,18 @@ public:
 
 class Filter {
 private:
+    using SchemaCache = std::unordered_map<std::string, FieldType>;
+
     MDBX_env* env_;
     // Used for schema storage
     MDBX_dbi dbi_;
     std::string index_id_;
-    std::string path_;
+    std::string schema_dbi_name_;
     std::unique_ptr<ndd::filter::NumericIndex> numeric_index_;
     std::unique_ptr<ndd::filter::CategoryIndex> category_index_;
 
     static constexpr const char* SCHEMA_KEY = "__ndd_schema_v1__";
-    std::unordered_map<std::string, FieldType> schema_cache_;
+    SchemaCache schema_cache_;
     mutable std::mutex schema_mutex_;
 
     /*
@@ -65,18 +67,20 @@ private:
      * Return codes:
      * 0 = success
      * 100 = MDBX transaction, write, or commit failure; caller should log ERROR and return HTTP 500
-     */
+    */
     ndd::OperationResult<> save_schema_internal();
+    ndd::OperationResult<> save_schema_internal(MDBX_txn* txn);
+    ndd::OperationResult<> save_schema_internal(MDBX_txn* txn,
+                                                const SchemaCache& schema_cache);
+    ndd::OperationResult<> save_schema_blob_internal(const std::string& schema_json);
+    ndd::OperationResult<> save_schema_blob_internal(MDBX_txn* txn,
+                                                     const std::string& schema_json);
+    static std::string serialize_schema(const SchemaCache& schema_cache);
 
-    /*
-     * Registers a field type in the filter schema if it is not already present.
-     *
-     * Return codes:
-     * 0 = success
-     * 3 = field type mismatch with existing schema; caller should return HTTP 400
-     * 100-199 = propagated MDBX/storage failure from schema persistence
-     */
-    ndd::OperationResult<> register_field_type(const std::string& field, FieldType type);
+    static ndd::OperationResult<> stage_field_type(SchemaCache& schema_cache,
+                                                   const std::string& field,
+                                                   FieldType type,
+                                                   bool* changed = nullptr);
 
     /*
      * Converts a JSON number into the current sortable numeric filter encoding.
@@ -122,17 +126,21 @@ private:
     static ndd::OperationResult<std::pair<uint32_t, uint32_t>>
     numeric_bound_from_comparison(const std::string& op, const nlohmann::json& val);
 
-    void init_environment();
+    void init_dbis();
 
 public:
-    Filter(const std::string& path, const std::string& index_id);
-
-    Filter(const std::string& path);
+    Filter(MDBX_env* env,
+           const std::string& index_id,
+           const std::string& schema_dbi_name = "filter_schema");
 
     ~Filter();
 
-    /*
-     * Computes the bitmap for an AND filter query.
+    ndd::OperationResult<> reload_schema_cache() { return load_schema(); }
+
+    /**
+     * Computes the bitmap for an AND filter query, reading category and
+     * numeric DBIs through the caller's MDBX read transaction so every
+     * lookup in one search shares a single snapshot.
      *
      * Return codes:
      * 0 = success
@@ -142,7 +150,7 @@ public:
      * 200-299 = propagated corruption/invariant failure from category or numeric index
      */
     ndd::OperationResult<ndd::RoaringBitmap>
-    computeFilterBitmap(const nlohmann::json& filter_array) const;
+    computeFilterBitmap(MDBX_txn* txn, const nlohmann::json& filter_array) const;
 
     /**
      * Returns numeric ids matching a filter query based on the provided JSON filter array
@@ -157,39 +165,6 @@ public:
     getIdsMatchingFilter(const nlohmann::json& filter_array) const;
 
     /*
-     * Counts numeric ids matching a filter query.
-     *
-     * Return codes:
-     * 0 = success
-     * 1-99 = propagated filter validation failure from bitmap computation
-     * 100-199 = propagated MDBX/storage failure from bitmap computation
-     * 200-299 = propagated corruption/invariant failure from bitmap computation
-     */
-    ndd::OperationResult<size_t> countIdsMatchingFilter(const nlohmann::json& filter_array) const;
-
-    /*
-     * Adds one id to a category filter.
-     *
-     * Return codes:
-     * 0 = success
-     * 100-199 = propagated MDBX/storage failure from category index
-     * 200-299 = propagated corruption/invariant failure from category index
-     */
-    ndd::OperationResult<>
-    add_to_filter(const std::string& field, const std::string& value, ndd::idInt numeric_id);
-
-    /*
-     * Adds a batch of ids to one already formatted category filter key.
-     *
-     * Return codes:
-     * 0 = success
-     * 100-199 = propagated MDBX/storage failure from category index
-     * 200-299 = propagated corruption/invariant failure from category index
-     */
-    ndd::OperationResult<> add_to_filter_batch(const std::string& filter_key,
-                                               const std::vector<ndd::idInt>& numeric_ids);
-
-    /*
      * Adds one batch of filter JSON documents into the numeric and category indexes.
      *
      * Return codes:
@@ -199,33 +174,11 @@ public:
      * 3 = field type mismatch with existing schema; caller should return HTTP 400
      * 100-199 = propagated MDBX/storage failure from schema, numeric, or category writes
      * 200-299 = propagated corruption/invariant failure from numeric or category writes
-     */
+    */
     ndd::OperationResult<> add_filters_from_json_batch(
-            const std::vector<std::pair<ndd::idInt, std::string>>& id_filter_pairs);
-
-    /*
-     * Removes one id from a category filter.
-     *
-     * Return codes:
-     * 0 = success
-     * 100-199 = propagated MDBX/storage failure from category index
-     * 200-299 = propagated corruption/invariant failure from category index
-     */
-    ndd::OperationResult<>
-    remove_from_filter(const std::string& field,
-                       const std::string& value,
-                       ndd::idInt numeric_id);
-
-    /*
-     * Checks whether one id is present in a category filter.
-     *
-     * Return codes:
-     * 0 = success
-     * 100-199 = propagated MDBX/storage failure from category index
-     * 200-299 = propagated corruption/invariant failure from category index
-     */
-    ndd::OperationResult<bool>
-    contains(const std::string& field, const std::string& value, ndd::idInt numeric_id) const;
+            MDBX_txn* txn,
+            const std::vector<std::pair<ndd::idInt, std::string>>& id_filter_pairs,
+            bool* schema_changed = nullptr);
 
     /*
      * Adds one filter JSON document into the numeric and category indexes.
@@ -235,9 +188,11 @@ public:
      * 1-99 = propagated filter validation failure from batch add
      * 100-199 = propagated MDBX/storage failure from batch add
      * 200-299 = propagated corruption/invariant failure from batch add
-     */
-    ndd::OperationResult<> add_filters_from_json(ndd::idInt numeric_id,
-                                                 const std::string& filter_json);
+    */
+    ndd::OperationResult<> add_filters_from_json(MDBX_txn* txn,
+                                                     ndd::idInt numeric_id,
+                                                     const std::string& filter_json,
+                                                     bool* schema_changed = nullptr);
 
     /*
      * Removes one filter JSON document from the numeric and category indexes.
@@ -248,31 +203,10 @@ public:
      * 2 = unsupported filter field type; caller should return HTTP 400
      * 100-199 = propagated MDBX/storage failure from numeric or category index
      * 200-299 = propagated corruption/invariant failure from numeric or category index
-     */
-    ndd::OperationResult<> remove_filters_from_json(ndd::idInt numeric_id,
-                                                    const std::string& filter_json);
-
-    /*
-     * Combines category filters with AND semantics.
-     *
-     * Return codes:
-     * 0 = success
-     * 100-199 = propagated MDBX/storage failure from category index
-     * 200-299 = propagated corruption/invariant failure from category index
-     */
-    ndd::OperationResult<ndd::RoaringBitmap> combine_filters_and(
-            const std::vector<std::pair<std::string, std::string>>& filters) const;
-
-    /*
-     * Combines category filters with OR semantics.
-     *
-     * Return codes:
-     * 0 = success
-     * 100-199 = propagated MDBX/storage failure from category index
-     * 200-299 = propagated corruption/invariant failure from category index
-     */
-    ndd::OperationResult<ndd::RoaringBitmap> combine_filters_or(
-            const std::vector<std::pair<std::string, std::string>>& filters) const;
+    */
+    ndd::OperationResult<> remove_filters_from_json(MDBX_txn* txn,
+                                                        ndd::idInt numeric_id,
+                                                        const std::string& filter_json);
 
     /*
      * Checks whether one id satisfies one numeric filter expression.

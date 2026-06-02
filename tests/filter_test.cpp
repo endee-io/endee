@@ -9,12 +9,94 @@
 #include "filter/category_index.hpp"
 #include "json/nlohmann_json.hpp"
 #include "filter/numeric_index.hpp" // For Bucket test
+#include "storage/shared_mdbx.hpp"
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 
 static void expect_ok(const ndd::OperationResult<>& result) {
     EXPECT_TRUE(result.ok()) << result.message;
+}
+
+/** Test helper: wrap one txn-taking filter mutation in its own
+ * READWRITE transaction. Production code never opens a txn just for a
+ * filter write; tests use these helpers to keep the no-txn API surface
+ * out of the production class. */
+static void filter_add_json(MDBX_env* env, Filter* filter,
+                            ndd::idInt id, const std::string& json_str) {
+    MDBX_txn* txn = nullptr;
+    int rc = mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn);
+    ASSERT_EQ(rc, MDBX_SUCCESS) << mdbx_strerror(rc);
+    bool changed = false;
+    auto result = filter->add_filters_from_json(txn, id, json_str, &changed);
+    if(!result.ok()) {
+        mdbx_txn_abort(txn);
+        FAIL() << result.message;
+        return;
+    }
+    rc = mdbx_txn_commit(txn);
+    ASSERT_EQ(rc, MDBX_SUCCESS) << mdbx_strerror(rc);
+    if(changed) {
+        auto reload = filter->reload_schema_cache();
+        ASSERT_TRUE(reload.ok()) << reload.message;
+    }
+}
+
+static ndd::OperationResult<> filter_add_json_result(MDBX_env* env, Filter* filter,
+                                                     ndd::idInt id,
+                                                     const std::string& json_str) {
+    MDBX_txn* txn = nullptr;
+    int rc = mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn);
+    if(rc != MDBX_SUCCESS) {
+        return {100, mdbx_strerror(rc)};
+    }
+    bool changed = false;
+    auto result = filter->add_filters_from_json(txn, id, json_str, &changed);
+    if(!result.ok()) {
+        mdbx_txn_abort(txn);
+        return result;
+    }
+    rc = mdbx_txn_commit(txn);
+    if(rc != MDBX_SUCCESS) {
+        return {100, mdbx_strerror(rc)};
+    }
+    if(changed) {
+        auto reload = filter->reload_schema_cache();
+        if(!reload.ok()) {
+            return reload;
+        }
+    }
+    return {SUCCESS, ""};
+}
+
+static void filter_remove_json(MDBX_env* env, Filter* filter,
+                               ndd::idInt id, const std::string& json_str) {
+    MDBX_txn* txn = nullptr;
+    int rc = mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn);
+    ASSERT_EQ(rc, MDBX_SUCCESS) << mdbx_strerror(rc);
+    auto result = filter->remove_filters_from_json(txn, id, json_str);
+    if(!result.ok()) {
+        mdbx_txn_abort(txn);
+        FAIL() << result.message;
+        return;
+    }
+    rc = mdbx_txn_commit(txn);
+    ASSERT_EQ(rc, MDBX_SUCCESS) << mdbx_strerror(rc);
+}
+
+/** Test helper: open a one-shot RDONLY txn on the filter's env and run
+ * computeFilterBitmap through it. Used by bench tests that previously
+ * called the deleted no-txn computeFilterBitmap. */
+static ndd::OperationResult<ndd::RoaringBitmap>
+compute_bitmap_oneshot(MDBX_env* env, Filter& filter, const nlohmann::json& q) {
+    MDBX_txn* txn = nullptr;
+    int rc = mdbx_txn_begin(env, nullptr, MDBX_TXN_RDONLY, &txn);
+    if(rc != MDBX_SUCCESS) {
+        return {100, mdbx_strerror(rc)};
+    }
+    auto r = filter.computeFilterBitmap(txn, q);
+    mdbx_txn_abort(txn);
+    return r;
 }
 
 template <typename T>
@@ -42,22 +124,24 @@ TEST(BucketTest, Serialization) {
 class FilterTest : public ::testing::Test {
 protected:
     std::string db_path;
+    std::unique_ptr<ndd::storage::SharedIndexEnv> env;
     std::unique_ptr<Filter> filter;
 
     void SetUp() override {
-        // Create a unique temporary directory for each test
         db_path = "./test_db_" + std::to_string(rand());
         if (fs::exists(db_path)) {
             fs::remove_all(db_path);
         }
-        
-        // Initialize Filter
-        filter = std::make_unique<Filter>(db_path);
+
+        env = std::make_unique<ndd::storage::SharedIndexEnv>(db_path);
+        ndd::storage::SharedIndexEnv::write_layout_version(
+                env->get(), settings::INDEX_LAYOUT_VERSION);
+        filter = std::make_unique<Filter>(env->get(), "test/index", "filter_schema");
     }
 
     void TearDown() override {
-        // Clean up
-        filter.reset(); // Close DB environment first
+        filter.reset();
+        env.reset();
         if (fs::exists(db_path)) {
             fs::remove_all(db_path);
         }
@@ -70,9 +154,9 @@ TEST_F(FilterTest, CategoryFilterBasics) {
     // ID 2: City=London
     // ID 3: City=Paris
     
-    expect_ok(filter->add_to_filter("city", "Paris", 1));
-    expect_ok(filter->add_to_filter("city", "London", 2));
-    expect_ok(filter->add_to_filter("city", "Paris", 3));
+    filter_add_json(env->get(), filter.get(), 1, R"({"city": "Paris"})");
+    filter_add_json(env->get(), filter.get(), 2, R"({"city": "London"})");
+    filter_add_json(env->get(), filter.get(), 3, R"({"city": "Paris"})");
 
     // Query for City=Paris
     json query = json::array({
@@ -91,54 +175,56 @@ TEST_F(FilterTest, CategoryFilterBasics) {
 class CategoryIndexCorruptionTest : public ::testing::Test {
 protected:
     std::string db_path;
-    MDBX_env* env = nullptr;
+    std::unique_ptr<ndd::storage::SharedIndexEnv> shared_env;
     std::unique_ptr<ndd::filter::CategoryIndex> category_index;
+
+    MDBX_env* env() const { return shared_env->get(); }
 
     void SetUp() override {
         db_path = "./category_corrupt_db_" + std::to_string(rand());
         if(fs::exists(db_path)) {
             fs::remove_all(db_path);
         }
-        fs::create_directories(db_path);
 
-        int rc = mdbx_env_create(&env);
-        ASSERT_EQ(rc, MDBX_SUCCESS) << mdbx_strerror(rc);
-
-        rc = mdbx_env_set_maxdbs(env, 10);
-        ASSERT_EQ(rc, MDBX_SUCCESS) << mdbx_strerror(rc);
-
-        rc = mdbx_env_set_geometry(env,
-                                   -1,
-                                   1ULL << settings::FILTER_MAP_SIZE_BITS,
-                                   1ULL << settings::FILTER_MAP_SIZE_MAX_BITS,
-                                   1ULL << settings::FILTER_MAP_SIZE_BITS,
-                                   -1,
-                                   -1);
-        ASSERT_EQ(rc, MDBX_SUCCESS) << mdbx_strerror(rc);
-
-        rc = mdbx_env_open(env,
-                           db_path.c_str(),
-                           MDBX_WRITEMAP | MDBX_MAPASYNC | MDBX_NORDAHEAD,
-                           0664);
-        ASSERT_EQ(rc, MDBX_SUCCESS) << mdbx_strerror(rc);
-
-        category_index = std::make_unique<ndd::filter::CategoryIndex>(env);
+        shared_env = std::make_unique<ndd::storage::SharedIndexEnv>(db_path);
+        category_index = std::make_unique<ndd::filter::CategoryIndex>(env());
     }
 
     void TearDown() override {
         category_index.reset();
-        if(env != nullptr) {
-            mdbx_env_close(env);
-            env = nullptr;
-        }
+        shared_env.reset();
         if(fs::exists(db_path)) {
             fs::remove_all(db_path);
         }
     }
 
+    ndd::OperationResult<ndd::RoaringBitmap>
+    read_bitmap(const std::string& field, const std::string& value) {
+        MDBX_txn* txn = nullptr;
+        int rc = mdbx_txn_begin(env(), nullptr, MDBX_TXN_RDONLY, &txn);
+        if(rc != MDBX_SUCCESS) {
+            return {100, mdbx_strerror(rc)};
+        }
+        auto result = category_index->get_bitmap(txn, field, value);
+        mdbx_txn_abort(txn);
+        return result;
+    }
+
+    ndd::OperationResult<ndd::RoaringBitmap>
+    read_bitmap_by_key(const std::string& key) {
+        MDBX_txn* txn = nullptr;
+        int rc = mdbx_txn_begin(env(), nullptr, MDBX_TXN_RDONLY, &txn);
+        if(rc != MDBX_SUCCESS) {
+            return {100, mdbx_strerror(rc)};
+        }
+        auto result = category_index->get_bitmap_by_key(txn, key);
+        mdbx_txn_abort(txn);
+        return result;
+    }
+
     void put_raw_payload(const std::string& key_string, std::vector<char>& payload) {
         MDBX_txn* txn = nullptr;
-        int rc = mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &txn);
+        int rc = mdbx_txn_begin(env(), nullptr, MDBX_TXN_READWRITE, &txn);
         ASSERT_EQ(rc, MDBX_SUCCESS) << mdbx_strerror(rc);
 
         MDBX_val key{const_cast<char*>(key_string.data()), key_string.size()};
@@ -164,9 +250,9 @@ TEST_F(CategoryIndexCorruptionTest, RejectsTruncatedBitmapPayload) {
     ASSERT_GT(payload.size(), 1u);
     payload.pop_back();
 
-    put_raw_payload(ndd::filter::CategoryIndex::make_key("city", "Paris"), payload);
+    put_raw_payload(ndd::filter::CategoryIndex::format_filter_key("city", "Paris"), payload);
 
-    auto result = category_index->get_bitmap("city", "Paris");
+    auto result = read_bitmap("city", "Paris");
     EXPECT_FALSE(result.ok());
     EXPECT_EQ(result.code, 200u);
 }
@@ -180,9 +266,9 @@ TEST_F(CategoryIndexCorruptionTest, ReadsValidRawBitmapPayload) {
     std::vector<char> payload(bitmap.getSizeInBytes());
     bitmap.write(payload.data(), true);
 
-    put_raw_payload(ndd::filter::CategoryIndex::make_key("city", "Berlin"), payload);
+    put_raw_payload(ndd::filter::CategoryIndex::format_filter_key("city", "Berlin"), payload);
 
-    auto result = category_index->get_bitmap("city", "Berlin");
+    auto result = read_bitmap("city", "Berlin");
     ASSERT_TRUE(result.ok()) << result.message;
     ASSERT_TRUE(result.value.has_value());
     EXPECT_TRUE(result.value->contains(11));
@@ -193,9 +279,9 @@ TEST_F(CategoryIndexCorruptionTest, ReadsValidRawBitmapPayload) {
 TEST_F(CategoryIndexCorruptionTest, RejectsGarbageBitmapPayload) {
     std::vector<char> payload{0, 0, 0, 0, 1, 2, 3, 4};
 
-    put_raw_payload(ndd::filter::CategoryIndex::make_key("city", "Rome"), payload);
+    put_raw_payload(ndd::filter::CategoryIndex::format_filter_key("city", "Rome"), payload);
 
-    auto result = category_index->get_bitmap("city", "Rome");
+    auto result = read_bitmap("city", "Rome");
     EXPECT_FALSE(result.ok());
     EXPECT_EQ(result.code, 200u);
     EXPECT_NE(result.message.find("invalid or truncated bitmap payload"),
@@ -210,11 +296,150 @@ TEST_F(CategoryIndexCorruptionTest, RejectsTrailingBytesAfterBitmapPayload) {
     bitmap.write(payload.data(), true);
     payload.push_back('\0');
 
-    put_raw_payload(ndd::filter::CategoryIndex::make_key("city", "London"), payload);
+    put_raw_payload(ndd::filter::CategoryIndex::format_filter_key("city", "London"), payload);
 
-    auto result = category_index->get_bitmap("city", "London");
+    auto result = read_bitmap("city", "London");
     EXPECT_FALSE(result.ok());
     EXPECT_EQ(result.code, 200u);
+}
+
+class NumericIndexRangeTxnTest : public ::testing::Test {
+protected:
+    std::string db_path;
+    std::unique_ptr<ndd::storage::SharedIndexEnv> shared_env;
+    std::unique_ptr<ndd::filter::NumericIndex> numeric_index;
+
+    MDBX_env* env() const { return shared_env->get(); }
+
+    void SetUp() override {
+        db_path = "./numeric_range_txn_db_" + std::to_string(rand());
+        if(fs::exists(db_path)) {
+            fs::remove_all(db_path);
+        }
+
+        shared_env = std::make_unique<ndd::storage::SharedIndexEnv>(db_path);
+        numeric_index = std::make_unique<ndd::filter::NumericIndex>(env());
+    }
+
+    void TearDown() override {
+        numeric_index.reset();
+        shared_env.reset();
+        if(fs::exists(db_path)) {
+            fs::remove_all(db_path);
+        }
+    }
+};
+
+TEST_F(NumericIndexRangeTxnTest, RangeTxnMatchesRange) {
+    std::vector<ndd::filter::NumericBatchEntry> entries;
+    for(uint32_t i = 0; i < 200; ++i) {
+        entries.emplace_back("score",
+                             static_cast<ndd::idInt>(i + 1),
+                             ndd::filter::int_to_sortable(static_cast<int32_t>(i)));
+    }
+    expect_ok(numeric_index->put_batch(entries));
+
+    struct RangeQuery {
+        int32_t lo;
+        int32_t hi;
+    };
+    const RangeQuery queries[] = {
+            {0, 199},     // full range
+            {50, 99},     // mid range
+            {-10, 5},     // empty lower (no negative values stored)
+            {180, 250},   // partial upper
+            {100, 100},   // single point
+    };
+
+    for(const auto& q : queries) {
+        MDBX_txn* txn = nullptr;
+        int rc = mdbx_txn_begin(env(), nullptr, MDBX_TXN_RDONLY, &txn);
+        ASSERT_EQ(rc, MDBX_SUCCESS) << mdbx_strerror(rc);
+        auto via_txn = numeric_index->range(txn,
+                                                "score",
+                                                ndd::filter::int_to_sortable(q.lo),
+                                                ndd::filter::int_to_sortable(q.hi));
+        mdbx_txn_abort(txn);
+
+        ASSERT_TRUE(via_txn.ok()) << via_txn.message;
+        via_txn.value->runOptimize();
+
+        size_t expected = 0;
+        for(int32_t v = q.lo; v <= q.hi; ++v) {
+            if(v >= 0 && v < 200) ++expected;
+        }
+        EXPECT_EQ(via_txn.value->cardinality(), expected)
+                << "range [" << q.lo << "," << q.hi << "] cardinality unexpected";
+    }
+}
+
+TEST_F(NumericIndexRangeTxnTest, RangeTxnSharesSnapshotAcrossLookups) {
+    std::vector<ndd::filter::NumericBatchEntry> entries;
+    for(uint32_t i = 0; i < 50; ++i) {
+        entries.emplace_back("price",
+                             static_cast<ndd::idInt>(i + 1),
+                             ndd::filter::int_to_sortable(static_cast<int32_t>(i)));
+    }
+    expect_ok(numeric_index->put_batch(entries));
+
+    MDBX_txn* txn = nullptr;
+    int rc = mdbx_txn_begin(env(), nullptr, MDBX_TXN_RDONLY, &txn);
+    ASSERT_EQ(rc, MDBX_SUCCESS) << mdbx_strerror(rc);
+
+    auto r1 = numeric_index->range(txn,
+                                       "price",
+                                       ndd::filter::int_to_sortable(0),
+                                       ndd::filter::int_to_sortable(24));
+    auto r2 = numeric_index->range(txn,
+                                       "price",
+                                       ndd::filter::int_to_sortable(25),
+                                       ndd::filter::int_to_sortable(49));
+    auto r3 = numeric_index->range(txn,
+                                       "price",
+                                       ndd::filter::int_to_sortable(0),
+                                       ndd::filter::int_to_sortable(49));
+
+    mdbx_txn_abort(txn);
+
+    ASSERT_TRUE(r1.ok());
+    ASSERT_TRUE(r2.ok());
+    ASSERT_TRUE(r3.ok());
+    EXPECT_EQ(r1.value->cardinality(), 25u);
+    EXPECT_EQ(r2.value->cardinality(), 25u);
+    EXPECT_EQ(r3.value->cardinality(), 50u);
+}
+
+TEST_F(CategoryIndexCorruptionTest, TxnVariantsReadStoredAndMissingKeys) {
+    ndd::RoaringBitmap bitmap;
+    bitmap.add(7);
+    bitmap.add(42);
+    bitmap.add(100);
+
+    std::vector<char> payload(bitmap.getSizeInBytes());
+    bitmap.write(payload.data(), true);
+    put_raw_payload(ndd::filter::CategoryIndex::format_filter_key("city", "Tokyo"), payload);
+
+    MDBX_txn* txn = nullptr;
+    int rc = mdbx_txn_begin(env(), nullptr, MDBX_TXN_RDONLY, &txn);
+    ASSERT_EQ(rc, MDBX_SUCCESS) << mdbx_strerror(rc);
+
+    auto via_txn = category_index->get_bitmap(txn, "city", "Tokyo");
+    auto via_txn_key = category_index->get_bitmap_by_key(
+            txn, ndd::filter::CategoryIndex::format_filter_key("city", "Tokyo"));
+    auto missing_via_txn = category_index->get_bitmap(txn, "city", "Atlantis");
+    mdbx_txn_abort(txn);
+
+    ASSERT_TRUE(via_txn.ok()) << via_txn.message;
+    ASSERT_TRUE(via_txn_key.ok()) << via_txn_key.message;
+    ASSERT_TRUE(missing_via_txn.ok());
+
+    EXPECT_EQ(via_txn.value->cardinality(), 3u);
+    EXPECT_TRUE(via_txn.value->contains(7));
+    EXPECT_TRUE(via_txn.value->contains(42));
+    EXPECT_TRUE(via_txn.value->contains(100));
+    EXPECT_FALSE(via_txn.value->contains(8));
+    EXPECT_EQ(via_txn_key.value->cardinality(), 3u);
+    EXPECT_EQ(missing_via_txn.value->cardinality(), 0u);
 }
 
 TEST_F(FilterTest, BooleanFilterBasics) {
@@ -223,8 +448,8 @@ TEST_F(FilterTest, BooleanFilterBasics) {
     // ID 11: Active=false
     
     // Using JSON add interface for variety
-    expect_ok(filter->add_filters_from_json(10, R"({"is_active": true})"));
-    expect_ok(filter->add_filters_from_json(11, R"({"is_active": false})"));
+    filter_add_json(env->get(), filter.get(), 10, R"({"is_active": true})");
+    filter_add_json(env->get(), filter.get(), 11, R"({"is_active": false})");
 
     // Query Active=true
     json query_true = json::array({
@@ -250,9 +475,9 @@ TEST_F(FilterTest, NumericFilterBasics) {
     // ID 101: Age=30
     // ID 102: Age=35
     
-    expect_ok(filter->add_filters_from_json(100, R"({"age": 25})"));
-    expect_ok(filter->add_filters_from_json(101, R"({"age": 30})"));
-    expect_ok(filter->add_filters_from_json(102, R"({"age": 35})"));
+    filter_add_json(env->get(), filter.get(), 100, R"({"age": 25})");
+    filter_add_json(env->get(), filter.get(), 101, R"({"age": 30})");
+    filter_add_json(env->get(), filter.get(), 102, R"({"age": 35})");
 
     // Range Query: 20 <= Age <= 32
     json query_range = json::array({
@@ -272,12 +497,88 @@ TEST_F(FilterTest, NumericFilterBasics) {
     EXPECT_TRUE(found101);
 }
 
+TEST(FilterTransactionalSchemaTest, AbortedTxnDoesNotPublishSchemaCache) {
+    std::string db_path = "./test_shared_filter_" + std::to_string(rand());
+    fs::remove_all(db_path);
+
+    {
+        ndd::storage::SharedIndexEnv env(db_path);
+        ndd::storage::SharedIndexEnv::write_layout_version(
+                env.get(), settings::INDEX_LAYOUT_VERSION);
+        Filter filter(env.get(), "test/index", "filter_schema");
+
+        MDBX_txn* txn = nullptr;
+        int rc = mdbx_txn_begin(env.get(), nullptr, MDBX_TXN_READWRITE, &txn);
+        ASSERT_EQ(rc, MDBX_SUCCESS) << mdbx_strerror(rc);
+
+        bool schema_changed = false;
+        auto add_result = filter.add_filters_from_json_batch(
+                txn, {{1, R"({"aborted_score": 10})"}}, &schema_changed);
+        EXPECT_TRUE(add_result.ok()) << add_result.message;
+        EXPECT_TRUE(schema_changed);
+        mdbx_txn_abort(txn);
+
+        json query = json::parse(R"([{"aborted_score": {"$gt": 1}}])");
+        auto query_result = filter.getIdsMatchingFilter(query);
+        EXPECT_EQ(query_result.code, 2u);
+    }
+
+    fs::remove_all(db_path);
+}
+
+TEST(FilterComputeBitmapTxn, MatchesNonTxnAcrossOperators) {
+    std::string db_path = "./test_filter_compute_txn_" + std::to_string(rand());
+    fs::remove_all(db_path);
+
+    {
+        ndd::storage::SharedIndexEnv env(db_path);
+        ndd::storage::SharedIndexEnv::write_layout_version(
+                env.get(), settings::INDEX_LAYOUT_VERSION);
+        Filter filter(env.get(), "test/index", "filter_schema");
+
+        filter_add_json(env.get(), &filter, 1, R"({"city": "Paris", "age": 25, "score": 0.5})");
+        filter_add_json(env.get(), &filter, 2, R"({"city": "London", "age": 30, "score": 0.7})");
+        filter_add_json(env.get(), &filter, 3, R"({"city": "Paris", "age": 35, "score": 0.9})");
+        filter_add_json(env.get(), &filter, 4, R"({"city": "Berlin", "age": 30, "score": 0.6})");
+
+        const json queries[] = {
+                json::parse(R"([{"city": {"$eq": "Paris"}}])"),
+                json::parse(R"([{"city": {"$in": ["Paris", "Berlin"]}}])"),
+                json::parse(R"([{"age": {"$range": [25, 31]}}])"),
+                json::parse(R"([{"age": {"$gte": 30}}])"),
+                json::parse(R"([{"score": {"$lt": 0.7}}, {"city": {"$eq": "Paris"}}])"),
+        };
+
+        for(const auto& q : queries) {
+            MDBX_txn* txn = nullptr;
+            int rc = mdbx_txn_begin(env.get(), nullptr, MDBX_TXN_RDONLY, &txn);
+            ASSERT_EQ(rc, MDBX_SUCCESS) << mdbx_strerror(rc);
+            auto via_txn = filter.computeFilterBitmap(txn, q);
+            mdbx_txn_abort(txn);
+
+            ASSERT_TRUE(via_txn.ok()) << "_txn failed for " << q.dump() << ": "
+                                      << via_txn.message;
+        }
+
+        // Invalid filter shape: txn variant rejects with code 1.
+        json bad = json::parse(R"({"city": "Paris"})");
+        MDBX_txn* txn = nullptr;
+        int rc = mdbx_txn_begin(env.get(), nullptr, MDBX_TXN_RDONLY, &txn);
+        ASSERT_EQ(rc, MDBX_SUCCESS) << mdbx_strerror(rc);
+        auto txn_bad = filter.computeFilterBitmap(txn, bad);
+        mdbx_txn_abort(txn);
+        EXPECT_EQ(txn_bad.code, 1u);
+    }
+
+    fs::remove_all(db_path);
+}
+
 TEST_F(FilterTest, FloatNumericFilter) {
     // ID 1: Price=10.5
     // ID 2: Price=20.0
     
-    expect_ok(filter->add_filters_from_json(1, R"({"price": 10.5})"));
-    expect_ok(filter->add_filters_from_json(2, R"({"price": 20.0})"));
+    filter_add_json(env->get(), filter.get(), 1, R"({"price": 10.5})");
+    filter_add_json(env->get(), filter.get(), 2, R"({"price": 20.0})");
 
     json query = json::array({
         {{"price", {{"$range", {10.0, 15.0}}}}}
@@ -293,9 +594,9 @@ TEST_F(FilterTest, MixedAndLogic) {
     // ID 2: City=NY, Age=40 (Age fail)
     // ID 3: City=LA, Age=30 (City fail)
     
-    expect_ok(filter->add_filters_from_json(1, R"({"city": "NY", "age": 30})"));
-    expect_ok(filter->add_filters_from_json(2, R"({"city": "NY", "age": 40})"));
-    expect_ok(filter->add_filters_from_json(3, R"({"city": "LA", "age": 30})"));
+    filter_add_json(env->get(), filter.get(), 1, R"({"city": "NY", "age": 30})");
+    filter_add_json(env->get(), filter.get(), 2, R"({"city": "NY", "age": 40})");
+    filter_add_json(env->get(), filter.get(), 3, R"({"city": "LA", "age": 30})");
 
     // Filter: City=NY AND Age < 35
     json query = json::array({
@@ -313,9 +614,9 @@ TEST_F(FilterTest, InOperator) {
     // ID 2: Color=Blue
     // ID 3: Color=Green
     
-    expect_ok(filter->add_to_filter("color", "Red", 1));
-    expect_ok(filter->add_to_filter("color", "Blue", 2));
-    expect_ok(filter->add_to_filter("color", "Green", 3));
+    filter_add_json(env->get(), filter.get(), 1, R"({"color": "Red"})");
+    filter_add_json(env->get(), filter.get(), 2, R"({"color": "Blue"})");
+    filter_add_json(env->get(), filter.get(), 3, R"({"color": "Green"})");
 
     // Query: Color IN [Red, Green]
     json query = json::array({
@@ -328,58 +629,56 @@ TEST_F(FilterTest, InOperator) {
 
 TEST_F(FilterTest, DeleteFilter) {
     // ID 1: Tag=A
-    expect_ok(filter->add_to_filter("tag", "A", 1));
-    
+    filter_add_json(env->get(), filter.get(), 1, R"({"tag": "A"})");
+
     json query = json::array({
         {{"tag", {{"$eq", "A"}}}}
     });
-    
-    EXPECT_EQ(unwrap_ok(filter->countIdsMatchingFilter(query)), 1);
-    
-    // Remove functionality test
-    // Usually removal requires us to know what to remove or we remove entire ID?
-    // The Filter class has: remove_from_filter(field, value, id)
-    
-    expect_ok(filter->remove_from_filter("tag", "A", 1));
-    
-    EXPECT_EQ(unwrap_ok(filter->countIdsMatchingFilter(query)), 0);
+
+    EXPECT_EQ(unwrap_ok(filter->getIdsMatchingFilter(query)).size(), 1u);
+
+    filter_remove_json(env->get(), filter.get(), 1, R"({"tag": "A"})");
+
+    EXPECT_EQ(unwrap_ok(filter->getIdsMatchingFilter(query)).size(), 0u);
 }
 
 TEST_F(FilterTest, NumericDelete) {
     // ID 1: Score=100
-    expect_ok(filter->add_filters_from_json(1, R"({"score": 100})"));
-    
+    filter_add_json(env->get(), filter.get(), 1, R"({"score": 100})");
+
     // Check it exists
     json query = json::array({
         {{"score", {{"$eq", 100}}}}
     });
-    EXPECT_EQ(unwrap_ok(filter->countIdsMatchingFilter(query)), 1);
-    
+    EXPECT_EQ(unwrap_ok(filter->getIdsMatchingFilter(query)).size(), 1u);
+
     // Remove
-    // remove_filters_from_json uses the whole object
-    expect_ok(filter->remove_filters_from_json(1, R"({"score": 100})"));
-    
-    EXPECT_EQ(unwrap_ok(filter->countIdsMatchingFilter(query)), 0);
+    filter_remove_json(env->get(), filter.get(), 1, R"({"score": 100})");
+
+    EXPECT_EQ(unwrap_ok(filter->getIdsMatchingFilter(query)).size(), 0u);
 }
 
 TEST_F(FilterTest, RejectsMalformedFilterJson) {
-    auto result = filter->add_filters_from_json(1, R"({"city": "Paris")");
+    auto result = filter_add_json_result(env->get(), filter.get(),
+                                         1, R"({"city": "Paris")");
 
     EXPECT_FALSE(result.ok());
     EXPECT_EQ(result.code, 1);
 }
 
 TEST_F(FilterTest, RejectsUnsupportedFilterType) {
-    auto result = filter->add_filters_from_json(1, R"({"tags": ["a", "b"]})");
+    auto result = filter_add_json_result(env->get(), filter.get(),
+                                         1, R"({"tags": ["a", "b"]})");
 
     EXPECT_FALSE(result.ok());
     EXPECT_EQ(result.code, 2);
 }
 
 TEST_F(FilterTest, RejectsSchemaTypeMismatch) {
-    expect_ok(filter->add_filters_from_json(1, R"({"age": 30})"));
+    filter_add_json(env->get(), filter.get(), 1, R"({"age": 30})");
 
-    auto result = filter->add_filters_from_json(2, R"({"age": "thirty"})");
+    auto result = filter_add_json_result(env->get(), filter.get(),
+                                         2, R"({"age": "thirty"})");
 
     EXPECT_FALSE(result.ok());
     EXPECT_EQ(result.code, 3);
@@ -397,7 +696,7 @@ TEST_F(FilterTest, RejectsInvalidOperator) {
 }
 
 TEST_F(FilterTest, RejectsInvalidRange) {
-    expect_ok(filter->add_filters_from_json(1, R"({"score": 100})"));
+    filter_add_json(env->get(), filter.get(), 1, R"({"score": 100})");
     json query = json::array({
         {{"score", {{"$range", {200, 100}}}}}
     });
@@ -409,14 +708,16 @@ TEST_F(FilterTest, RejectsInvalidRange) {
 }
 
 TEST_F(FilterTest, RejectsColonInFieldNameOnInsert) {
-    auto result = filter->add_filters_from_json(1, R"({"user:id": "x"})");
+    auto result = filter_add_json_result(env->get(), filter.get(),
+                                         1, R"({"user:id": "x"})");
 
     EXPECT_FALSE(result.ok());
     EXPECT_EQ(result.code, 1);
 }
 
 TEST_F(FilterTest, RejectsColonInValueOnInsert) {
-    auto result = filter->add_filters_from_json(1, R"({"city": "Paris:France"})");
+    auto result = filter_add_json_result(env->get(), filter.get(),
+                                         1, R"({"city": "Paris:France"})");
 
     EXPECT_FALSE(result.ok());
     EXPECT_EQ(result.code, 1);
@@ -434,7 +735,7 @@ TEST_F(FilterTest, RejectsColonInFieldNameOnQuery) {
 }
 
 TEST_F(FilterTest, RejectsColonInValueOnQuery) {
-    expect_ok(filter->add_filters_from_json(1, R"({"city": "Paris"})"));
+    filter_add_json(env->get(), filter.get(), 1, R"({"city": "Paris"})");
     json query = json::array({
         {{"city", {{"$eq", "Paris:France"}}}}
     });
@@ -446,11 +747,13 @@ TEST_F(FilterTest, RejectsColonInValueOnQuery) {
 }
 
 TEST_F(FilterTest, RejectsColonInLowLevelAddToFilter) {
-    auto field_result = filter->add_to_filter("user:id", "x", 1);
+    auto field_result = filter_add_json_result(env->get(), filter.get(),
+                                               1, R"({"user:id": "x"})");
     EXPECT_FALSE(field_result.ok());
     EXPECT_EQ(field_result.code, 1);
 
-    auto value_result = filter->add_to_filter("user", "x:y", 1);
+    auto value_result = filter_add_json_result(env->get(), filter.get(),
+                                               1, R"({"user": "x:y"})");
     EXPECT_FALSE(value_result.ok());
     EXPECT_EQ(value_result.code, 1);
 }
@@ -465,9 +768,9 @@ std::vector<ndd::idInt> sorted_ids(std::vector<ndd::idInt> ids) {
 }  // namespace
 
 TEST_F(FilterTest, ComparisonOperatorsInteger) {
-    expect_ok(filter->add_filters_from_json(1, R"({"age": 25})"));
-    expect_ok(filter->add_filters_from_json(2, R"({"age": 30})"));
-    expect_ok(filter->add_filters_from_json(3, R"({"age": 35})"));
+    filter_add_json(env->get(), filter.get(), 1, R"({"age": 25})");
+    filter_add_json(env->get(), filter.get(), 2, R"({"age": 30})");
+    filter_add_json(env->get(), filter.get(), 3, R"({"age": 35})");
 
     auto run = [&](const json& expr) {
         json query = json::array({{{"age", expr}}});
@@ -481,9 +784,9 @@ TEST_F(FilterTest, ComparisonOperatorsInteger) {
 }
 
 TEST_F(FilterTest, ComparisonOperatorsFloat) {
-    expect_ok(filter->add_filters_from_json(1, R"({"price": 10.5})"));
-    expect_ok(filter->add_filters_from_json(2, R"({"price": 20.0})"));
-    expect_ok(filter->add_filters_from_json(3, R"({"price": 20.5})"));
+    filter_add_json(env->get(), filter.get(), 1, R"({"price": 10.5})");
+    filter_add_json(env->get(), filter.get(), 2, R"({"price": 20.0})");
+    filter_add_json(env->get(), filter.get(), 3, R"({"price": 20.5})");
 
     auto run = [&](const json& expr) {
         json query = json::array({{{"price", expr}}});
@@ -497,9 +800,9 @@ TEST_F(FilterTest, ComparisonOperatorsFloat) {
 }
 
 TEST_F(FilterTest, ComparisonOperatorsNegativeAndZero) {
-    expect_ok(filter->add_filters_from_json(1, R"({"temp": -5})"));
-    expect_ok(filter->add_filters_from_json(2, R"({"temp": 0})"));
-    expect_ok(filter->add_filters_from_json(3, R"({"temp": 5})"));
+    filter_add_json(env->get(), filter.get(), 1, R"({"temp": -5})");
+    filter_add_json(env->get(), filter.get(), 2, R"({"temp": 0})");
+    filter_add_json(env->get(), filter.get(), 3, R"({"temp": 5})");
 
     auto run = [&](const json& expr) {
         json query = json::array({{{"temp", expr}}});
@@ -513,10 +816,10 @@ TEST_F(FilterTest, ComparisonOperatorsNegativeAndZero) {
 }
 
 TEST_F(FilterTest, ComparisonAndCombination) {
-    expect_ok(filter->add_filters_from_json(1, R"({"city": "NY", "age": 25})"));
-    expect_ok(filter->add_filters_from_json(2, R"({"city": "NY", "age": 30})"));
-    expect_ok(filter->add_filters_from_json(3, R"({"city": "NY", "age": 35})"));
-    expect_ok(filter->add_filters_from_json(4, R"({"city": "LA", "age": 30})"));
+    filter_add_json(env->get(), filter.get(), 1, R"({"city": "NY", "age": 25})");
+    filter_add_json(env->get(), filter.get(), 2, R"({"city": "NY", "age": 30})");
+    filter_add_json(env->get(), filter.get(), 3, R"({"city": "NY", "age": 35})");
+    filter_add_json(env->get(), filter.get(), 4, R"({"city": "LA", "age": 30})");
 
     json query = json::array({
         {{"city", {{"$eq", "NY"}}}},
@@ -529,9 +832,9 @@ TEST_F(FilterTest, ComparisonAndCombination) {
 }
 
 TEST_F(FilterTest, ComparisonInteractionWithIn) {
-    expect_ok(filter->add_filters_from_json(1, R"({"score": 1})"));
-    expect_ok(filter->add_filters_from_json(2, R"({"score": 5})"));
-    expect_ok(filter->add_filters_from_json(3, R"({"score": 10})"));
+    filter_add_json(env->get(), filter.get(), 1, R"({"score": 1})");
+    filter_add_json(env->get(), filter.get(), 2, R"({"score": 5})");
+    filter_add_json(env->get(), filter.get(), 3, R"({"score": 10})");
 
     json query = json::array({
         {{"score", {{"$in",  {1, 5, 10}}}}},
@@ -545,7 +848,7 @@ TEST_F(FilterTest, ComparisonInteractionWithIn) {
 TEST_F(FilterTest, ComparisonInteractionWithRange) {
     for(int i = 10; i <= 50; i += 10) {
         std::string body = R"({"v": )" + std::to_string(i) + "}";
-        expect_ok(filter->add_filters_from_json(i, body));
+        filter_add_json(env->get(), filter.get(), i, body);
     }
 
     json query = json::array({
@@ -559,7 +862,7 @@ TEST_F(FilterTest, ComparisonInteractionWithRange) {
 }
 
 TEST_F(FilterTest, ComparisonRejectsNonNumericValue) {
-    expect_ok(filter->add_filters_from_json(1, R"({"age": 25})"));
+    filter_add_json(env->get(), filter.get(), 1, R"({"age": 25})");
     json query = json::array({
         {{"age", {{"$gt", "old"}}}}
     });
@@ -570,7 +873,7 @@ TEST_F(FilterTest, ComparisonRejectsNonNumericValue) {
 }
 
 TEST_F(FilterTest, ComparisonRejectsOnNonNumericField) {
-    expect_ok(filter->add_filters_from_json(1, R"({"city": "NY"})"));
+    filter_add_json(env->get(), filter.get(), 1, R"({"city": "NY"})");
     json query = json::array({
         {{"city", {{"$gt", 5}}}}
     });
@@ -581,7 +884,7 @@ TEST_F(FilterTest, ComparisonRejectsOnNonNumericField) {
 }
 
 TEST_F(FilterTest, ComparisonEmptyRangeAtIntegerBoundary) {
-    expect_ok(filter->add_filters_from_json(1, R"({"x": 0})"));
+    filter_add_json(env->get(), filter.get(), 1, R"({"x": 0})");
 
     json q_lt_min = json::array({
         {{"x", {{"$lt", INT_MIN}}}}
@@ -721,7 +1024,7 @@ TEST_F(FilterTest, Hypothesis2_RangeReturnsAllSaturatedDuplicates) {
     const std::string filter_payload =
         std::string(R"({"score": )") + std::to_string(VALUE) + "}";
     for (ndd::idInt i = 1; i <= N; ++i) {
-        expect_ok(filter->add_filters_from_json(i, filter_payload));
+        filter_add_json(env->get(), filter.get(), i, filter_payload);
     }
 
     json query = json::array({{ {"score", {{"$eq", VALUE}}} }});
@@ -969,7 +1272,7 @@ TEST_F(FilterTest, Hypothesis4_RangeMatchesBruteForceOnCleanDb) {
     for (ndd::idInt i = 1; i <= N; ++i) {
         const std::string payload =
             std::string(R"({"score": )") + std::to_string(value_for(i)) + "}";
-        expect_ok(filter->add_filters_from_json(i, payload));
+        filter_add_json(env->get(), filter.get(), i, payload);
     }
 
     constexpr int LO = 50000;
@@ -1000,9 +1303,9 @@ TEST_F(FilterTest, Hypothesis4_RangeMatchesBruteForceOnCleanDb) {
 // Activation: set ENDEE_BENCH_DB to a directory containing mdbx.dat.
 // Optional: ENDEE_BENCH_FIELD (default "id"), ENDEE_BENCH_ITERS (default 200).
 //
-// Caveat: Filter::init_environment opens the env with MDBX_WRITEMAP, so
-// no other process may hold the DB while the bench runs (stop the
-// endee server first). The bench itself only issues read queries.
+// Caveat: SharedIndexEnv opens the env with MDBX_WRITEMAP, so no other
+// process may hold the DB while the bench runs (stop the endee server
+// first). The bench itself only issues read queries.
 // =====================================================================
 namespace {
 struct BenchPoint {
@@ -1011,7 +1314,8 @@ struct BenchPoint {
     int hi;
 };
 
-void run_bench_point(Filter& filter,
+void run_bench_point(MDBX_env* env,
+                     Filter& filter,
                      const std::string& field,
                      const BenchPoint& pt,
                      int iters) {
@@ -1021,14 +1325,14 @@ void run_bench_point(Filter& filter,
 
     // Warmup -- prime page cache, schema cache, allocator state.
     for (int i = 0; i < 3; ++i) {
-        auto r = filter.computeFilterBitmap(query);
+        auto r = compute_bitmap_oneshot(env, filter, query);
         ASSERT_TRUE(r.ok()) << r.message;
     }
 
     size_t result_card = 0;
     auto t0 = std::chrono::steady_clock::now();
     for (int i = 0; i < iters; ++i) {
-        auto r = filter.computeFilterBitmap(query);
+        auto r = compute_bitmap_oneshot(env, filter, query);
         ASSERT_TRUE(r.ok()) << r.message;
         result_card = r.value_or_throw().cardinality();
     }
@@ -1054,7 +1358,8 @@ TEST(NumericRangeBench, BitmapStructureAndContainsCost) {
     const char* field_env = std::getenv("ENDEE_BENCH_FIELD");
     const std::string field = (field_env && *field_env) ? field_env : "id";
 
-    Filter filter(db_path);
+    ndd::storage::SharedIndexEnv env(db_path);
+    Filter filter(env.get(), "bench/index", "filter_schema");
 
     struct Point { const char* label; long long lo; long long hi; };
     const Point points[] = {
@@ -1066,7 +1371,7 @@ TEST(NumericRangeBench, BitmapStructureAndContainsCost) {
 
     for (const auto& p : points) {
         json q = json::array({{ {field, {{"$range", json::array({p.lo, p.hi})}}} }});
-        auto r = filter.computeFilterBitmap(q);
+        auto r = compute_bitmap_oneshot(env.get(), filter, q);
         ASSERT_TRUE(r.ok()) << r.message;
         auto& bm = r.value_or_throw();
         const uint64_t card = bm.cardinality();
@@ -1105,10 +1410,11 @@ TEST(NumericRangeBench, ProbeValueDistribution) {
     if (!db_path || !*db_path) GTEST_SKIP() << "Set ENDEE_BENCH_DB";
     const char* field_env = std::getenv("ENDEE_BENCH_FIELD");
     const std::string field = (field_env && *field_env) ? field_env : "id";
-    Filter f(db_path);
+    ndd::storage::SharedIndexEnv env(db_path);
+    Filter f(env.get(), "bench/index", "filter_schema");
     auto probe = [&](long long lo, long long hi) {
         json q = json::array({{ {field, {{"$range", json::array({lo, hi})}}} }});
-        auto r = f.computeFilterBitmap(q);
+        auto r = compute_bitmap_oneshot(env.get(), f, q);
         ASSERT_TRUE(r.ok()) << r.message;
         std::printf("  range[% 12lld, % 12lld]  card=%llu\n",
                     lo, hi, (unsigned long long)r.value_or_throw().cardinality());
@@ -1135,7 +1441,8 @@ TEST(NumericRangeBench, RangeQueryWallClock) {
     std::printf("NumericRangeBench: db=%s  field=%s  iters=%d\n",
                 db_path, field.c_str(), iters);
 
-    Filter filter(db_path);
+    ndd::storage::SharedIndexEnv env(db_path);
+    Filter filter(env.get(), "bench/index", "filter_schema");
 
     // Chart-aligned filter_rate buckets. The benchmark DB has uint32
     // values in [0, 10_000_000] with exactly one id per value (probed
@@ -1148,7 +1455,7 @@ TEST(NumericRangeBench, RangeQueryWallClock) {
     };
 
     for (const auto& pt : points) {
-        run_bench_point(filter, field, pt, iters);
+        run_bench_point(env.get(), filter, field, pt, iters);
     }
 }
 
@@ -1173,7 +1480,8 @@ struct MtResult {
     uint64_t result_card_sample = 0;
 };
 
-void run_bench_point_mt(Filter& filter,
+void run_bench_point_mt(MDBX_env* env,
+                        Filter& filter,
                         const std::string& field,
                         const BenchPoint& pt,
                         int threads,
@@ -1184,7 +1492,7 @@ void run_bench_point_mt(Filter& filter,
 
     // Warmup serially -- prime page cache + schema cache.
     for (int i = 0; i < 3; ++i) {
-        auto r = filter.computeFilterBitmap(query);
+        auto r = compute_bitmap_oneshot(env, filter, query);
         ASSERT_TRUE(r.ok()) << r.message;
     }
 
@@ -1199,7 +1507,7 @@ void run_bench_point_mt(Filter& filter,
         uint64_t ops = 0;
         uint64_t card_sample = 0;
         while (!stop.load(std::memory_order_acquire)) {
-            auto r = filter.computeFilterBitmap(query);
+            auto r = compute_bitmap_oneshot(env, filter, query);
             if (!r.ok()) {
                 std::fprintf(stderr, "thread %d: %s\n", tid, r.message.c_str());
                 return;
@@ -1263,7 +1571,8 @@ TEST(NumericRangeBench, RangeQueryMultiThreaded) {
     std::printf("NumericRangeBench_MT: db=%s  field=%s  threads=%d  seconds=%.1f\n",
                 db_path, field.c_str(), threads, seconds);
 
-    Filter filter(db_path);
+    ndd::storage::SharedIndexEnv env(db_path);
+    Filter filter(env.get(), "bench/index", "filter_schema");
 
     const BenchPoint points[] = {
         {"rate~0.99", 0, 9'900'000},
@@ -1273,6 +1582,6 @@ TEST(NumericRangeBench, RangeQueryMultiThreaded) {
     };
 
     for (const auto& pt : points) {
-        run_bench_point_mt(filter, field, pt, threads, seconds);
+        run_bench_point_mt(env.get(), filter, field, pt, threads, seconds);
     }
 }

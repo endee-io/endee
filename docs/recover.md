@@ -1,4 +1,8 @@
-The recovery feature is supposed to recover using lmdb and recreates the index. Below are the steps to recover. It tracks the progress with a file recover.txt. It reads vector store lmdb and sends key (lableInt) and value vector to the hnsw index for index creation.
+> **Legacy procedure.** This document describes the pre-`single_txn` manual recovery flow that ran against the old per-component MDBX layout (v0). On the current shared-env layout (v2), recovery is automatic: `IndexManager::recoverFromWAL` replays committed `op_log` rows on index load and saves+clears the WAL idempotently. See [docs/mdbx_shared_env_acid_revamp.md](mdbx_shared_env_acid_revamp.md) § HNSW Recovery.
+>
+> The flow below still applies if you have a layout-v0 index that has not been migrated. To migrate, see [docs/migrator.md](migrator.md).
+
+The recovery feature recovers from the legacy split MDBX envs and recreates the index. Below are the steps to recover. It tracks the progress with a file recover.txt. It reads the vector store MDBX env and sends key (numeric_id) and value vector to the hnsw index for index creation.
 1. Rename the index file
 ```
 mv main.idx main.idx.old
@@ -35,4 +39,4 @@ done
 rm recover.txt
 ```
 TODO:
-1. When resetting the index if the fp16 parameter is wrong it may crash the index. Maybe we should read the parameter from the indices lmdb and verify while resetting.
+1. When resetting the index if the fp16 parameter is wrong it may crash the index. Maybe we should read the parameter from the indices MDBX env and verify while resetting.

@@ -21,6 +21,7 @@ struct IndexMetadata {
     std::string space_type_str;
     ndd::quant::QuantizationLevel quant_level =
             ndd::quant::QuantizationLevel::INT8;  // Selected quantization level
+    uint32_t layout_version = settings::INDEX_LAYOUT_VERSION;
     int32_t checksum;
     size_t total_elements;
     size_t M;
@@ -33,6 +34,7 @@ struct IndexMetadata {
                 {"sparse_model", ndd::sparseScoringModelToString(sparse_model)},
                 {"space_type_str", space_type_str},
                 {"quant_level", static_cast<uint8_t>(quant_level)},
+                {"layout_version", layout_version},
                 {"checksum", checksum},
                 {"total_elements", total_elements},
                 {"M", M},
@@ -58,6 +60,8 @@ struct IndexMetadata {
         meta.space_type_str = j["space_type_str"].get<std::string>();
         meta.quant_level =
                 static_cast<ndd::quant::QuantizationLevel>(j["quant_level"].get<uint8_t>());
+        meta.layout_version =
+                j.value("layout_version", settings::LEGACY_INDEX_LAYOUT_VERSION);
         meta.checksum = j["checksum"].get<int32_t>();
         meta.total_elements = j["total_elements"].get<size_t>();
         meta.M = j["M"].get<size_t>();
@@ -359,7 +363,9 @@ private:
 
         rc = mdbx_env_open(metadata_env_,
                            metadata_dir_.c_str(),
-                           MDBX_WRITEMAP | MDBX_MAPASYNC | MDBX_NORDAHEAD,
+                           // MDBX flag rationale: see docs/mdbx_shared_env_acid_revamp.md
+                           // "Durability Flags".
+                           MDBX_WRITEMAP | MDBX_NORDAHEAD,
                            0664);
         if(rc != 0) {
             throw std::runtime_error(std::string("Failed to open metadata environment: ")

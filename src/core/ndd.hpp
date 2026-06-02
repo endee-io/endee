@@ -10,6 +10,7 @@
 #include "../sparse/sparse_storage.hpp"
 #include "rand_utils.hpp"
 #include "index_meta.hpp"
+#include "shared_mdbx.hpp"
 #include "msgpack_ndd.hpp"
 #include "quant_vector.hpp"
 #include "wal.hpp"
@@ -63,7 +64,9 @@ struct CacheEntry {
     std::shared_ptr<VectorStorage> vector_storage;
     std::unique_ptr<ndd::SparseVectorStorage> sparse_storage;
     std::unique_ptr<WriteAheadLog> wal;
+    // UNUSED as of 2026-06-01: written by both constructors but never read.
     std::chrono::system_clock::time_point last_access;
+    // UNUSED as of 2026-06-01: set once in the full constructor, never read.
     std::chrono::system_clock::time_point last_saved_at;
     std::chrono::system_clock::time_point last_dirtied_at;
 
@@ -83,7 +86,7 @@ struct CacheEntry {
      * IndexManager::indices_.
      *
      * After delete/evict/reload, the old CacheEntry may still remain alive
-     * because in-flight readers still hold shared_ptr references to it. In that
+     * because in-progress readers still hold shared_ptr references to it. In that
      * window, weak_ptr.lock() can still succeed. cache_valid prevents new lookups
      * from reusing that stale entry while allowing existing users of the entry to
      * finish safely.
@@ -94,7 +97,10 @@ struct CacheEntry {
     bool cache_valid{true};
 
     /**
-     * Number of searches performed on this index. For a search with k=10
+     * UNUSED as of 2026-06-01: incremented in search() but never read by
+     * any caller or telemetry path. Left in place pending a future metrics hookup.
+     *
+     * Number of searches performed on this index. For a search with top_k=10
      * it will be 10
      *
      * NOTE: Since there can be multiple readers hitting the same index,
@@ -110,7 +116,7 @@ struct CacheEntry {
      * evictIfNeeded, recoverIndex, deleteVectorsByFilter, updateFilters,
      * deleteIndex, executeBackupJob
      *
-     * readers: searchKNN, getVector, getIndexInfo (loaded-index path only)
+     * readers: search, getVector, getIndexInfo (loaded-index path only)
      *
      * NOTE: std::shared_mutex dont guarantee fairness between
      * readers and writers. ie. currently it could be the case that either
@@ -181,6 +187,7 @@ struct CacheEntry {
         is_dirty = true;
         last_dirtied_at = std::chrono::system_clock::now();
     }
+    // UNUSED as of 2026-06-01: no callers (paired with searchCount above).
     void resetSearchCount() { searchCount = 0; }
     // Delete copy constructor and assignment
     CacheEntry(const CacheEntry&) = delete;
@@ -228,20 +235,46 @@ private:
     void executeBackupJob(const std::string& index_id, const std::string& backup_name,
                           std::stop_token st);
 
-    std::unique_ptr<WriteAheadLog> createWAL(const std::string& index_id) {
-        const std::string wal_dir = data_dir_ + "/" + index_id;
-        return std::make_unique<WriteAheadLog>(wal_dir, index_id);
+    std::unique_ptr<WriteAheadLog> createWAL(const std::string& index_id, MDBX_env* env) {
+        return std::make_unique<WriteAheadLog>(env, index_id);
     }
 
     WriteAheadLog* getOrCreateWAL(CacheEntry& entry) {
         if(!entry.wal) {
-            entry.wal = createWAL(entry.index_id);
+            entry.wal = createWAL(entry.index_id, entry.vector_storage->shared_env());
         }
         return entry.wal.get();
     }
 
+    /**
+     * Clears the WAL by opening a one-shot WRITE txn and calling `clear`.
+     * WAL clear is not safety-critical - stale entries replay idempotently
+     * on next recovery - so failures are logged and swallowed instead of
+     * thrown.
+     */
     void clearWAL(CacheEntry& entry) {
-        getOrCreateWAL(entry)->clear();
+        WriteAheadLog* wal = getOrCreateWAL(entry);
+        MDBX_txn* txn = nullptr;
+        int rc = mdbx_txn_begin(wal->env(), nullptr, MDBX_TXN_READWRITE, &txn);
+        if(rc != MDBX_SUCCESS) {
+            LOG_ERROR(1404,
+                      entry.index_id,
+                      "Failed to begin WAL clear txn: " << mdbx_strerror(rc));
+            return;
+        }
+        try {
+            wal->clear(txn);
+        } catch(const std::exception& e) {
+            mdbx_txn_abort(txn);
+            LOG_ERROR(1405, entry.index_id, "WAL clear failed: " << e.what());
+            return;
+        }
+        rc = mdbx_txn_commit(txn);
+        if(rc != MDBX_SUCCESS) {
+            LOG_ERROR(1406,
+                      entry.index_id,
+                      "Failed to commit WAL clear: " << mdbx_strerror(rc));
+        }
     }
 
     // Helper method for WAL recovery
@@ -263,9 +296,14 @@ private:
                 try {
                     if(wal_entry.op_type == WALOperationType::VECTOR_ADD) {
                         // Check if vector exists in storage before recovering
-                        auto vector_bytes = entry.vector_storage->get_vector(wal_entry.numeric_id);
-                        if(!vector_bytes.empty()) {
-                            entry.alg->addPoint<true>(vector_bytes.data(), wal_entry.numeric_id);
+                        auto vec_result = entry.vector_storage->get_vector(wal_entry.numeric_id);
+                        if(vec_result.ok() && !vec_result.value->empty()) {
+                            const auto& vector_bytes = *vec_result.value;
+                            if(entry.alg->hasLabel(wal_entry.numeric_id)) {
+                                entry.alg->addPoint<false>(vector_bytes.data(), wal_entry.numeric_id);
+                            } else {
+                                entry.alg->addPoint<true>(vector_bytes.data(), wal_entry.numeric_id);
+                            }
                         } else {
                             // Vector doesn't exist - this VECTOR_ADD failed
                             failed_vector_add_ids.push_back(wal_entry.numeric_id);
@@ -274,13 +312,21 @@ private:
                         }
                     } else if(wal_entry.op_type == WALOperationType::VECTOR_UPDATE) {
                         // Recover vector update
-                        auto vector_bytes = entry.vector_storage->get_vector(wal_entry.numeric_id);
-                        if(!vector_bytes.empty()) {
-                            entry.alg->addPoint<false>(vector_bytes.data(), wal_entry.numeric_id);
+                        auto vec_result = entry.vector_storage->get_vector(wal_entry.numeric_id);
+                        if(vec_result.ok() && !vec_result.value->empty()) {
+                            const auto& vector_bytes = *vec_result.value;
+                            if(entry.alg->hasLabel(wal_entry.numeric_id)) {
+                                entry.alg->addPoint<false>(vector_bytes.data(), wal_entry.numeric_id);
+                            } else {
+                                entry.alg->addPoint<true>(vector_bytes.data(), wal_entry.numeric_id);
+                            }
                         }
                     } else if(wal_entry.op_type == WALOperationType::VECTOR_DELETE) {
                         // For deletions, just mark the vector as deleted
-                        entry.alg->markDelete(wal_entry.numeric_id);
+                        if(entry.alg->hasLabel(wal_entry.numeric_id)
+                           && !entry.alg->isLabelDeleted(wal_entry.numeric_id)) {
+                            entry.alg->markDelete(wal_entry.numeric_id);
+                        }
                     }
                 } catch(const std::exception& e) {
                     if(wal_entry.op_type == WALOperationType::VECTOR_ADD) {
@@ -737,28 +783,23 @@ public:
         }
 
         hnswlib::SpaceType space_type = hnswlib::getSpaceType(config.space_type_str);
-        std::string lmdb_dir = index_dir + "/ids";
 
-        //create the directory and initialize sequence for IDMapper
-        LOG_INFO(2021,
-                       index_id,
-                       "Creating ID mapper with user type " << userTypeToString(user_type));
-
-        // IDMapper now uses tier-based fixed bloom filter sizing based on user_type
-        auto id_mapper = std::make_shared<IDMapper>(lmdb_dir, true, user_type);
-
-
-        // Create HNSW directly with all necessary parameters
         ndd::quant::QuantizationLevel quant_level = config.quant_level;
-        auto vector_storage =
-                std::make_shared<VectorStorage>(index_dir, index_id, config.dim, config.quant_level);
+        auto vector_storage = std::make_shared<VectorStorage>(
+                index_dir, index_id, config.dim, config.quant_level);
+        MDBX_env* shared_env = vector_storage->shared_env();
+        ndd::storage::SharedIndexEnv::write_layout_version(
+                shared_env, settings::INDEX_LAYOUT_VERSION);
+
+        //create the DBI and initialize sequence for IDMapper
+        auto id_mapper = std::make_shared<IDMapper>(shared_env, "id_map");
+        id_mapper->init_sequence();
 
         // Initialize Sparse Storage if needed
         std::unique_ptr<ndd::SparseVectorStorage> sparse_storage = nullptr;
         if(ndd::sparseModelEnabled(config.sparse_model)) {
-            std::string sparse_storage_dir = index_dir + "/sparse";
             sparse_storage = std::make_unique<ndd::SparseVectorStorage>(
-                sparse_storage_dir, index_id, config.sparse_model);
+                shared_env, index_id, config.sparse_model);
             if(!sparse_storage->initialize()) {
                 throw std::runtime_error("Failed to initialize sparse storage");
             }
@@ -773,15 +814,30 @@ public:
                                                                      quant_level,
                                                                      config.checksum);
 
-        alg->setVectorFetcher([vs = vector_storage](ndd::idInt label, uint8_t* buffer) {
-            return vs->get_vector(label, buffer);
+        /**
+         * Hot fetcher path called by HNSW's graph traversal. When the
+         * caller passes a non-null txn (the request-scoped MDBX
+         * snapshot from search), the read uses that snapshot so the
+         * whole traversal sees one view and MDBX sticky-thread mode is
+         * not violated by a nested mdbx_txn_begin. A null txn means
+         * the caller did not open a snapshot (e.g. the write path
+         * during addPoint) - the storage opens its own RDONLY.
+         */
+        alg->setVectorFetcher([vs = vector_storage](MDBX_txn* txn,
+                                                    ndd::idInt label,
+                                                    uint8_t* buffer) {
+            return vs->get_vector(txn, label, buffer);
         });
 
-        alg->setVectorFetcherBatch([vs = vector_storage](const ndd::idInt* labels, uint8_t* buffers, bool* success, size_t count) -> size_t {
-            return vs->get_vectors_batch_into(labels, buffers, success, count);
+        alg->setVectorFetcherBatch([vs = vector_storage](MDBX_txn* txn,
+                                                         const ndd::idInt* labels,
+                                                         uint8_t* buffers,
+                                                         bool* success,
+                                                         size_t count) -> size_t {
+            return vs->get_vectors_batch_into(txn, labels, buffers, success, count);
         });
 
-        auto wal = createWAL(index_id);
+        auto wal = createWAL(index_id, shared_env);
 
         // Add to indices with minimal lock scope
         {
@@ -810,6 +866,8 @@ public:
         metadata_entry.total_elements = 0;
         metadata_entry.M = config.M;
         metadata_entry.ef_con = config.ef_construction;
+        // SharedIndexEnv also persists this in the layout_meta DBI for storage-level gating.
+        metadata_entry.layout_version = settings::INDEX_LAYOUT_VERSION;
         metadata_entry.created_at = std::chrono::system_clock::now();
 
         if(!metadata_manager_->storeMetadata(index_id, metadata_entry)) {
@@ -834,13 +892,12 @@ public:
 
     void loadIndex(const std::string& index_id) {
         std::string index_dir = data_dir_ + "/" + index_id;
-        std::string lmdb_dir = index_dir + "/ids";
         std::string vector_storage_dir = index_dir + "/vectors";
         std::string index_path = vector_storage_dir + "/" + settings::DEFAULT_SUBINDEX + ".idx";
 
-        if(!std::filesystem::exists(index_path) || !std::filesystem::exists(lmdb_dir)
-           || !std::filesystem::exists(vector_storage_dir)) {
-            throw std::runtime_error("Required files missing for index: " + index_id);
+        if(std::filesystem::exists(std::filesystem::path(index_dir)
+                                   / settings::INDEX_MIGRATION_MARKER)) {
+            throw std::runtime_error(settings::INCOMPLETE_INDEX_MIGRATION_ERROR);
         }
 
         // Load metadata to get sparse_model
@@ -849,7 +906,14 @@ public:
             throw std::runtime_error("Missing or incompatible index metadata for index: "
                                      + index_id);
         }
+        if(metadata->layout_version != settings::INDEX_LAYOUT_VERSION) {
+            throw std::runtime_error(settings::indexLayoutError(metadata->layout_version));
+        }
         const ndd::SparseScoringModel sparse_model = metadata->sparse_model;
+
+        if(!std::filesystem::exists(index_path) || !std::filesystem::exists(vector_storage_dir)) {
+            throw std::runtime_error("Required files missing for index: " + index_id);
+        }
 
         // Step 1: Load HNSW index (automatically adjusts cache based on element count and cache
         // percentage)
@@ -861,17 +925,17 @@ public:
             throw std::runtime_error("Cannot load index '" + index_id + "': " + e.what());
         }
 
-        // Step 2: Create IDMapper and VectorStorage - IDMapper handles bloom filter initialization
-        auto id_mapper = std::make_shared<IDMapper>(lmdb_dir, false);
+        // Step 2: Create shared-env stores. IDMapper handles sequence initialization.
         auto vector_storage = std::make_shared<VectorStorage>(
                 index_dir, index_id, alg->getDimension(), alg->getQuantLevel());
+        MDBX_env* shared_env = vector_storage->shared_env();
+        auto id_mapper = std::make_shared<IDMapper>(shared_env, "id_map");
 
         // Initialize Sparse Storage if sparse_model is enabled
         std::unique_ptr<ndd::SparseVectorStorage> sparse_storage;
         if(ndd::sparseModelEnabled(sparse_model)) {
-            std::string sparse_storage_dir = index_dir + "/sparse";
             sparse_storage = std::make_unique<ndd::SparseVectorStorage>(
-                sparse_storage_dir, index_id, sparse_model);
+                shared_env, index_id, sparse_model);
             if(!sparse_storage->initialize()) {
                 throw std::runtime_error("Failed to initialize sparse storage for index: "
                                          + index_id);
@@ -879,15 +943,30 @@ public:
         }
 
         // Set up vector fetcher
-        alg->setVectorFetcher([vs = vector_storage](ndd::idInt label, uint8_t* buffer) {
-            return vs->get_vector(label, buffer);
+        /**
+         * Hot fetcher path called by HNSW's graph traversal. When the
+         * caller passes a non-null txn (the request-scoped MDBX
+         * snapshot from search), the read uses that snapshot so the
+         * whole traversal sees one view and MDBX sticky-thread mode is
+         * not violated by a nested mdbx_txn_begin. A null txn means
+         * the caller did not open a snapshot (e.g. the write path
+         * during addPoint) - the storage opens its own RDONLY.
+         */
+        alg->setVectorFetcher([vs = vector_storage](MDBX_txn* txn,
+                                                    ndd::idInt label,
+                                                    uint8_t* buffer) {
+            return vs->get_vector(txn, label, buffer);
         });
 
-        alg->setVectorFetcherBatch([vs = vector_storage](const ndd::idInt* labels, uint8_t* buffers, bool* success, size_t count) -> size_t {
-            return vs->get_vectors_batch_into(labels, buffers, success, count);
+        alg->setVectorFetcherBatch([vs = vector_storage](MDBX_txn* txn,
+                                                         const ndd::idInt* labels,
+                                                         uint8_t* buffers,
+                                                         bool* success,
+                                                         size_t count) -> size_t {
+            return vs->get_vectors_batch_into(txn, labels, buffers, success, count);
         });
 
-        auto wal = createWAL(index_id);
+        auto wal = createWAL(index_id, shared_env);
 
         LOG_DEBUG("Loaded index: " << index_id);
         LOG_DEBUG("Created space for index: " << index_id);
@@ -986,12 +1065,18 @@ public:
         auto new_alg = std::make_unique<hnswlib::HierarchicalNSW<float>>(index_path, 0);
 
         // Set the vector fetcher to use our storage
-        new_alg->setVectorFetcher([vs = entry->vector_storage](ndd::idInt label, uint8_t* buffer) {
-            return vs->get_vector(label, buffer);
+        new_alg->setVectorFetcher([vs = entry->vector_storage](MDBX_txn* txn,
+                                                                ndd::idInt label,
+                                                                uint8_t* buffer) {
+            return vs->get_vector(txn, label, buffer);
         });
 
-        new_alg->setVectorFetcherBatch([vs = entry->vector_storage](const ndd::idInt* labels, uint8_t* buffers, bool* success, size_t count) -> size_t {
-            return vs->get_vectors_batch_into(labels, buffers, success, count);
+        new_alg->setVectorFetcherBatch([vs = entry->vector_storage](MDBX_txn* txn,
+                                                                    const ndd::idInt* labels,
+                                                                    uint8_t* buffers,
+                                                                    bool* success,
+                                                                    size_t count) -> size_t {
+            return vs->get_vectors_batch_into(txn, labels, buffers, success, count);
         });
 
         // Replace the algorithm in the existing entry
@@ -1009,7 +1094,7 @@ public:
      */
     template <typename VectorType>
     ndd::OperationResult<bool> addVectors(const std::string& index_id,
-                                          const std::vector<VectorType>& vectors) {
+                                          std::vector<VectorType> vectors) {
         try {
             // Get the index entry (loads if needed, handles all locking)
             auto entry_ptr = getIndexEntry(index_id);
@@ -1025,7 +1110,30 @@ public:
                 return {SUCCESS, "No vectors to add", false};
             }
 
-            // CRITICAL FIX: Pass WAL to create_ids_batch for atomic logging
+            /**
+             * Reject the batch before any quantization, WAL append, or MDBX
+             * transaction if any dense vector's length does not match the index
+             * dimension. Downstream quantize() infers dimension from input.size()
+             * so a mismatch yields an OOB read in addPoint's distance routines.
+             */
+            const size_t configured_dim_insert = entry.alg->getDimension();
+            for(size_t i = 0; i < vectors.size(); ++i) {
+                if(vectors[i].vector.size() != configured_dim_insert) {
+                    LOG_WARN(2056,
+                             index_id,
+                             "Insert rejected: vector at index "
+                                     << i << " (id=" << vectors[i].id
+                                     << ") has dimension " << vectors[i].vector.size()
+                                     << ", expected " << configured_dim_insert);
+                    return {2,
+                            "vector at index " + std::to_string(i) + " (id="
+                                    + vectors[i].id + ") has dimension "
+                                    + std::to_string(vectors[i].vector.size())
+                                    + ", expected " + std::to_string(configured_dim_insert),
+                            false};
+                }
+            }
+
             WriteAheadLog* wal = getOrCreateWAL(entry);
 
             std::vector<std::string> str_ids;
@@ -1034,62 +1142,42 @@ public:
                 str_ids.push_back(vec.id);
             }
             LOG_DEBUG("Extracted " << str_ids.size() << " string IDs from vectors");
-            std::vector<std::pair<idInt, bool>> numeric_ids;
-            // Get or create numeric IDs in batch - this returns ids.
-            // If str_id already exists, it will return the old numeric ID
-            if(entry.alg->getDeletedCount() > 0) {
-                // There are deleted IDs, we need to reuse them
-                numeric_ids = entry.id_mapper->create_ids_batch<true>(str_ids, wal);
-            } else {
-                // No deleted IDs, just create new ones
-                numeric_ids = entry.id_mapper->create_ids_batch<false>(str_ids, wal);
-            }
-            LOG_DEBUG("Created " << numeric_ids.size() << " numeric IDs for string IDs");
 
-            // Handle Sparse Vectors if storage is initialized
+            std::vector<ndd::SparseVector> sparse_payloads;
             if(entry.sparse_storage) {
                 if constexpr(std::is_same_v<VectorType, ndd::HybridVectorObject>) {
-                    /**
-                     * Forward every hybrid doc, including empty sparse payloads, so the sparse
-                     * storage layer can treat upserts as replacements and clear old sparse state.
-                     */
-                    std::vector<std::pair<ndd::idInt, ndd::SparseVector>> sparse_batch;
-                    sparse_batch.reserve(vectors.size());
+                    sparse_payloads.reserve(vectors.size());
 
-                    for(size_t i = 0; i < vectors.size(); ++i) {
-                        const auto& vec = vectors[i];
+                    for(auto& vec : vectors) {
+                        if(vec.sparse_ids.size() != vec.sparse_values.size()) {
+                            return {1,
+                                    "sparse_ids and sparse_values must have the same length"};
+                        }
+
                         ndd::SparseVector sparse_vec;
                         if(!vec.sparse_ids.empty()) {
                             // Sort indices and values together so replacement writes preserve the
                             // inverted index ordering invariants.
-                            std::vector<std::pair<uint32_t, float>> pairs;
-                            pairs.reserve(vec.sparse_ids.size());
-                            for(size_t k = 0; k < vec.sparse_ids.size(); ++k) {
-                                pairs.emplace_back(vec.sparse_ids[k], vec.sparse_values[k]);
-                            }
-                            std::sort(pairs.begin(), pairs.end(), [](const auto& a, const auto& b) {
-                                return a.first < b.first;
-                            });
-
-                            sparse_vec.indices.reserve(pairs.size());
-                            sparse_vec.values.reserve(pairs.size());
-                            for(const auto& p : pairs) {
-                                sparse_vec.indices.push_back(p.first);
-                                sparse_vec.values.push_back(p.second);
+                            if(std::is_sorted(vec.sparse_ids.begin(), vec.sparse_ids.end())) {
+                                sparse_vec.indices = std::move(vec.sparse_ids);
+                                sparse_vec.values = std::move(vec.sparse_values);
+                            } else {
+                                std::vector<std::pair<uint32_t, float>> pairs(
+                                        vec.sparse_ids.size());
+                                for(size_t i = 0; i < vec.sparse_ids.size(); ++i) {
+                                    pairs[i] = {vec.sparse_ids[i], vec.sparse_values[i]};
+                                }
+                                std::sort(pairs.begin(), pairs.end());
+                                sparse_vec.indices.reserve(pairs.size());
+                                sparse_vec.values.reserve(pairs.size());
+                                for(const auto& [idx, val] : pairs) {
+                                    sparse_vec.indices.push_back(idx);
+                                    sparse_vec.values.push_back(val);
+                                }
                             }
                         }
 
-                        sparse_batch.emplace_back(numeric_ids[i].first, std::move(sparse_vec));
-                    }
-
-                    if(!sparse_batch.empty()) {
-                        if(!entry.sparse_storage->store_vectors_batch(sparse_batch)) {
-                            LOG_ERROR(2053,
-                                      index_id,
-                                      "Failed to update sparse storage for batch size "
-                                              << sparse_batch.size());
-                            return {100, "Failed to update sparse storage"};
-                        }
+                        sparse_payloads.emplace_back(std::move(sparse_vec));
                     }
                 }
             }
@@ -1104,24 +1192,85 @@ public:
             LOG_DEBUG("Converting " << vectors.size() << " vectors to QuantVectorObject with level "
                                     << (int)quant_level);
 
-            // Create a mutable copy for move operations
-            std::vector<VectorType> mutable_vectors = vectors;
-
-            for(auto& vec_obj : mutable_vectors) {
-                // Use efficient move constructor with internal quantization
+            // `vectors` was taken by value; move each element into QuantVectorObject directly,
+            // avoiding the temp-copy that the old code paid for.
+            for(auto& vec_obj : vectors) {
                 quantized_vectors.emplace_back(std::move(vec_obj), quant_level, dist_params);
             }
             LOG_DEBUG("QuantVectorObject conversion completed with move semantics");
 
-            // Store quantized vectors using optimized batch function (no double conversion!)
+            MDBX_txn* txn = nullptr;
+            int rc = mdbx_txn_begin(
+                    entry.vector_storage->shared_env(), nullptr, MDBX_TXN_READWRITE, &txn);
+            if(rc != MDBX_SUCCESS) {
+                return {100, "Failed to begin shared index transaction: "
+                                     + std::string(mdbx_strerror(rc))};
+            }
+
+            std::vector<std::pair<idInt, bool>> numeric_ids;
+            int64_t sparse_vector_count_delta = 0;
+            auto abort_txn = [&txn, &entry]() {
+                if(txn) {
+                    mdbx_txn_abort(txn);
+                    txn = nullptr;
+                    entry.vector_storage->reload_filter_schema_cache();
+                }
+            };
+
+            try {
+                // Get or create numeric IDs in the same write transaction as the data rows.
+                if(entry.alg->getDeletedCount() > 0) {
+                    numeric_ids = entry.id_mapper->create_ids_batch<true>(txn, str_ids);
+                } else {
+                    numeric_ids = entry.id_mapper->create_ids_batch<false>(txn, str_ids);
+                }
+                LOG_DEBUG("Created " << numeric_ids.size() << " numeric IDs for string IDs");
+            } catch(const std::exception& e) {
+                abort_txn();
+                return {100, std::string("Failed to allocate vector IDs: ") + e.what()};
+            }
+
             std::vector<std::pair<idInt, QuantVectorObject>> storage_vectors;
             storage_vectors.reserve(quantized_vectors.size());
             for(size_t i = 0; i < quantized_vectors.size(); i++) {
                 // Copy QuantVectorObject for storage (we need to keep original for HNSW)
                 storage_vectors.emplace_back(numeric_ids[i].first, quantized_vectors[i]);
             }
-            auto storage_result = entry.vector_storage->store_vectors_batch(storage_vectors);
+
+            /*
+             * Staged term_info_ mutations from the sparse write. These are
+             * applied to InvertedIndex::term_info_ only AFTER the shared MDBX
+             * txn commits successfully; on any abort path below they go out
+             * of scope and term_info_ stays in lockstep with the rolled-back
+             * MDBX state. See tests/acid_regression_test.cpp.
+             */
+            std::vector<ndd::TermInfoChange> sparse_term_info_changes;
+            if(entry.sparse_storage && !sparse_payloads.empty()) {
+                std::vector<std::pair<ndd::idInt, ndd::SparseVector>> sparse_batch;
+                sparse_batch.reserve(sparse_payloads.size());
+                for(size_t i = 0; i < sparse_payloads.size(); ++i) {
+                    sparse_batch.emplace_back(numeric_ids[i].first, std::move(sparse_payloads[i]));
+                }
+
+                auto sparse_result = entry.sparse_storage->store_vectors_batch(
+                        txn, sparse_batch, &sparse_vector_count_delta);
+                if(!sparse_result.ok()) {
+                    abort_txn();
+                    LOG_ERROR(2053,
+                              index_id,
+                              "Failed to update sparse storage for batch size "
+                                      << sparse_batch.size() << ": "
+                                      << sparse_result.message);
+                    return {sparse_result.code, sparse_result.message};
+                }
+                sparse_term_info_changes = std::move(sparse_result.value_or_throw());
+            }
+
+            bool filter_schema_changed = false;
+            auto storage_result = entry.vector_storage->store_vectors_batch(
+                    txn, storage_vectors, &filter_schema_changed);
             if(!storage_result.ok()) {
+                abort_txn();
                 if(storage_result.code < 100) {
                     LOG_WARN(1212, index_id, "Insert filters rejected: " << storage_result.message);
                 } else {
@@ -1132,8 +1281,50 @@ public:
             LOG_DEBUG("Stored " << storage_vectors.size()
                                 << " pre-quantized vectors in vector storage");
 
-            // Add to write ahead log using IndexManager's method
-            logInsertsAndUpdates(entry, numeric_ids);
+            std::vector<WriteAheadLog::WALEntry> wal_entries;
+            wal_entries.reserve(numeric_ids.size());
+            for(const auto& [numeric_id, is_new] : numeric_ids) {
+                wal_entries.push_back({
+                        is_new ? WALOperationType::VECTOR_ADD : WALOperationType::VECTOR_UPDATE,
+                        numeric_id,
+                });
+            }
+
+            try {
+                wal->log(txn, wal_entries);
+            } catch(const std::exception& e) {
+                abort_txn();
+                return {100, std::string("Failed to append operation log: ") + e.what()};
+            }
+
+            rc = mdbx_txn_commit(txn);
+            txn = nullptr;
+            if(rc != MDBX_SUCCESS) {
+                entry.vector_storage->reload_filter_schema_cache();
+                return {100, "Failed to commit shared index transaction: "
+                                     + std::string(mdbx_strerror(rc))};
+            }
+            if(filter_schema_changed) {
+                auto schema_result = entry.vector_storage->reload_filter_schema_cache();
+                if(!schema_result.ok()) {
+                    return {schema_result.code, schema_result.message, false};
+                }
+            }
+
+            if(entry.sparse_storage && sparse_vector_count_delta != 0) {
+                entry.sparse_storage->apply_vector_count_delta(sparse_vector_count_delta);
+            }
+
+            /*
+             * Apply the staged term_info_ mutations now that the shared MDBX
+             * txn has committed. Done here (not inside the sparse `_txn`
+             * call) so the in-memory cache always agrees with what MDBX
+             * actually committed - see acid_regression_test.cpp for the
+             * abort scenario this fixes.
+             */
+            if(entry.sparse_storage && !sparse_term_info_changes.empty()) {
+                entry.sparse_storage->apply_term_info_changes(sparse_term_info_changes);
+            }
 
             // Add to HNSW index in parallel using pre-quantized data from QuantVectorObject
             size_t available_threads = settings::NUM_PARALLEL_INSERTS;
@@ -1195,7 +1386,7 @@ public:
             throw;
         } catch(const std::exception& e) {
             LOG_ERROR(2027, index_id, "Batch insertion failed: " << e.what());
-            throw std::runtime_error(std::string("Batch insertion failed: ") + e.what());
+            return {100, std::string("Batch insertion failed: ") + e.what(), false};
         }
     }
 
@@ -1319,39 +1510,67 @@ public:
              */
             // std::shared_lock<std::shared_mutex> operation_lock(entry.operation_mutex);
 
-            ndd::idInt numeric_id = entry.id_mapper->get_id(str_id);
-            if(numeric_id == 0) {
-                return std::nullopt;
+            MDBX_txn* txn = nullptr;
+            int rc = mdbx_txn_begin(
+                    entry.vector_storage->shared_env(), nullptr, MDBX_TXN_RDONLY, &txn);
+            if(rc != MDBX_SUCCESS) {
+                throw std::runtime_error("Failed to begin shared getVector transaction: "
+                                         + std::string(mdbx_strerror(rc)));
             }
 
-            std::vector<uint8_t> vec_bytes = entry.vector_storage->get_vector(numeric_id);
-            ndd::VectorMeta meta = entry.vector_storage->get_meta(numeric_id);
-
-            ndd::HybridVectorObject obj;
-            obj.id = meta.id;
-            obj.meta = meta.meta;
-            obj.filter = meta.filter;
-            obj.norm = meta.norm;
-
-            // Convert raw bytes to float vector using unified dequantization function
-            ndd::quant::QuantizationLevel quant_level = entry.alg->getQuantLevel();
-            std::vector<float> float_data =
-                    ndd::quant::get_quantizer_dispatch(quant_level)
-                            .dequantize(vec_bytes.data(), entry.alg->getDimension());
-
-            // Add the float data to the msgpack
-            obj.vector = {float_data.begin(), float_data.end()};
-
-            if(entry.sparse_storage) {
-                auto sparse_txn = entry.sparse_storage->begin_transaction(true);
-                auto sparse_vec = sparse_txn->get_vector(numeric_id);
-                if(sparse_vec.has_value()) {
-                    obj.sparse_ids = std::move(sparse_vec->indices);
-                    obj.sparse_values = std::move(sparse_vec->values);
+            try {
+                ndd::idInt numeric_id = entry.id_mapper->get_id(txn, str_id);
+                if(numeric_id == 0) {
+                    mdbx_txn_abort(txn);
+                    return std::nullopt;
                 }
-            }
 
-            return obj;
+                auto vec_result = entry.vector_storage->get_vector(txn, numeric_id);
+                if(!vec_result.ok() || vec_result.value->empty()) {
+                    mdbx_txn_abort(txn);
+                    if(vec_result.ok() || vec_result.code == 101) {
+                        return std::nullopt;
+                    }
+                    throw std::runtime_error(vec_result.message);
+                }
+                const auto& vec_bytes = *vec_result.value;
+                auto meta_result = entry.vector_storage->get_meta(txn, numeric_id);
+                if(!meta_result.ok()) {
+                    mdbx_txn_abort(txn);
+                    if(meta_result.code == 101) {
+                        // Meta missing for an existing id-map row is a recoverable not-found.
+                        return std::nullopt;
+                    }
+                    throw std::runtime_error(meta_result.message);
+                }
+                const auto& meta = *meta_result.value;
+
+                ndd::HybridVectorObject obj;
+                obj.id = meta.id;
+                obj.meta = meta.meta;
+                obj.filter = meta.filter;
+                obj.norm = meta.norm;
+
+                ndd::quant::QuantizationLevel quant_level = entry.alg->getQuantLevel();
+                std::vector<float> float_data =
+                        ndd::quant::get_quantizer_dispatch(quant_level)
+                                .dequantize(vec_bytes.data(), entry.alg->getDimension());
+                obj.vector = {float_data.begin(), float_data.end()};
+
+                if(entry.sparse_storage) {
+                    auto sparse_vec = entry.sparse_storage->get_vector(txn, numeric_id);
+                    if(sparse_vec.has_value()) {
+                        obj.sparse_ids = std::move(sparse_vec->indices);
+                        obj.sparse_values = std::move(sparse_vec->values);
+                    }
+                }
+
+                mdbx_txn_abort(txn);
+                return obj;
+            } catch(...) {
+                mdbx_txn_abort(txn);
+                throw;
+            }
         } catch(const std::exception& e) {
             LOG_ERROR(2034, index_id, "Error retrieving vector: " << e.what());
             return std::nullopt;
@@ -1372,19 +1591,73 @@ public:
     ndd::OperationResult<bool>
     deleteVectorsByIds(CacheEntry& entry, const std::vector<ndd::idInt>& numeric_ids) {
         try {
-            for(ndd::idInt numeric_id : numeric_ids) {
-                auto meta = entry.vector_storage->get_meta(numeric_id);
-                // Remove ID mapping by getting the string id from metadata
-                auto stored_ids = entry.id_mapper->deletePoints({meta.id});
-                if(stored_ids[0] != numeric_id) {
-                    LOG_DEBUG("Error: Mismatch in stored ID and numeric ID "
-                              << stored_ids[0] << " != " << numeric_id);
-                    continue;
+            if(numeric_ids.empty()) {
+                return {SUCCESS, "", true};
+            }
+
+            MDBX_txn* txn = nullptr;
+            int rc = mdbx_txn_begin(
+                    entry.vector_storage->shared_env(), nullptr, MDBX_TXN_READWRITE, &txn);
+            if(rc != MDBX_SUCCESS) {
+                return {100, "Failed to begin shared delete transaction: "
+                                     + std::string(mdbx_strerror(rc))};
+            }
+
+            auto abort_txn = [&txn, &entry]() {
+                if(txn) {
+                    mdbx_txn_abort(txn);
+                    txn = nullptr;
+                    entry.vector_storage->reload_filter_schema_cache();
                 }
-                // Remove the filter (only if vector had one - insert path skips empty filters)
-                if(!meta.filter.empty()) {
-                    auto filter_result = entry.vector_storage->deleteFilter(numeric_id, meta.filter);
+            };
+
+            std::vector<ndd::VectorMeta> metas;
+            std::vector<std::string> external_ids;
+            metas.reserve(numeric_ids.size());
+            external_ids.reserve(numeric_ids.size());
+
+            try {
+                for(ndd::idInt numeric_id : numeric_ids) {
+                    auto meta_result = entry.vector_storage->get_meta(txn, numeric_id);
+                    if(!meta_result.ok()) {
+                        abort_txn();
+                        LOG_ERROR(2058,
+                                  entry.index_id,
+                                  "Failed to read meta for numeric_id "
+                                          << numeric_id << ": " << meta_result.message);
+                        return {meta_result.code, meta_result.message};
+                    }
+                    auto& meta = *meta_result.value;
+                    external_ids.push_back(meta.id);
+                    metas.push_back(std::move(meta));
+                }
+
+                auto stored_ids = entry.id_mapper->deletePoints(txn, external_ids);
+                for(size_t i = 0; i < stored_ids.size(); ++i) {
+                    if(stored_ids[i] != numeric_ids[i]) {
+                        abort_txn();
+                        LOG_ERROR(2035,
+                                  entry.index_id,
+                                  "ID mapping mismatch while deleting "
+                                          << external_ids[i] << ": expected "
+                                          << numeric_ids[i] << " got " << stored_ids[i]);
+                        return {100, "ID mapping mismatch while deleting vectors"};
+                    }
+                }
+
+                int64_t sparse_vector_count_delta = 0;
+                /*
+                 * Staged term_info_ mutations across the whole delete batch.
+                 * Applied to InvertedIndex::term_info_ only AFTER the shared
+                 * MDBX txn commits. Dropped on any abort path so the cache
+                 * stays in lockstep with the rolled-back MDBX state.
+                 */
+                std::vector<ndd::TermInfoChange> sparse_term_info_changes;
+                for(size_t i = 0; i < numeric_ids.size(); ++i) {
+                    auto filter_result =
+                            entry.vector_storage->deletePoint(txn, numeric_ids[i], metas[i]);
                     if(!filter_result.ok()) {
+                        abort_txn();
                         if(filter_result.code < 100) {
                             LOG_WARN(1216,
                                      entry.index_id,
@@ -1398,18 +1671,58 @@ public:
                         }
                         return {filter_result.code, filter_result.message};
                     }
+
+                    if(entry.sparse_storage) {
+                        auto sparse_result = entry.sparse_storage->delete_vector(
+                                txn, numeric_ids[i], &sparse_vector_count_delta, true);
+                        if(!sparse_result.ok()) {
+                            abort_txn();
+                            return {sparse_result.code, sparse_result.message};
+                        }
+                        auto& changes = sparse_result.value_or_throw();
+                        sparse_term_info_changes.insert(
+                                sparse_term_info_changes.end(),
+                                std::make_move_iterator(changes.begin()),
+                                std::make_move_iterator(changes.end()));
+                    }
                 }
 
-                // Mark as deleted in HNSW index
-                entry.alg->markDelete(numeric_id);
+                std::vector<WriteAheadLog::WALEntry> wal_entries;
+                wal_entries.reserve(numeric_ids.size());
+                for(ndd::idInt numeric_id : numeric_ids) {
+                    wal_entries.push_back({WALOperationType::VECTOR_DELETE, numeric_id});
+                }
+                getOrCreateWAL(entry)->log(txn, wal_entries);
 
-                // Delete from sparse storage if hybrid index
-                if(entry.sparse_storage) {
-                    entry.sparse_storage->delete_vector(numeric_id);
+                rc = mdbx_txn_commit(txn);
+                txn = nullptr;
+                if(rc != MDBX_SUCCESS) {
+                    return {100, "Failed to commit shared delete transaction: "
+                                         + std::string(mdbx_strerror(rc))};
+                }
+
+                if(entry.sparse_storage && sparse_vector_count_delta != 0) {
+                    entry.sparse_storage->apply_vector_count_delta(sparse_vector_count_delta);
+                }
+
+                /*
+                 * Apply staged term_info_ mutations after the shared MDBX txn
+                 * has committed. See acid_regression_test.cpp for the abort
+                 * scenario this guards against.
+                 */
+                if(entry.sparse_storage && !sparse_term_info_changes.empty()) {
+                    entry.sparse_storage->apply_term_info_changes(sparse_term_info_changes);
+                }
+            } catch(const std::exception& e) {
+                abort_txn();
+                throw;
+            }
+
+            for(ndd::idInt numeric_id : numeric_ids) {
+                if(entry.alg->hasLabel(numeric_id) && !entry.alg->isLabelDeleted(numeric_id)) {
+                    entry.alg->markDelete(numeric_id);
                 }
             }
-            // Add the list to write ahead log using IndexManager's method
-            logDeletions(entry, numeric_ids);
 
             // Mark the index as dirty
             entry.markDirty();
@@ -1502,27 +1815,66 @@ public:
             std::unique_lock<std::shared_mutex> operation_lock(entry.operation_mutex);
 
             size_t updated_count = 0;
-            for(const auto& [str_id, new_filter] : updates) {
-                ndd::idInt numeric_id = entry.id_mapper->get_id(str_id);
-                if(numeric_id == 0) {
-                    LOG_DEBUG("updateFilters: ID not found: " << str_id);
-                    continue;
-                }
+            MDBX_txn* txn = nullptr;
+            int rc = mdbx_txn_begin(
+                    entry.vector_storage->shared_env(), nullptr, MDBX_TXN_READWRITE, &txn);
+            if(rc != MDBX_SUCCESS) {
+                return {100, "Failed to begin shared filter update transaction: "
+                                     + std::string(mdbx_strerror(rc))};
+            }
 
-                auto filter_result = entry.vector_storage->updateFilter(numeric_id, new_filter);
-                if(!filter_result.ok()) {
-                    if(filter_result.code < 100) {
-                        LOG_WARN(1215,
-                                 index_id,
-                                 "Update-filters rejected: " << filter_result.message);
-                    } else {
-                        LOG_ERROR(1218,
-                                  index_id,
-                                  "Update-filters failed: " << filter_result.message);
-                    }
-                    return {filter_result.code, filter_result.message};
+            auto abort_txn = [&txn, &entry]() {
+                if(txn) {
+                    mdbx_txn_abort(txn);
+                    txn = nullptr;
+                    entry.vector_storage->reload_filter_schema_cache();
                 }
-                updated_count++;
+            };
+
+            bool filter_schema_changed = false;
+            try {
+                for(const auto& [str_id, new_filter] : updates) {
+                    ndd::idInt numeric_id = entry.id_mapper->get_id(txn, str_id);
+                    if(numeric_id == 0) {
+                        LOG_DEBUG("updateFilters: ID not found: " << str_id);
+                        continue;
+                    }
+
+                    auto filter_result =
+                            entry.vector_storage->updateFilter(
+                                    txn, numeric_id, new_filter, &filter_schema_changed);
+                    if(!filter_result.ok()) {
+                        abort_txn();
+                        if(filter_result.code < 100) {
+                            LOG_WARN(1215,
+                                     index_id,
+                                     "Update-filters rejected: " << filter_result.message);
+                        } else {
+                            LOG_ERROR(1218,
+                                      index_id,
+                                      "Update-filters failed: " << filter_result.message);
+                        }
+                        return {filter_result.code, filter_result.message};
+                    }
+                    updated_count++;
+                }
+            } catch(const std::exception& e) {
+                abort_txn();
+                return {100, std::string("Failed to update filters: ") + e.what()};
+            }
+
+            rc = mdbx_txn_commit(txn);
+            txn = nullptr;
+            if(rc != MDBX_SUCCESS) {
+                entry.vector_storage->reload_filter_schema_cache();
+                return {100, "Failed to commit shared filter update transaction: "
+                                     + std::string(mdbx_strerror(rc))};
+            }
+            if(filter_schema_changed) {
+                auto schema_result = entry.vector_storage->reload_filter_schema_cache();
+                if(!schema_result.ok()) {
+                    return {schema_result.code, schema_result.message, updated_count};
+                }
             }
 
             if(updated_count > 0) {
@@ -1559,7 +1911,18 @@ public:
             // Use per-index operation mutex to prevent concurrent operations
             std::unique_lock<std::shared_mutex> operation_lock(entry.operation_mutex);
 
-            size_t numeric_id = entry.id_mapper->get_id(str_id);
+            size_t numeric_id = 0;
+            {
+                MDBX_txn* id_txn = nullptr;
+                int rc = mdbx_txn_begin(
+                        entry.id_mapper->get_env(), nullptr, MDBX_TXN_RDONLY, &id_txn);
+                if(rc != MDBX_SUCCESS) {
+                    return {100,
+                            std::string("Failed to begin id read txn: ") + mdbx_strerror(rc)};
+                }
+                numeric_id = entry.id_mapper->get_id(id_txn, str_id);
+                mdbx_txn_abort(id_txn);
+            }
             if(numeric_id == 0) {
                 return {SUCCESS, "", false};
             }
@@ -1595,11 +1958,11 @@ public:
      * 200-299 = propagated filter corruption/invariant failure; caller should return HTTP 500
      */
     ndd::OperationResult<std::vector<ndd::VectorResult>>
-    searchKNN(const std::string& index_id,
+    search(const std::string& index_id,
                 const std::vector<float>& query,
                 const std::vector<uint32_t>& sparse_indices,
                 const std::vector<float>& sparse_values,
-                size_t k,
+                size_t top_k,
                 const nlohmann::json& filter_array,
                 ndd::FilterParams params = {},
                 bool include_vectors = false,
@@ -1608,6 +1971,7 @@ public:
                 float kRrfRankConstant = settings::DEFAULT_RRF_RANK_CONSTANT)
     {
         const float kSparseRrfWeight = 1.0f - kDenseRrfWeight;
+        MDBX_txn* main_txn = nullptr;
         try {
             auto entry_ptr = getIndexEntry(index_id);
             auto& entry = *entry_ptr;
@@ -1620,23 +1984,93 @@ public:
             // std::shared_lock<std::shared_mutex> operation_lock(entry.operation_mutex);
 
             entry.searchCount += 1;
-            const bool run_dense_search = kDenseRrfWeight > 0.0f && !query.empty();
 
+            // ===== Sanity checks & parameter normalization =====
+            // top_k == 0 means the caller wants no results; skip all retrieval work.
+            if(top_k == 0) {
+                return {SUCCESS, "", std::vector<ndd::VectorResult>()};
+            }
+            /**
+             * The sparse leg pairs indices[i] with values[i]; a mismatch would read
+             * out of bounds at sparse query construction.
+             */
+            if(sparse_indices.size() != sparse_values.size()) {
+                return {1, "sparse_indices and sparse_values must have the same length"};
+            }
+
+            /**
+             * A dense query whose length does not match the index dimension would
+             * quantize into a too-small/large buffer; downstream HNSW distance
+             * routines still read `dim` elements from it and produce OOB reads
+             * with meaningless scores. Empty dense query stays legal so sparse-only
+             * search continues to work.
+             */
+            const size_t configured_dim_search = entry.alg->getDimension();
+            if(!query.empty() && query.size() != configured_dim_search) {
+                LOG_WARN(2055,
+                         index_id,
+                         "Search rejected: dense query dimension "
+                                 << query.size() << " does not match index dimension "
+                                 << configured_dim_search);
+                return {2,
+                        "query vector dimension " + std::to_string(query.size())
+                                + " does not match index dimension "
+                                + std::to_string(configured_dim_search)};
+            }
+
+            /**
+             * ef == 0 is the sentinel for "use the default"; normalize once here so the
+             * dense leg (filtered and unfiltered) sees the same value downstream.
+             */
+            if(ef == 0) {
+                ef = settings::DEFAULT_EF_SEARCH;
+            }
+
+            const bool run_dense_search = kDenseRrfWeight > 0.0f && !query.empty();
             const bool run_sparse_search =
                     kSparseRrfWeight > 0.0f && entry.sparse_storage && !sparse_indices.empty();
 
-            // Zero-weight sources cannot influence the final ranking, so skip their retrieval
-            // work entirely.
+            /**
+             * Zero-weight sources cannot influence the final ranking; if both legs would
+             * be skipped there is nothing to do.
+             */
             if(!run_dense_search && !run_sparse_search) {
                 return {SUCCESS, "", std::vector<ndd::VectorResult>()};
             }
+            // ===== End sanity checks =====
+
+            /**
+             * For shared-layout indexes, open one MDBX read transaction up front and
+             * thread it through filter bitmap, Strategy-A brute force, and result
+             * population so every MDBX read in this request observes the same
+             * committed snapshot. The async sparse leg cannot reuse this txn - MDBX
+             * read transactions are sticky-threaded (see docs/mdbx_shared_env_acid_revamp.md
+             * "Durability Flags") - so the sparse lambda opens its own txn on its
+             * own thread.
+             */
+            MDBX_env* shared_env_handle = entry.vector_storage->shared_env();
+            {
+                int rc = mdbx_txn_begin(
+                        shared_env_handle, nullptr, MDBX_TXN_RDONLY, &main_txn);
+                if(rc != MDBX_SUCCESS) {
+                    LOG_ERROR(2235,
+                              index_id,
+                              "Failed to begin shared search transaction: "
+                                      << mdbx_strerror(rc));
+                    return {100,
+                            std::string("Failed to begin shared search transaction: ")
+                                    + mdbx_strerror(rc)};
+                }
+            }
 
             // 0. Compute Filter Bitmap (Shared)
-            std::optional<ndd::RoaringBitmap> active_filter_bitmap;
-            if (!filter_array.empty()) {
-                auto filter_result =
-                        entry.vector_storage->filter_store_->computeFilterBitmap(filter_array);
+            ndd::RoaringBitmap active_filter_bitmap;
+            const ndd::RoaringBitmap* filter_ptr = nullptr;
+            if(!filter_array.empty()) {
+                auto filter_result = entry.vector_storage->filter_store_->computeFilterBitmap(
+                        main_txn, filter_array);
                 if(!filter_result.ok()) {
+                    mdbx_txn_abort(main_txn);
                     if(filter_result.code < 100) {
                         LOG_WARN(1220, index_id, "Search filter rejected: " << filter_result.message);
                     } else {
@@ -1647,124 +2081,111 @@ public:
                     return {filter_result.code, filter_result.message};
                 }
                 active_filter_bitmap = std::move(filter_result.value_or_throw());
+                filter_ptr = &active_filter_bitmap;
             }
-            const ndd::RoaringBitmap* filter_ptr =
-                    active_filter_bitmap ? &(*active_filter_bitmap) : nullptr;
 
             // 1. Sparse Search (Async)
             std::future<std::vector<std::pair<ndd::idInt, float>>> sparse_future;
             if(run_sparse_search) {
-                sparse_future = std::async(std::launch::async, [&, filter_ptr]() {
-                    ndd::SparseVector sparse_query;
+                sparse_future = std::async(std::launch::async, [&, filter_ptr, shared_env_handle]() {
 
-                    // Reuse the caller's ordering when it is already sorted so we do not copy
-                    // the same sparse payload into an extra temporary representation.
+                    ndd::SparseVector sparse_query;
                     if(std::is_sorted(sparse_indices.begin(), sparse_indices.end())) {
                         sparse_query.indices = sparse_indices;
                         sparse_query.values = sparse_values;
                     } else {
-                        std::vector<std::pair<uint32_t, float>> pairs;
-                        pairs.reserve(sparse_indices.size());
+                        std::vector<std::pair<uint32_t, float>> pairs(sparse_indices.size());
                         for(size_t i = 0; i < sparse_indices.size(); ++i) {
-                            pairs.emplace_back(sparse_indices[i], sparse_values[i]);
+                            pairs[i] = {sparse_indices[i], sparse_values[i]};
                         }
-                        std::sort(pairs.begin(), pairs.end(), [](const auto& a, const auto& b) {
-                            return a.first < b.first;
-                        });
-
-                        sparse_query.indices.resize(pairs.size());
-                        sparse_query.values.resize(pairs.size());
-                        for(size_t i = 0; i < pairs.size(); ++i) {
-                            sparse_query.indices[i] = pairs[i].first;
-                            sparse_query.values[i] = pairs[i].second;
+                        std::sort(pairs.begin(), pairs.end());
+                        sparse_query.indices.reserve(pairs.size());
+                        sparse_query.values.reserve(pairs.size());
+                        for(const auto& [idx, val] : pairs) {
+                            sparse_query.indices.push_back(idx);
+                            sparse_query.values.push_back(val);
                         }
                     }
 
-                    return entry.sparse_storage->search(sparse_query, k, filter_ptr);
+                    MDBX_txn* sparse_txn = nullptr;
+                    int rc = mdbx_txn_begin(
+                            shared_env_handle, nullptr, MDBX_TXN_RDONLY, &sparse_txn);
+                    if(rc != MDBX_SUCCESS) {
+                        LOG_ERROR(2236,
+                                  index_id,
+                                  "Failed to begin sparse search transaction: "
+                                          << mdbx_strerror(rc));
+                        return std::vector<std::pair<ndd::idInt, float>>();
+                    }
+
+                    std::vector<std::pair<ndd::idInt, float>> sparse_results;
+                    try {
+                        sparse_results = entry.sparse_storage->search(
+                                sparse_txn, sparse_query, top_k, filter_ptr);
+                    } catch(...) {
+                        mdbx_txn_abort(sparse_txn);
+                        throw;
+                    }
+                    mdbx_txn_abort(sparse_txn);
+                    return sparse_results;
                 });
             }
 
             // 2. Dense Search (Main Thread)
             std::vector<std::pair<float, ndd::idInt>> dense_results;
             if(run_dense_search) {
-                // Convert query to bytes using the wrapper method
-                ndd::quant::QuantizationLevel quant_level = entry.alg->getQuantLevel();
-                auto space = entry.alg->getSpace();
                 std::vector<uint8_t> query_bytes =
-                        ndd::quant::get_quantizer_dispatch(quant_level).quantize(query);
+                        ndd::quant::get_quantizer_dispatch(entry.alg->getQuantLevel())
+                                .quantize(query);
 
-                if(!filter_ptr) {
-                    dense_results = entry.alg->searchKnn(query_bytes.data(), k, ef);
-                } else {
-                    // Smart Filter Execution Strategy
+                /**
+                 * Dense dispatch:
+                 *   - No filter, or filter cardinality is large enough that the postfilter cost
+                 *     beats prefilter materialization → HNSW searchKnn (functor optional).
+                 *   - Filter exists, cardinality in (0, threshold) → prefilter brute force.
+                 *   - Filter exists, cardinality == 0 → skip the work since it is not going to
+                 *     do any good. No vector can satisfy an empty filter, so dense_results stays
+                 *     empty.
+                 */
+                if(!filter_ptr || filter_ptr->cardinality() >= params.prefilter_threshold) {
+                    std::optional<BitMapFilterFunctor> functor;
+                    if(filter_ptr) {
+                        functor.emplace(*filter_ptr);
+                    }
+                    dense_results = entry.alg->searchKnn(
+                            query_bytes.data(), top_k, ef,
+                            functor ? &*functor : nullptr,
+                            filter_ptr ? params.boost_percentage : settings::FILTER_BOOST_PERCENTAGE,
+                            main_txn);
+                } else if(filter_ptr->cardinality() > 0) {
+                    // Prefilter brute force on the small filtered subset.
                     const auto& bitmap = *filter_ptr;
-                    size_t card = bitmap.cardinality();
+                    std::vector<ndd::idInt> valid_ids(bitmap.cardinality());
+                    bitmap.toUint32Array(valid_ids.data());
 
-                    if (card == 0) {
-                        // No results match filter
-                    } else if (card < params.prefilter_threshold) {
-                        // Strategy A: Brute Force on Small Subset
-                        std::vector<ndd::idInt> valid_ids;
-                        {
-                            valid_ids.reserve(card);
-                            bitmap.iterate(
-                                    [](ndd::idInt id, void* ptr) {
-                                        static_cast<std::vector<ndd::idInt>*>(ptr)->push_back(id);
-                                        return true;
-                                    },
-                                    &valid_ids);
-                        }
+                    auto* space = entry.alg->getSpace();
+                    auto distance_func = space->get_dist_func();
+                    void* dist_func_param = space->get_dist_func_param();
+                    std::priority_queue<std::pair<float, ndd::idInt>> top_results;
 
-                        {
-                            auto distance_func = space->get_dist_func();
-                            void* dist_func_param = space->get_dist_func_param();
-                            std::priority_queue<std::pair<float, ndd::idInt>> top_results;
+                    entry.vector_storage->visit_vectors_by_ids(
+                            main_txn, valid_ids,
+                            [&](ndd::idInt numeric_id, const void* vector_data) {
+                                float distance = distance_func(query_bytes.data(),
+                                                               vector_data,
+                                                               dist_func_param);
+                                if(top_results.size() < top_k) {
+                                    top_results.emplace(distance, numeric_id);
+                                } else if(distance < top_results.top().first) {
+                                    top_results.pop();
+                                    top_results.emplace(distance, numeric_id);
+                                }
+                            });
 
-                            if(k > 0) {
-                                entry.vector_storage->visit_vectors_by_ids(
-                                        valid_ids,
-                                        [&](ndd::idInt numeric_id, const void* vector_data) {
-                                            float distance = distance_func(query_bytes.data(),
-                                                                           vector_data,
-                                                                           dist_func_param);
-
-                                            if(top_results.size() < k) {
-                                                top_results.emplace(distance, numeric_id);
-                                            } else if(distance < top_results.top().first) {
-                                                top_results.pop();
-                                                top_results.emplace(distance, numeric_id);
-                                            }
-                                        });
-                            }
-
-                            dense_results.reserve(top_results.size());
-                            while(!top_results.empty()) {
-                                dense_results.push_back(top_results.top());
-                                top_results.pop();
-                            }
-                            std::reverse(dense_results.begin(), dense_results.end());
-                        }
-
-                    } else {
-                        // Strategy B: Filtered HNSW Search
-                        BitMapFilterFunctor functor(bitmap);
-                        size_t effective_ef = ef > 0 ? ef : settings::DEFAULT_EF_SEARCH;
-
-                        // Try to use optimized templated search if algorithm matches
-                        auto* hnsw_alg = dynamic_cast<hnswlib::HierarchicalNSW<float>*>(entry.alg.get());
-                        if (hnsw_alg) {
-                            dense_results = hnsw_alg->searchKnn(query_bytes.data(),
-                                                                k,
-                                                                effective_ef,
-                                                                &functor,
-                                                                params.boost_percentage);
-                        } else {
-                            dense_results = entry.alg->searchKnn(query_bytes.data(),
-                                                                    k,
-                                                                    effective_ef,
-                                                                    &functor,
-                                                                    params.boost_percentage);
-                        }
+                    dense_results.resize(top_results.size());
+                    for(auto it = dense_results.rbegin(); it != dense_results.rend(); ++it) {
+                        *it = top_results.top();
+                        top_results.pop();
                     }
                 }
             }
@@ -1779,6 +2200,9 @@ public:
             std::vector<std::pair<float, ndd::idInt>> final_candidates;
 
             if(dense_results.empty() && sparse_results.empty()) {
+                if(main_txn) {
+                    mdbx_txn_abort(main_txn);
+                }
                 return {SUCCESS, "", std::vector<ndd::VectorResult>()};
             } else if(sparse_results.empty()) {
                 // Only dense results
@@ -1797,8 +2221,10 @@ public:
                 std::unordered_map<ndd::idInt, float> combined_scores;
                 combined_scores.reserve(dense_results.size() + sparse_results.size());
 
-                // Reuse the dense and sparse result buffers directly so hybrid fusion does not
-                // build another copied view of the same ranked lists.
+                /**
+                 * Reuse the dense and sparse result buffers directly so hybrid fusion does not
+                 * build another copied view of the same ranked lists.
+                 */
                 auto add_weighted_rrf_scores = [&](const auto& ranked_results,
                                                     float weight,
                                                     auto extract_id){
@@ -1829,19 +2255,26 @@ public:
             }
 
             std::vector<ndd::VectorResult> results;
-            results.reserve(final_candidates.size());
+            results.reserve(std::min(top_k, final_candidates.size()));
             LOG_DEBUG("Search results size: " << final_candidates.size());
 
-            // Postfilter strategy:
-            //   Every code path that feeds final_candidates already enforces filter_ptr:
-            //     - Filtered HNSW search drops ids via BitMapFilterFunctor (filter.hpp).
-            //     - Prefilter brute-force only iterates ids drawn from the bitmap.
-            //     - Sparse search drops non-matching ids inside its scoring phase
-            //       (inverted_index.cpp).
-            //   So on the dense-only path the per-result contains() check is dead and
-            //   we skip it. On the hybrid path we keep it as defense-in-depth in case
-            //   sparse search ever stops honoring the filter; either way the check now
-            //   runs before get_meta() so a (defensive) reject does not pay an MDBX read.
+            // Loop-invariants for the include_vectors dequantization path.
+            const auto quant_level = entry.alg->getQuantLevel();
+            const auto quant_dispatch = ndd::quant::get_quantizer_dispatch(quant_level);
+            const size_t vec_dim = entry.alg->getDimension();
+
+            /**
+             * Postfilter strategy:
+             *   Every code path that feeds final_candidates already enforces filter_ptr:
+             *     - Filtered HNSW search drops ids via BitMapFilterFunctor (filter.hpp).
+             *     - Prefilter brute-force only iterates ids drawn from the bitmap.
+             *     - Sparse search drops non-matching ids inside its scoring phase
+             *       (inverted_index.cpp).
+             *   So on the dense-only path the per-result contains() check is dead and
+             *   we skip it. On the hybrid path we keep it as a safety check in case
+             *   sparse search ever stops honoring the filter; either way the check now
+             *   runs before get_meta() so a (defensive) reject does not pay an MDBX read.
+             */
             const bool postfilter_active = filter_ptr != nullptr && run_sparse_search;
             size_t postfilter_drops = 0;
             size_t filtered_count = 0;
@@ -1851,24 +2284,36 @@ public:
                     continue;
                 }
 
-                ndd::VectorMeta meta = entry.vector_storage->get_meta(p.second);
+                auto meta_result = entry.vector_storage->get_meta(main_txn, p.second);
+                if(!meta_result.ok()) {
+                    if(meta_result.code == 101) {
+                        // Meta missing for a candidate id: skip that row.
+                        continue;
+                    }
+                    if(main_txn) {
+                        mdbx_txn_abort(main_txn);
+                        main_txn = nullptr;
+                    }
+                    LOG_ERROR(2059,
+                              entry.index_id,
+                              "Populating results: meta read failed for id "
+                                      << p.second << ": " << meta_result.message);
+                    return {meta_result.code, meta_result.message};
+                }
+                auto& meta = *meta_result.value;
 
                 ndd::VectorResult result;
-                result.id = meta.id;
-                result.filter = meta.filter;
-                result.meta = meta.meta;
+                result.id = std::move(meta.id);
+                result.filter = std::move(meta.filter);
+                result.meta = std::move(meta.meta);
                 result.similarity = p.first;
-
                 result.norm = meta.norm;
 
                 if(include_vectors) {
-                    std::vector<uint8_t> vec_bytes = entry.vector_storage->get_vector(p.second);
-                    if(!vec_bytes.empty()) {
-                        ndd::quant::QuantizationLevel quant_level = entry.alg->getQuantLevel();
-                        std::vector<float> float_data =
-                                ndd::quant::get_quantizer_dispatch(quant_level)
-                                        .dequantize(vec_bytes.data(), entry.alg->getDimension());
-                        result.vector = std::move(float_data);
+                    auto vec_result = entry.vector_storage->get_vector(main_txn, p.second);
+                    if(vec_result.ok() && !vec_result.value->empty()) {
+                        result.vector = quant_dispatch.dequantize(
+                                vec_result.value->data(), vec_dim);
                     }
                 }
 
@@ -1876,26 +2321,34 @@ public:
                 filtered_count++;
 
                 // Early exit when we have enough results
-                if(filtered_count >= k) {
+                if(filtered_count >= top_k) {
                     break;
                 }
             }
 
-            // Ensure we don't return more than k results
-            if(results.size() > k) {
-                results.resize(k);
+            // Ensure we don't return more than top_k results
+            if(results.size() > top_k) {
+                results.resize(top_k);
             }
 
-            // A drop here means an upstream filter step failed to honor filter_ptr.
-            // Log once per request rather than per-result to respect the hot-loop rule.
+            /**
+             * A drop here means an upstream filter step failed to honor filter_ptr.
+             * Log once per request rather than per-result to respect the hot-loop rule.
+             */
             if(postfilter_drops > 0) {
                 LOG_WARN(1222,
                          index_id,
                          "Postfilter dropped " << postfilter_drops
                                                << " ids that bypassed upstream filter checks");
             }
+            if(main_txn) {
+                mdbx_txn_abort(main_txn);
+            }
             return {SUCCESS, "", std::move(results)};
         } catch(const std::exception& e) {
+            if(main_txn) {
+                mdbx_txn_abort(main_txn);
+            }
             LOG_ERROR(2039, index_id, "Search failed: " << e.what());
             return {100, std::string("Search failed: ") + e.what()};
         }
@@ -1986,9 +2439,17 @@ public:
                                             entry_ptr->alg->getEfConstruction()};
         }
 
+        if(std::filesystem::exists(std::filesystem::path(data_dir_) / index_id
+                                   / settings::INDEX_MIGRATION_MARKER)) {
+            throw std::runtime_error(settings::INCOMPLETE_INDEX_MIGRATION_ERROR);
+        }
+
         auto metadata = metadata_manager_->getMetadata(index_id);
         if(!metadata) {
             return std::nullopt;
+        }
+        if(metadata->layout_version != settings::INDEX_LAYOUT_VERSION) {
+            throw std::runtime_error(settings::indexLayoutError(metadata->layout_version));
         }
 
         return std::optional<IndexInfo>{std::in_place,
@@ -2000,60 +2461,6 @@ public:
                                         metadata->checksum,
                                         metadata->M,
                                         metadata->ef_con};
-    }
-
-    // Method to log vector additions with both numeric and string IDs
-    void logInsertsAndUpdates(CacheEntry& entry,
-                              const std::vector<std::pair<idInt, bool>>& numeric_ids) {
-        WriteAheadLog* wal = getOrCreateWAL(entry);
-
-        // Create WAL entries for each vector addition
-        std::vector<WriteAheadLog::WALEntry> entries;
-        entries.reserve(numeric_ids.size());
-
-        for(size_t i = 0; i < numeric_ids.size(); i++) {
-            if(numeric_ids[i].second) {
-                entries.push_back({
-                        WALOperationType::VECTOR_ADD,
-                        numeric_ids[i].first,
-                });
-            } else {
-                entries.push_back({
-                        WALOperationType::VECTOR_UPDATE,
-                        numeric_ids[i].first,
-                });
-            }
-        }
-
-        // Log the entries
-        wal->log(entries);
-
-        // FIX: Don't call saveIndex here to avoid circular lock
-        // The calling function (addVectors) already holds operation_mutex
-        // and will call save at appropriate time
-    }
-
-    // Method to log vector deletions (only numeric IDs needed)
-    void logDeletions(CacheEntry& entry, const std::vector<idInt>& numeric_ids) {
-        WriteAheadLog* wal = getOrCreateWAL(entry);
-
-        // Create WAL entries for each vector deletion
-        std::vector<WriteAheadLog::WALEntry> entries;
-        entries.reserve(numeric_ids.size());
-
-        for(size_t i = 0; i < numeric_ids.size(); i++) {
-            entries.push_back({
-                    WALOperationType::VECTOR_DELETE,
-                    numeric_ids[i],
-            });
-        }
-
-        // Log the entries
-        wal->log(entries);
-
-        // FIX: Don't call saveIndex here to avoid circular lock
-        // The calling function already holds operation_mutex
-        // and will call save at appropriate time
     }
 
     // ========== Backup operations ==========
@@ -2150,6 +2557,7 @@ inline void IndexManager::executeBackupJob(const std::string& index_id, const st
                             ndd::sparseScoringModelToString(meta->sparse_model)},
                            {"space_type", meta->space_type_str},
                            {"quant_level", static_cast<int>(meta->quant_level)},
+                           {"layout_version", meta->layout_version},
                            {"total_elements", meta->total_elements},
                            {"checksum", meta->checksum}};
             LOG_DEBUG("Metadata prepared for backup: " << metadata_json.dump());
@@ -2165,8 +2573,17 @@ inline void IndexManager::executeBackupJob(const std::string& index_id, const st
             return;
         }
 
-        auto entry_ptr = getIndexEntry(index_id);
-        auto& entry = *entry_ptr;
+        const bool legacy_layout = meta->layout_version != settings::INDEX_LAYOUT_VERSION;
+        std::shared_ptr<CacheEntry> entry_ptr;
+        if(!legacy_layout) {
+            entry_ptr = getIndexEntry(index_id);
+        } else {
+            LOG_INFO(2042,
+                     index_id,
+                     "Creating raw backup for legacy index layout version "
+                             << meta->layout_version);
+        }
+
         std::string metadata_file_in_index = source_dir + "/metadata.json";
         {
             /**
@@ -2177,7 +2594,10 @@ inline void IndexManager::executeBackupJob(const std::string& index_id, const st
              * This is to enable reads while writes are happening on the index.
              * Check other instances of shared_lock on operation_mutex.
              */
-            std::unique_lock<std::shared_mutex> operation_lock(entry.operation_mutex);
+            std::unique_lock<std::shared_mutex> operation_lock;
+            if(entry_ptr) {
+                operation_lock = std::unique_lock<std::shared_mutex>(entry_ptr->operation_mutex);
+            }
 
             // Check again after acquiring lock (shutdown may have been requested while waiting)
             if (st.stop_requested()) {
@@ -2186,7 +2606,9 @@ inline void IndexManager::executeBackupJob(const std::string& index_id, const st
                 return;
             }
 
-            saveIndexInternal(entry);
+            if(entry_ptr) {
+                saveIndexInternal(*entry_ptr);
+            }
 
             if(!metadata_json.empty()) {
                 std::ofstream meta_file(metadata_file_in_index, std::ios::binary);
@@ -2273,6 +2695,7 @@ inline std::pair<bool, std::string> IndexManager::restoreBackup(const std::strin
     std::string backup_extract_dir = user_temp_dir + "/" + backup_name;
     std::string target_index_id = username + "/" + target_index_name;
     std::string target_dir = data_dir_ + "/" + target_index_id;
+    std::string target_temp_dir = user_temp_dir + "/.restore_" + target_index_name;
 
     if(!std::filesystem::exists(backup_tar)) {
         return {false, "Backup not found: " + backup_name};
@@ -2280,6 +2703,35 @@ inline std::pair<bool, std::string> IndexManager::restoreBackup(const std::strin
 
     if(metadata_manager_->getMetadata(target_index_id).has_value()) {
         return {false, "Target index already exists"};
+    }
+    if(std::filesystem::exists(target_dir)) {
+        return {false, "Target index directory already exists"};
+    }
+    std::filesystem::remove_all(target_temp_dir);
+
+    /**
+     * Scan-first: read metadata.json directly out of the tar stream and check
+     * its layout_version before extracting anything. A v0 backup tar can be
+     * tens of GB; the old order (extract -> read metadata -> reject) wrote the
+     * whole payload to disk just to throw it away.
+     */
+    {
+        nlohmann::json scanned_meta = backup_store_.readMetadataJsonFromTar(backup_tar);
+        const uint32_t scanned_layout_version =
+                scanned_meta.is_object() && scanned_meta.contains("params")
+                        ? scanned_meta["params"].value("layout_version",
+                                                       settings::LEGACY_INDEX_LAYOUT_VERSION)
+                        : settings::LEGACY_INDEX_LAYOUT_VERSION;
+        if(scanned_layout_version > settings::INDEX_LAYOUT_VERSION) {
+            return {false, "Failed to restore backup: " + settings::NEWER_INDEX_LAYOUT_ERROR};
+        }
+        if(scanned_layout_version != settings::INDEX_LAYOUT_VERSION) {
+            return {false, "Failed to restore backup: "
+                                   + settings::LEGACY_INDEX_LAYOUT_ERROR
+                                   + " Run `ndd-migrate-v0-to-v2 from-backup --backup <tar> --out-dir <dir>` "
+                                     "(or `ndd-migrate-v0-to-v2 in-place` against a live index folder) "
+                                     "before restoring."};
+        }
     }
 
     std::string error_msg;
@@ -2309,13 +2761,36 @@ inline std::pair<bool, std::string> IndexManager::restoreBackup(const std::strin
         }
         nlohmann::json meta_json = nlohmann::json::parse(f);
 
-        std::filesystem::create_directories(target_dir);
-        std::filesystem::copy(backup_dir,
-                              target_dir,
-                              std::filesystem::copy_options::recursive
-                                      | std::filesystem::copy_options::overwrite_existing);
-
-        std::filesystem::remove(target_dir + "/metadata.json");
+        const uint32_t backup_layout_version =
+                meta_json["params"].value("layout_version",
+                                          settings::LEGACY_INDEX_LAYOUT_VERSION);
+        if(backup_layout_version > settings::INDEX_LAYOUT_VERSION) {
+            throw std::runtime_error(settings::NEWER_INDEX_LAYOUT_ERROR);
+        }
+        if(backup_layout_version != settings::INDEX_LAYOUT_VERSION) {
+            throw std::runtime_error(
+                    settings::LEGACY_INDEX_LAYOUT_ERROR
+                    + " Run `ndd-migrate-v0-to-v2 from-backup --backup <tar> --out-dir <dir>` "
+                      "(or `ndd-migrate-v0-to-v2 in-place` against a live index folder) "
+                      "before restoring.");
+        }
+        std::filesystem::create_directories(target_temp_dir);
+        for(const auto& entry : std::filesystem::directory_iterator(backup_dir)) {
+            std::filesystem::copy(entry.path(),
+                                  std::filesystem::path(target_temp_dir) / entry.path().filename(),
+                                  std::filesystem::copy_options::recursive
+                                          | std::filesystem::copy_options::overwrite_existing);
+        }
+        std::error_code copy_ec;
+        std::filesystem::remove(std::filesystem::path(target_temp_dir) / "metadata.json", copy_ec);
+        {
+            ndd::storage::SharedIndexEnv restored_env(target_temp_dir + "/vectors");
+            const uint32_t on_disk_version =
+                    ndd::storage::SharedIndexEnv::read_layout_version(restored_env.get());
+            if(on_disk_version != settings::INDEX_LAYOUT_VERSION) {
+                throw std::runtime_error(settings::indexLayoutError(on_disk_version));
+            }
+        }
 
         IndexMetadata new_meta;
         new_meta.name = target_index_name;
@@ -2327,12 +2802,22 @@ inline std::pair<bool, std::string> IndexManager::restoreBackup(const std::strin
                 meta_json["params"]["quant_level"].get<int>());
         const auto sparse_model = ndd::sparseScoringModelFromString(
                 meta_json["params"]["sparse_model"].get<std::string>());
+        if(!sparse_model.has_value()) {
+            throw std::runtime_error("Backup metadata has invalid sparse_model");
+        }
         new_meta.sparse_model = *sparse_model;
         new_meta.created_at = std::chrono::system_clock::now();
         new_meta.total_elements = meta_json["params"].value("total_elements", 0ul);
         new_meta.checksum = meta_json["params"].value("checksum", -1);
+        new_meta.layout_version = settings::INDEX_LAYOUT_VERSION;
 
-        metadata_manager_->storeMetadata(target_index_id, new_meta);
+        std::filesystem::create_directories(std::filesystem::path(target_dir).parent_path());
+        std::filesystem::rename(target_temp_dir, target_dir);
+
+        if(!metadata_manager_->storeMetadata(target_index_id, new_meta)) {
+            std::filesystem::remove_all(target_dir);
+            throw std::runtime_error("Failed to store restored index metadata");
+        }
 
         std::filesystem::remove_all(backup_extract_dir);
 
@@ -2344,6 +2829,9 @@ inline std::pair<bool, std::string> IndexManager::restoreBackup(const std::strin
         LOG_INFO(2045, username, target_index_name, "Restored backup from " << backup_tar);
         return {true, ""};
     } catch(const std::exception& e) {
+        metadata_manager_->deleteMetadata(target_index_id);
+        std::filesystem::remove_all(target_temp_dir);
+        std::filesystem::remove_all(target_dir);
         std::filesystem::remove_all(backup_extract_dir);
         return {false, "Failed to restore backup: " + std::string(e.what())};
     }
@@ -2410,34 +2898,7 @@ inline std::pair<bool, std::string> IndexManager::uploadBackup(const std::string
         return {false, "Failed to write backup file"};
     }
 
-    nlohmann::json backup_json;
-
-    // Read the metadata.json from the tar file
-    {
-        struct archive* a = archive_read_new();
-        archive_read_support_format_all(a);
-        archive_read_support_filter_all(a);
-
-        if (archive_read_open_filename(a, backup_path.c_str(), 10240) == ARCHIVE_OK) {
-            struct archive_entry* entry;
-            while (archive_read_next_header(a, &entry) == ARCHIVE_OK) {
-                std::string_view path = archive_entry_pathname(entry);
-                if (path.ends_with("metadata.json")) {
-                    std::string content;
-                    char buf[4096];
-                    la_ssize_t n;
-                    while ((n = archive_read_data(a, buf, sizeof(buf))) > 0)
-                        content.append(buf, n);
-                    try {
-                        backup_json = nlohmann::json::parse(content);
-                    } catch (...) {}
-                    break;
-                }
-                archive_read_data_skip(a);
-            }
-        }
-        archive_read_free(a);
-    }
+    nlohmann::json backup_json = backup_store_.readMetadataJsonFromTar(backup_path);
 
     nlohmann::json backup_db = backup_store_.readBackupJson(username);
     backup_db[backup_name] = backup_json;

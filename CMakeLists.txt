@@ -398,6 +398,33 @@ install(TARGETS ${NDD_BINARY_NAME} RUNTIME DESTINATION bin)
 
 
 # =======================
+# ndd-migrate-v0-to-v2: standalone legacy-layout migrator
+# =======================
+add_executable(ndd-migrate-v0-to-v2
+    src/tools/ndd_migrate_main.cpp
+    ${LMDB_SOURCES}
+)
+
+target_include_directories(ndd-migrate-v0-to-v2 PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/storage
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/utils
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party
+    ${LMDB_INCLUDE_DIR}
+)
+
+target_compile_definitions(ndd-migrate-v0-to-v2 PRIVATE MDB_MAXKEYSIZE=512)
+
+target_link_libraries(ndd-migrate-v0-to-v2 PRIVATE
+    Threads::Threads
+    archive_static
+)
+
+install(TARGETS ndd-migrate-v0-to-v2 RUNTIME DESTINATION bin)
+
+
+# =======================
 # Testing
 # =======================
 option(ENABLE_TESTING "Enable building tests" OFF)

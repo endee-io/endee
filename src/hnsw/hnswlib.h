@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../core/types.hpp"
+#include "mdbx/mdbx.h"
 
 // https://github.com/nmslib/hnswlib/pull/508
 // This allows others to provide their own error stream (e.g. RcppHNSW)
@@ -229,7 +230,10 @@ namespace hnswlib {
         //virtual void addPoint(const void *datapoint, ndd::idInt label) = 0;
 
         virtual std::vector<std::pair<dist_t, ndd::idInt>>
-        searchKnn(const void*, size_t, size_t, BaseFilterFunctor* isIdAllowed = nullptr, size_t filter_boost_percentage = settings::FILTER_BOOST_PERCENTAGE) const = 0;
+        searchKnn(const void*, size_t, size_t,
+                  BaseFilterFunctor* isIdAllowed = nullptr,
+                  size_t filter_boost_percentage = settings::FILTER_BOOST_PERCENTAGE,
+                  MDBX_txn* read_txn = nullptr) const = 0;
 
         virtual void saveIndex(const std::string& location) = 0;
         virtual ~AlgorithmInterface() {}

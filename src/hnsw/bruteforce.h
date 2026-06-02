@@ -5,6 +5,21 @@
 #include <algorithm>
 #include <assert.h>
 
+/**
+ * UNUSED in this codebase as of 2026-06-01.
+ *
+ * Neither `BruteforceSearch` nor `searchKnnSubset` has any caller:
+ *   - `CacheEntry::alg` (src/core/ndd.hpp) is statically typed
+ *     `unique_ptr<HierarchicalNSW<float>>`, so BruteforceSearch cannot be
+ *     held by an index at all.
+ *   - No `IndexConfig` field, HTTP route, or library entry point exposes
+ *     an algorithm selector to the caller.
+ *
+ * Retained as a reference implementation. If you wire it up, you will
+ * also need to retype `CacheEntry::alg` to
+ * `unique_ptr<hnswlib::AlgorithmInterface<float>>` and add a selector
+ * to `IndexConfig` and the create-index handler.
+ */
 namespace hnswlib {
     template <typename dist_t> class BruteforceSearch : public AlgorithmInterface<dist_t> {
     public:

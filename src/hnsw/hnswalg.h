@@ -6,6 +6,7 @@
 #include "log.hpp"
 #include "../utils/settings.hpp"
 #include "../quant/dispatch.hpp"
+#include "mdbx/mdbx.h"
 #include <atomic>
 #include <random>
 #include <stdlib.h>
@@ -43,11 +44,29 @@ namespace hnswlib {
         using min_heap_pq = std::priority_queue<distance_type,
                                                 std::vector<distance_type>,
                                                 CompareBySecond<distance_type>>;
-        using VectorFetcher = std::function<bool(idInt, uint8_t*)>;
-        // Batch fetcher: fetches multiple vectors in one MDBX txn
-        // Args: labels array, output buffers (flat, count*vector_size), success flags, count
-        // Returns: number of successful fetches
-        using VectorFetcherBatch = std::function<size_t(const idInt*, uint8_t*, bool*, size_t)>;
+        /**
+         * Per-node fetcher called by HNSW's graph traversal when a
+         * vector is not in the in-memory cache. The MDBX read
+         * transaction is owned by the request (`searchKnn` entry); this
+         * closure reads through it so all hops observe one snapshot and
+         * MDBX sticky-thread mode is not violated by a nested
+         * `mdbx_txn_begin` on the same thread.
+         *
+         * Signature kept on `bool` (not `OperationResult`) - this is
+         * the sub-µs hot path; `false` means "miss / unavailable" and
+         * HNSW will skip the node.
+         */
+        using VectorFetcher =
+                std::function<bool(MDBX_txn*, idInt, uint8_t*)>;
+        /**
+         * Batch fetcher: same contract as VectorFetcher, but resolves
+         * multiple cache misses in one MDBX read.
+         * Args: txn, labels, output buffers (flat, count*vector_size),
+         * success flags, count. Returns the number of successful
+         * fetches.
+         */
+        using VectorFetcherBatch =
+                std::function<size_t(MDBX_txn*, const idInt*, uint8_t*, bool*, size_t)>;
         using SimBatchFunc = void (*)(const void* query,
                           const void* const* vectors,
                           size_t count,
@@ -196,13 +215,25 @@ namespace hnswlib {
         // Cache management getters/setters
         // Removed as cache is managed externally
 
+        /**
+         * Searches the index for the k nearest neighbors of query_data.
+         *
+         * read_txn: optional caller-owned MDBX read transaction. When
+         * non-null, every cache miss during traversal reads through
+         * this snapshot - so the result is consistent and MDBX
+         * sticky-thread mode is not violated by a nested
+         * `mdbx_txn_begin` on the same thread. When null, the fetcher
+         * closure falls back to opening its own RDONLY (used by the
+         * write path and any caller that does not hold a snapshot).
+         */
         template <typename FilterFunctor>
         std::vector<std::pair<dist_t, idInt>>
         searchKnn(const void* query_data,
                   size_t k,
                   size_t ef,
                   FilterFunctor* isIdAllowed,
-                  size_t filter_boost_percentage = settings::FILTER_BOOST_PERCENTAGE) const { // Default true as requested
+                  size_t filter_boost_percentage = settings::FILTER_BOOST_PERCENTAGE,
+                  MDBX_txn* read_txn = nullptr) const {
             LOG_DEBUG("Inside searchKnn, element count: " << curElementsCount_);
             std::vector<std::pair<dist_t, idInt>> result;
             if(curElementsCount_ == 0) {
@@ -291,10 +322,12 @@ namespace hnswlib {
             LOG_DEBUG("Starting search in level 0..");
             if(deletedElementsCount_) {
                 top_candidates = searchBaseLayer<false, true, FilterFunctor>(
-                        entry_points, query_data, 0, std::max(ef, k), isIdAllowed, filter_boost_percentage);  // Level 0 for final search
+                        entry_points, query_data, 0, std::max(ef, k),
+                        isIdAllowed, filter_boost_percentage, read_txn);
             } else {
                 top_candidates = searchBaseLayer<false, false, FilterFunctor>(
-                        entry_points, query_data, 0, std::max(ef, k), isIdAllowed, filter_boost_percentage);  // Level 0 for final search
+                        entry_points, query_data, 0, std::max(ef, k),
+                        isIdAllowed, filter_boost_percentage, read_txn);
             }
             LOG_DEBUG("Search in level 0 completed. Found " << top_candidates.size()
                                                             << " candidates");
@@ -312,11 +345,14 @@ namespace hnswlib {
                   size_t k,
                   size_t ef,
                   BaseFilterFunctor* isIdAllowed = nullptr,
-                  size_t filter_boost_percentage = settings::FILTER_BOOST_PERCENTAGE) const override {
+                  size_t filter_boost_percentage = settings::FILTER_BOOST_PERCENTAGE,
+                  MDBX_txn* read_txn = nullptr) const override {
             if (isIdAllowed) {
-                 return searchKnn<BaseFilterFunctor>(query_data, k, ef, isIdAllowed, filter_boost_percentage);
+                 return searchKnn<BaseFilterFunctor>(
+                        query_data, k, ef, isIdAllowed, filter_boost_percentage, read_txn);
             } else {
-                 return searchKnn<void>(query_data, k, ef, nullptr, filter_boost_percentage);
+                 return searchKnn<void>(
+                        query_data, k, ef, nullptr, filter_boost_percentage, read_txn);
             }
         }
 
@@ -465,8 +501,17 @@ namespace hnswlib {
                                              + " exceeds maxElements_ = "
                                              + std::to_string(maxElements_));
                 }
+                // Skip deleted slots: their external label is stale (the numeric_id
+                // may already have been reused by a later live slot), and routing
+                // future lookups through a deleted slot is what produced the
+                // HNSW-recovery-loses-labels bug. The slot itself stays loaded
+                // (it occupies space in dataBaseLayer_) and is reachable via
+                // direct internal-id access; it just isn't registered as the
+                // owner of any external label.
+                if(isMarkedDeleted(static_cast<idhInt>(i))) {
+                    continue;
+                }
                 labelLookup_[label] = i;
-                //labelLookup_[getExternalLabel(i)] = i;
             }
 
             dataUpperLayer_.resize(maxElements_);
@@ -717,12 +762,32 @@ namespace hnswlib {
                 throw std::runtime_error("Label not found");
             }
             markDeletedInternal(searchId);
+            // Drop the external->internal mapping for this label. A future insert
+            // that reuses this numeric_id will be a fresh add (addPoint<true>),
+            // not a rewire of the deleted slot. The slot itself stays in
+            // dataBaseLayer_ with its DELETE_MARK; loadIndex skips deleted slots
+            // when rebuilding labelLookup_, so the invariant survives save+load.
+            labelLookup_[label] = INVALID_ID;
         }
 
         inline bool isMarkedDeleted(idhInt internal_id) const {
             const flagInt* flags = reinterpret_cast<const flagInt*>(get_linklist0(internal_id)
                                                                     + sizeLinksBaseLayer_);
             return (*flags & DELETE_MARK) != 0;
+        }
+
+        bool hasLabel(idInt label) const {
+            std::shared_lock<std::shared_mutex> lock(index_lock_);
+            size_t idx = static_cast<size_t>(label);
+            return idx < labelLookup_.size() && labelLookup_[idx] != INVALID_ID;
+        }
+
+        bool isLabelDeleted(idInt label) const {
+            std::shared_lock<std::shared_mutex> lock(index_lock_);
+            size_t idx = static_cast<size_t>(label);
+            return idx < labelLookup_.size()
+                   && labelLookup_[idx] != INVALID_ID
+                   && isMarkedDeleted(labelLookup_[idx]);
         }
 
         void resizeIndex(size_t new_max_elements) {
@@ -887,7 +952,8 @@ namespace hnswlib {
         bool getDataByInternalId(idhInt internal_id,
                                  levelInt layer,
                                  uint8_t* buffer,
-                                 CacheReadView* cache_read_handle = nullptr) const {
+                                 CacheReadView* cache_read_handle = nullptr,
+                                 MDBX_txn* read_txn = nullptr) const {
             if(cache_read_handle) {
                 *cache_read_handle = CacheReadView();
             }
@@ -927,8 +993,9 @@ namespace hnswlib {
 
                 idInt external_label = getExternalLabel(internal_id);
                 if(vector_fetcher_ && buffer) {
-                    // Directly fetch to buffer
-                    bool success = vector_fetcher_(external_label, buffer);
+                    // Directly fetch to buffer; read_txn is the caller's
+                    // snapshot (nullptr means write path, fetcher opens own).
+                    bool success = vector_fetcher_(read_txn, external_label, buffer);
                     
                     // Populate cache on successful fetch
                     if (success && vector_cache_) {
@@ -954,7 +1021,8 @@ namespace hnswlib {
         // data_ptrs: optional per-item pointers to fetched data (zero-copy for upper-layer)
         void getDataByInternalIdBatch(const idhInt* internal_ids, uint8_t* buffers,
                                        bool* success, size_t count,
-                                       const void** data_ptrs = nullptr) const {
+                                       const void** data_ptrs = nullptr,
+                                       MDBX_txn* read_txn = nullptr) const {
             // Phase 1: Check cache for all IDs, collect misses
             std::vector<size_t> miss_indices;      // index into the batch
             std::vector<idInt> miss_labels;         // external labels for MDBX lookup
@@ -1003,8 +1071,11 @@ namespace hnswlib {
                 auto miss_success = std::make_unique<bool[]>(miss_indices.size());
                 std::memset(miss_success.get(), 0, miss_indices.size() * sizeof(bool));
 
-                vector_fetcher_batch_(miss_labels.data(), miss_buffers.data(),
-                                      miss_success.get(), miss_indices.size());
+                vector_fetcher_batch_(read_txn,
+                                      miss_labels.data(),
+                                      miss_buffers.data(),
+                                      miss_success.get(),
+                                      miss_indices.size());
 
                 // Phase 3: Copy results back and populate cache
                 for(size_t mi = 0; mi < miss_indices.size(); mi++) {
@@ -1031,7 +1102,7 @@ namespace hnswlib {
                 for(size_t mi = 0; mi < miss_indices.size(); mi++) {
                     size_t i = miss_indices[mi];
                     uint8_t* buf = buffers + i * data_size_;
-                    bool ok = vector_fetcher_(miss_labels[mi], buf);
+                    bool ok = vector_fetcher_(read_txn, miss_labels[mi], buf);
                     success[i] = ok;
                     if(ok && data_ptrs) {
                         data_ptrs[i] = buf;
@@ -1383,12 +1454,13 @@ namespace hnswlib {
         // Returns a vector of top candidates sorted by similarity (1-distance) in reverse order
         template <bool is_insert, bool has_deletions, typename FilterFunctor = void>
         std::vector<std::pair<dist_t, idhInt>>
-        searchBaseLayer(const std::vector<idhInt>& ep_ids, 
-                        const void* data_point, 
-                        idhInt layer, 
-                        size_t ef, 
-                        FilterFunctor* filter = nullptr, 
-                        size_t filter_boost_percentage = settings::FILTER_BOOST_PERCENTAGE) const {
+        searchBaseLayer(const std::vector<idhInt>& ep_ids,
+                        const void* data_point,
+                        idhInt layer,
+                        size_t ef,
+                        FilterFunctor* filter = nullptr,
+                        size_t filter_boost_percentage = settings::FILTER_BOOST_PERCENTAGE,
+                        MDBX_txn* read_txn = nullptr) const {
             LOG_TIME("searchBaseLayer");
             VisitedList* vl = visited_list_pool_->getFreeVisitedList();
             vl_type* visited_array = vl->mass;
@@ -1426,7 +1498,8 @@ namespace hnswlib {
                         if(getDataByInternalId(ep_id,
                                                layer,
                                                buffer.data(),
-                                               &ep_cache_handle)) {
+                                               &ep_cache_handle,
+                                               read_txn)) {
                             vec_data = ep_cache_handle
                                        ? static_cast<const void*>(ep_cache_handle.data)
                                        : static_cast<const void*>(buffer.data());
@@ -1552,7 +1625,7 @@ namespace hnswlib {
                     std::memset(batch_success.get(), 0, valid_ids.size() * sizeof(bool));
                     getDataByInternalIdBatch(valid_ids.data(), batch_buffers.data(),
                                              batch_success.get(), valid_ids.size(),
-                                             batch_ptrs.data());
+                                             batch_ptrs.data(), read_txn);
 
                     // Phase 3: Process fetched vectors
                     std::vector<idhInt> pass_filter_candidate_ids;

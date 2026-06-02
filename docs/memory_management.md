@@ -68,27 +68,32 @@ That memory must fit in RAM for the server to stay healthy.
 
 ### 3. Sticky-Thread MDBX Environments and `PTHREAD_KEYS_MAX`
 
-All dense-index MDBX environments are currently opened without `MDBX_NOSTICKYTHREADS`. The only
-place that enables `MDBX_NOSTICKYTHREADS` today is sparse storage.
+Every production MDBX environment runs in sticky-thread mode. `MDBX_NOSTICKYTHREADS` is not set
+on any env (shared, sparse, global metadata, legacy compatibility, migration source). The flag
+was tried and rolled back because it caused a severe concurrent-search regression - see the
+"Durability Flags" section of `docs/mdbx_shared_env_acid_revamp.md` for the rationale.
 
-That means a live dense index currently opens four sticky-thread MDBX environments:
+In the current shared-layout, a live index opens at most two sticky-thread MDBX environments:
 
-- `IDMapper`
-- dense vector store
-- dense metadata store
-- filter store
+- one shared env (vectors, metadata, id_map, filter DBIs, sparse DBIs when present, `op_log`,
+  `layout_meta`)
+- one sparse env, only if the index has sparse storage enabled
 
 There is also one global sticky-thread environment in `MetadataManager`.
 
 If libmdbx consumes one pthread TLS key per sticky environment, the current constant
-`MAX_LIVE_INDICES = 255` is consistent with the code layout:
+`MAX_LIVE_INDICES = 255` stays well clear of the limit even when every live index is sparse-enabled:
 
-- `255 * 4 = 1020` per-index sticky environments
+- `255 * 2 = 510` per-index sticky environments (worst case, all sparse)
 - `+1` global metadata environment
-- total `1021`, which stays just below a `PTHREAD_KEYS_MAX` of `1024`
+- total `511`, comfortably below a `PTHREAD_KEYS_MAX` of `1024`
 
 On glibc-based systems, `PTHREAD_KEYS_MAX` is a libc build-time constant, so increasing it would
 require rebuilding glibc.
+
+Legacy-layout indexes (pre-revamp, four separate envs per index) are no longer loaded for
+serving - they are only opened RDONLY by the layout migrator during restore and closed
+immediately after migration. They do not contribute to the live-index TLS budget.
 
 ## How Eviction Works Today
 

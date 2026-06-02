@@ -136,6 +136,42 @@ public:
         return true;
     }
 
+    /**
+     * Reads metadata.json out of a backup tar without extracting any other
+     * entry. Walks headers with archive_read_data_skip(), so the cost is
+     * O(entries) of seek/skim, not O(payload bytes). Returns an empty (null)
+     * json if the entry is missing or unparseable -- callers treat that as
+     * "no usable metadata".
+     */
+    nlohmann::json readMetadataJsonFromTar(const std::filesystem::path& archive_path) {
+        nlohmann::json result;
+        struct archive* a = archive_read_new();
+        archive_read_support_format_all(a);
+        archive_read_support_filter_all(a);
+
+        if(archive_read_open_filename(a, archive_path.string().c_str(), 10240) == ARCHIVE_OK) {
+            struct archive_entry* entry;
+            while(archive_read_next_header(a, &entry) == ARCHIVE_OK) {
+                std::string_view path = archive_entry_pathname(entry);
+                if(path.ends_with("metadata.json")) {
+                    std::string content;
+                    char buf[4096];
+                    la_ssize_t n;
+                    while((n = archive_read_data(a, buf, sizeof(buf))) > 0) {
+                        content.append(buf, n);
+                    }
+                    try {
+                        result = nlohmann::json::parse(content);
+                    } catch(...) {}
+                    break;
+                }
+                archive_read_data_skip(a);
+            }
+        }
+        archive_read_free(a);
+        return result;
+    }
+
     // Path helpers
 
     std::string getUserBackupDir(const std::string& username) const {

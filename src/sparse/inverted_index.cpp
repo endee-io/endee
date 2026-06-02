@@ -310,7 +310,7 @@ namespace ndd {
                     "Incompatible sparse index: database has no superblock (legacy format)");
             }
 
-            // Fresh database — write the superblock.
+            // Fresh database - write the superblock.
             sb.format_version = settings::SPARSE_ONDISK_VERSION;
             LOG_INFO(2202,
                      index_id_,
@@ -377,20 +377,44 @@ namespace ndd {
         return true;
     }
 
-    bool InvertedIndex::addDocumentsBatch(
+    ndd::OperationResult<std::vector<ndd::TermInfoChange>>
+    InvertedIndex::addDocumentsBatch(
         MDBX_txn* txn,
         const std::vector<std::pair<ndd::idInt, SparseVector>>& docs)
     {
         std::unique_lock<std::shared_mutex> lock(mutex_);
-        return addDocumentsBatchInternal(txn, docs);
+        std::vector<ndd::TermInfoChange> term_info_changes;
+        if(!addDocumentsBatchInternal(txn, docs, &term_info_changes)) {
+            return {100, "addDocumentsBatch failed for sparse index " + index_id_};
+        }
+        return {SUCCESS, "", std::move(term_info_changes)};
     }
 
-    bool InvertedIndex::removeDocument(MDBX_txn* txn,
+    ndd::OperationResult<std::vector<ndd::TermInfoChange>>
+    InvertedIndex::removeDocument(MDBX_txn* txn,
                                     ndd::idInt doc_id,
                                     const SparseVector& vec)
     {
         std::unique_lock<std::shared_mutex> lock(mutex_);
-        return removeDocumentInternal(txn, doc_id, vec);
+        std::vector<ndd::TermInfoChange> term_info_changes;
+        if(!removeDocumentInternal(txn, doc_id, vec, &term_info_changes)) {
+            return {100, "removeDocument failed for sparse index " + index_id_};
+        }
+        return {SUCCESS, "", std::move(term_info_changes)};
+    }
+
+    void InvertedIndex::apply_term_info_changes(
+        const std::vector<ndd::TermInfoChange>& changes)
+    {
+        if(changes.empty()) return;
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+        for(const auto& [term_id, value] : changes) {
+            if(value) {
+                term_info_[term_id] = *value;
+            } else {
+                term_info_.erase(term_id);
+            }
+        }
     }
 
     size_t InvertedIndex::getTermCount() const {
@@ -399,14 +423,6 @@ namespace ndd {
 
     size_t InvertedIndex::getVocabSize() const {
         return vocab_size_;
-    }
-
-    std::vector<std::pair<ndd::idInt, float>>
-    InvertedIndex::search(const SparseVector& query,
-                        size_t k,
-                        const ndd::RoaringBitmap* filter)
-    {
-        return search(query, k, 0, filter);
     }
 
     //log(1 + (N - df + 0.5)/(df + 0.5))
@@ -512,22 +528,24 @@ namespace ndd {
     }
 
     std::vector<std::pair<ndd::idInt, float>>
-    InvertedIndex::search(const SparseVector& query,
-                        size_t k,
-                        size_t total_nr_docs,
-                        const ndd::RoaringBitmap* filter)
+    InvertedIndex::search(MDBX_txn* txn,
+                              const SparseVector& query,
+                              size_t k,
+                              const ndd::RoaringBitmap* filter)
+    {
+        return search(txn, query, k, 0, filter);
+    }
+
+    std::vector<std::pair<ndd::idInt, float>>
+    InvertedIndex::search(MDBX_txn* txn,
+                              const SparseVector& query,
+                              size_t k,
+                              size_t total_nr_docs,
+                              const ndd::RoaringBitmap* filter)
     {
         std::shared_lock<std::shared_mutex> lock(mutex_);
 
-        MDBX_txn* txn = nullptr;
-        int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_RDONLY, &txn);
-        if (rc != MDBX_SUCCESS) {
-            LOG_ERROR(2208, index_id_, "Failed to begin sparse search transaction: " << mdbx_strerror(rc));
-            return {};
-        }
-
         if (query.empty() || k == 0) {
-            mdbx_txn_abort(txn);
             return {};
         }
 
@@ -570,7 +588,7 @@ namespace ndd {
             }
 
             MDBX_cursor* cursor = nullptr;
-            rc = mdbx_cursor_open(txn, blocked_term_postings_dbi_, &cursor);
+            int rc = mdbx_cursor_open(txn, blocked_term_postings_dbi_, &cursor);
             if (rc != MDBX_SUCCESS) {
                 LOG_ERROR(2210,
                           index_id_,
@@ -600,13 +618,12 @@ namespace ndd {
         }
 
         if (iters.empty()) {
-            mdbx_txn_abort(txn);
             return {};
         }
 
         //END OF PHASE 1
         }
-        
+
 
         bool use_pruning = (iters.size() > 1);
         float best_min_score = 0.0f;
@@ -751,7 +768,6 @@ namespace ndd {
         for (MDBX_cursor* cursor : cursors) {
             mdbx_cursor_close(cursor);
         }
-        mdbx_txn_abort(txn);
 
         std::vector<std::pair<ndd::idInt, float>> results;
         results.reserve(top_results.size());
@@ -1401,7 +1417,8 @@ namespace ndd {
 
     bool InvertedIndex::addDocumentsBatchInternal(
         MDBX_txn* txn,
-        const std::vector<std::pair<ndd::idInt, SparseVector>>& docs)
+        const std::vector<std::pair<ndd::idInt, SparseVector>>& docs,
+        std::vector<ndd::TermInfoChange>* term_info_changes)
     {
         if (docs.empty()) return true;
 
@@ -1643,7 +1660,7 @@ namespace ndd {
 
                 if (header.nr_entries == 0) {
                     if (!deletePostingListHeader(txn, term_id)) return false;
-                    term_info_.erase(term_id);
+                    term_info_changes->emplace_back(term_id, std::nullopt);
                     continue;
                 }
 
@@ -1669,9 +1686,9 @@ namespace ndd {
             }
 
             if (header.nr_live_entries > 0 && header.max_value > settings::NEAR_ZERO) {
-                term_info_[term_id] = header.max_value;
+                term_info_changes->emplace_back(term_id, header.max_value);
             } else {
-                term_info_.erase(term_id);
+                term_info_changes->emplace_back(term_id, std::nullopt);
             }
         }
 
@@ -1681,7 +1698,8 @@ namespace ndd {
 
     bool InvertedIndex::removeDocumentInternal(MDBX_txn* txn,
                                             ndd::idInt doc_id,
-                                            const SparseVector& vec)
+                                            const SparseVector& vec,
+                                            std::vector<ndd::TermInfoChange>* term_info_changes)
     {
         /**
          * NOTE: This can be slow right now since we provide a single vector to delete
@@ -1790,7 +1808,7 @@ namespace ndd {
 
             if (header.nr_entries == 0) {
                 if (!deletePostingListHeader(txn, term_id)) return false;
-                term_info_.erase(term_id);
+                term_info_changes->emplace_back(term_id, std::nullopt);
                 continue;
             }
 
@@ -1807,9 +1825,9 @@ namespace ndd {
             }
 
             if (header.nr_live_entries > 0 && header.max_value > settings::NEAR_ZERO) {
-                term_info_[term_id] = header.max_value;
+                term_info_changes->emplace_back(term_id, header.max_value);
             } else {
-                term_info_.erase(term_id);
+                term_info_changes->emplace_back(term_id, std::nullopt);
             }
         }
 

@@ -1,10 +1,10 @@
 # Bloom Filter
 
-nDD uses bloom filters to optimize string ID lookups in the ID mapping system. The bloom filter serves as a fast probabilistic cache that can definitively say "this ID doesn't exist" or "this ID might exist", avoiding expensive LMDB lookups.
+nDD uses bloom filters to optimize string ID lookups in the ID mapping system. The bloom filter serves as a fast probabilistic cache that can definitively say "this ID doesn't exist" or "this ID might exist", avoiding expensive MDBX lookups.
 
 ## Architecture
 
-**Storage**: Bloom filter is stored as `{database_path}/id_bloom.bin` (separate from LMDB)
+**Storage**: Bloom filter is stored as `{index_path}/id_bloom.bin` — a flat file alongside the shared MDBX env, not inside it.
 **Memory**: Loaded into RAM at startup for fast lookups
 **Hash**: Uses ultra-fast xxHash32 (0.00823 μs/key) with power-of-2 optimized bitwise operations
 **Format**: Platform-independent little-endian binary
@@ -58,7 +58,7 @@ positions[i] = hash & (array_size_bits_ - 1);  // Power-of-2 optimization
 **Tier**: Determined by user subscription level or environment override  
 **Process**: 
 1. Load HNSW index from disk
-2. Scan LMDB database for all existing string IDs
+2. Scan MDBX database for all existing string IDs
 3. Use fixed tier-based size (from user type or override)
 4. Create new bloom filter with tier-based fixed capacity
 5. Populate with all existing IDs using fast bitwise operations
@@ -70,7 +70,7 @@ positions[i] = hash & (array_size_bits_ - 1);  // Power-of-2 optimization
 ```
 1. Check bloom filter first (in memory) - Uses fast bitwise AND operations
    ├─ "Definitely NOT exists" → Return 0 immediately  
-   └─ "Might exist" → Check LMDB database
+   └─ "Might exist" → Check MDBX database
 
 2. During index loading (loadIndex)
    ├─ Load HNSW index
@@ -164,7 +164,7 @@ manager.createIndex(index_id, config, UserType::Pro);  // 8M element bloom filte
 
 ## Error Handling
 
-- **Missing File**: Automatic rebuild from LMDB database
+- **Missing File**: Automatic rebuild from MDBX database
 - **Load Failure**: Automatic rebuild with optimal capacity
 - **Corruption**: Automatic rebuild on next loadIndex()
 - **Capacity Issues**: Automatic doubling during rebuild

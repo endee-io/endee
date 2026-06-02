@@ -2,22 +2,22 @@
 
 ## Overview
 
-The `IDMapper` class is a critical component of the NDD vector database that manages the mapping between external string identifiers (user-provided IDs) and internal numeric identifiers used by the HNSW algorithm. It provides atomic ID generation, efficient lookups, and ID recycling capabilities.
+- `IDMapper` maps external string ids (user-provided) to internal numeric ids used by HNSW.
+- Provides atomic id generation, point lookups, and id recycling.
+- All public methods take the caller's `MDBX_txn*` as the first parameter — the class never opens its own transactions. See [docs/mdbx_shared_env_acid_revamp.md](mdbx_shared_env_acid_revamp.md) for the layered transaction model.
 
 ## Architecture
 
-### Storage Backend
-- **Database**: LMDB (Lightning Memory-Mapped Database)
-- **Map Size**: 1GB (configurable via `settings::ID_MAPPER_SIZE_BITS`)
-- **File Location**: `{index_path}/id_mapper/`
-- **Bloom Filter**: Separate file `id_bloom.bin` for fast negative lookups
+### Storage backend
+- Lives as the `id_map` named DBI inside the per-index shared MDBX env (created by `SharedIndexEnv`, `src/storage/shared_mdbx.hpp`).
+- No separate `id_mapper/` directory on disk; sizing is driven by the shared env geometry (`settings::VECTOR_MAP_SIZE_BITS` / `_MAX_BITS`), not a per-component map.
+- Bloom filter still lives in a separate file alongside the index: `id_bloom.bin`, for fast negative lookups.
 
-### Key Components
+### Key components
 
-#### 1. Core Mapping Storage
-- **Format**: `string_id → labelInt (numeric_id)`
-- **Type**: Direct key-value pairs in LMDB
-- **Thread Safety**: LMDB provides ACID transactions
+#### 1. Core mapping storage
+- **Format**: `string_id → idInt (numeric_id)`, stored as direct key-value pairs in the `id_map` DBI.
+- **Atomicity**: every write is the caller's MDBX txn, so id allocation, vector bytes, metadata, filter rows, and the `op_log` row commit together.
 
 #### 2. Special Keys
 The database contains three special internal keys with random suffixes to avoid collisions:
@@ -35,7 +35,7 @@ BLOOM_FILTER_FILENAME = "id_bloom.bin"     // Bloom filter file
 - **Batch Generation**: Multiple IDs generated atomically in single transaction
 
 #### 4. Bloom Filter Integration
-- **Purpose**: Fast negative lookups to avoid unnecessary LMDB queries
+- **Purpose**: Fast negative lookups to avoid unnecessary MDBX queries
 - **False Positive Rate**: 1% (0.01)
 - **Auto-sizing**: Grows based on element count using bit-doubling
 - **Persistence**: Saved to disk and loaded on startup
@@ -44,43 +44,23 @@ BLOOM_FILTER_FILENAME = "id_bloom.bin"     // Bloom filter file
 
 ### 1. ID Creation - `create_ids_batch()`
 
-The primary method for mapping string IDs to numeric IDs:
+Single method for mapping string ids to numeric ids; runs inside the caller's write txn:
 
 ```cpp
-template <bool use_deleted_ids>
-std::vector<std::pair<labelInt, bool>> create_ids_batch(
-    const std::vector<std::string>& str_ids, 
-    void* wal_ptr = nullptr
-);
+std::vector<std::pair<idInt, bool>>
+create_ids_batch(MDBX_txn* txn, const std::vector<std::string>& str_ids);
 ```
 
-**Process Flow:**
+Returns `(numeric_id, is_new_to_db)` per input string. `is_new_to_db == true` means the string id was not previously mapped — the caller (e.g. `VectorStorage::store_vectors_batch`) treats this as a fresh insert; `false` means an upsert against an existing id.
 
-1. **Bloom Filter Check**
-   - Quick filter to identify definitely-new IDs
-   - IDs that "might exist" proceed to LMDB lookup
-   - IDs that "definitely don't exist" are marked for creation
+**Process flow** (all inside the caller's txn):
 
-2. **LMDB Lookup**
-   - Read-only transaction to check existing mappings
-   - Returns existing numeric IDs for found strings
-   - Marks non-existent strings for ID creation
-
-3. **Deleted ID Recycling** (if `use_deleted_ids = true`)
-   - Retrieves deleted IDs from `DELETED_IDS_KEY`
-   - Assigns recycled IDs to new string IDs
-   - Reduces new ID generation count
-
-4. **New ID Generation**
-   - Calls `get_next_ids()` for remaining needed IDs
-   - **WAL Logging**: Immediately logs `VECTOR_ADD` operations to WAL
-   - Atomic increment of `NEXT_ID_KEY` counter
-
-5. **Database Write**
-   - Write transaction to store new string→numeric mappings
-   - Updates bloom filter with new strings
-   - Handles LMDB map resizing if needed
-   - Commits all changes atomically
+1. **Bloom filter check** — quick negative filter; only `might_exist` strings proceed to MDBX.
+2. **MDBX lookup** via the caller's txn — returns existing numeric ids for found strings, marks the rest for creation.
+3. **Deleted id recycling** — consume from `DELETED_IDS_KEY` first (see `getDeletedIds`); newly-recycled numeric ids are *fresh inserts to HNSW* even though the numeric id is reused, so `is_new_to_db` stays `true`. (This invariant is the Bug A fix; see "Recovery and known bugs" below.)
+4. **New id generation** for any remainder via `get_next_ids` — atomic increment of `NEXT_ID_KEY`.
+5. **WAL append** — every newly-assigned numeric id gets a `VECTOR_ADD` row in `op_log` through the same txn, so the id allocation and the recovery log entry commit atomically.
+6. **Database write** — new `string → numeric_id` rows are written through the same txn. Bloom filter is updated after commit.
 
 **Return Value:**
 - Vector of `(numeric_id, is_new)` pairs
@@ -89,70 +69,58 @@ std::vector<std::pair<labelInt, bool>> create_ids_batch(
 
 ### 2. ID Lookup - `get_id()`
 
-Fast lookup of existing string→numeric mappings:
-
 ```cpp
-labelInt get_id(const std::string& str_id) const;
+idInt get_id(MDBX_txn* txn, const std::string& str_id) const;
 ```
 
-**Process:**
-1. **Bloom Filter Check**: Quick negative filter
-2. **LMDB Lookup**: Direct key lookup if bloom filter says "might exist"
-3. **Return**: Numeric ID or 0 if not found
+- Returns the numeric id or `0` if not found.
+- Bloom filter is consulted first; only `might_exist` strings hit MDBX.
 
 ### 3. ID Deletion - `deletePoints()`
 
-Removes mappings and adds numeric IDs to recycle pool:
-
 ```cpp
-std::vector<labelInt> deletePoints(const std::vector<std::string>& external_ids);
+std::vector<idInt> deletePoints(MDBX_txn* txn,
+                                const std::vector<std::string>& external_ids);
 ```
 
-**Process:**
-1. Look up numeric IDs for each string ID
-2. Delete string→numeric mappings from LMDB
-3. Add numeric IDs to `DELETED_IDS_KEY` array for recycling
-4. Return vector of deleted numeric IDs (0 for not found)
+- Looks up numeric ids for each string id.
+- Deletes string→numeric rows from `id_map` through `txn`.
+- Pushes the freed numeric ids onto `DELETED_IDS_KEY` via `add_to_deleted_ids` (inside the same txn).
+- Returns the vector of freed numeric ids (`0` for not-found entries).
 
 ### 4. Deleted ID Retrieval - `getDeletedIds()`
 
-Retrieves and removes deleted IDs for recycling:
-
 ```cpp
-std::vector<labelInt> getDeletedIds(size_t max_count);
+std::vector<idInt> getDeletedIds(MDBX_txn* txn, size_t max_count);
 ```
 
-**Process:**
-1. Read `DELETED_IDS_KEY` array from LMDB
-2. Extract up to `max_count` IDs
-3. Update remaining IDs back to database (or delete key if empty)
-4. Return extracted IDs for reuse
+- Reads the `DELETED_IDS_KEY` array.
+- Pops up to `max_count` ids from the head.
+- Writes back the remainder (or deletes the key if empty) through `txn`.
+- Returns the popped ids for reuse.
+- The remainder is copied into a caller-owned `std::vector<idInt>` before being written back; the original `MDBX_val` from `mdbx_get` aliases the mapped page and using it as the source of `mdbx_put` under `MDBX_WRITEMAP` is documented UB.
 
 ## Atomicity and Crash Recovery
 
-### Write-Ahead Logging (WAL) Integration
+### Write-Ahead Log integration
 
-The ID mapper integrates with NDD's WAL system to ensure atomicity:
+- Every new numeric id allocated by `create_ids_batch` gets a `VECTOR_ADD` row appended to `op_log` through the same write txn (see `WriteAheadLog::append`).
+- The append, the `id_map` rows, the vector bytes, the metadata, and the filter rows all commit as one MDBX transaction.
+- See [docs/mdbx_shared_env_acid_revamp.md](mdbx_shared_env_acid_revamp.md) § HNSW Recovery for the full op_log lifecycle.
 
-1. **ID Generation Logging**: New IDs are logged to WAL immediately after generation
-2. **Operation Type**: Uses `WALOperationType::VECTOR_ADD`
-3. **Recovery**: Failed operations are detected and IDs are reclaimed
+### Crash recovery (`IndexManager::recoverFromWAL`)
 
-### Crash Recovery Process
+- WAL entries are replayed in sequence order.
+- `VECTOR_ADD` whose vector row is absent → the add either never committed or was legitimately deleted later in the same save window. Failed ids are reclaimed via `reclaim_failed_ids` → `add_to_deleted_ids` (which dedups against existing entries; see "Recovery and known bugs").
+- `VECTOR_DELETE` replays into HNSW only when the label exists and isn't already marked deleted.
+- Replay is idempotent; HNSW is saved and `op_log` is cleared inside the same txn after a successful save.
 
-When the system recovers from a crash:
+### Recovery and known bugs (fixed on this branch)
 
-1. **WAL Replay**: Processes all WAL entries in order
-2. **Orphaned ID Detection**: `VECTOR_ADD` entries without corresponding vectors
-3. **ID Reclamation**: Orphaned IDs are added back to deleted_ids pool
-4. **Consistency Restoration**: Ensures no IDs are permanently lost
+Two production-grade bugs were found and fixed during crash-harness work. See [docs/single_txn_bug_investigation.md](single_txn_bug_investigation.md) for the full investigation; load-bearing invariants summarised here:
 
-### Atomicity Guarantees
-
-- **ID Generation**: Atomic increment of next_id counter
-- **Batch Operations**: All mappings in a batch succeed or fail together
-- **WAL Coordination**: IDs logged before storage operations
-- **Recovery Safety**: Lost IDs are automatically reclaimed
+- **`create_ids_batch` no longer treats reused numeric ids as updates.** The earlier `is_reused` override forced HNSW down the `addPoint<false>` (rewire) path for any string id paired with a recycled numeric id, fracturing the graph. A fresh string id reusing a deleted numeric id is now `is_new_to_db = true` everywhere.
+- **`add_to_deleted_ids` deduplicates before appending.** Recovery could otherwise re-push a numeric id that was *legitimately* deleted-then-killed mid-save-window, producing a duplicate in `DELETED_IDS_KEY` that handed the same id to two different string ids in the next batch.
 
 ## Bloom Filter Management
 
@@ -182,7 +150,7 @@ Bloom filter rebuilding happens:
 **Rebuild Steps:**
 1. Calculate optimal size based on current element count
 2. Create new bloom filter with optimal capacity
-3. Iterate through all LMDB keys (excluding special keys)
+3. Iterate through all MDBX keys (excluding special keys)
 4. Add all string IDs to new bloom filter
 5. Replace old filter and mark as modified
 6. Save to disk
@@ -191,8 +159,8 @@ Bloom filter rebuilding happens:
 
 ### Lookup Performance
 - **Bloom Filter**: O(k) where k = number of hash functions (~3-4)
-- **LMDB Lookup**: O(log n) B-tree lookup
-- **Cache Locality**: LMDB uses memory mapping for efficiency
+- **MDBX Lookup**: O(log n) B-tree lookup
+- **Cache Locality**: MDBX uses memory mapping for efficiency
 
 ### Batch Operations
 - **Amortized Cost**: Single transaction for multiple operations
@@ -200,29 +168,28 @@ Bloom filter rebuilding happens:
 - **Reduced Syscalls**: Minimize transaction overhead
 
 ### Memory Usage
-- **LMDB Map**: 1GB virtual memory (sparse allocation)
-- **Bloom Filter**: Size based on element count (typically KB-MB range)
-- **Working Set**: Minimal resident memory due to memory mapping
+- **MDBX Map**: shares the per-index shared env's virtual address allocation; not a separate map.
+- **Bloom Filter**: size based on element count (typically KB-MB range).
+- **Working Set**: minimal resident memory due to memory mapping.
 
 ## Thread Safety
 
 ### Concurrency Model
-- **LMDB Transactions**: Provide ACID properties
-- **Read Concurrency**: Multiple concurrent readers supported
-- **Write Serialization**: Single writer at a time (per LMDB design)
-- **Mutex Protection**: `next_id` operations protected by mutex
+- **MDBX transactions**: ACID; sticky-thread mode in effect (one read txn per OS thread; writes begin/use/end on one thread).
+- **Read concurrency**: multiple concurrent readers supported.
+- **Write serialization**: MDBX serialises writers at the env level. A single shared write txn covers ID-mapper writes plus every other per-index write for one logical request.
 
 ### Lock-Free Reads
-- Read operations (lookups) don't require exclusive locks
-- Bloom filter reads are atomic at the data structure level
-- LMDB handles read isolation automatically
+- Read methods do not take internal locks; they read through the caller's `MDBX_TXN_RDONLY`.
+- Bloom filter reads are atomic at the data-structure level.
+- MDBX handles read isolation automatically.
 
 ## Error Handling
 
-### LMDB Error Recovery
+### MDBX Error Recovery
 - **Map Full**: Automatic map size doubling and retry
 - **Transaction Conflicts**: Automatic abort and cleanup
-- **Corruption Detection**: LMDB integrity checks
+- **Corruption Detection**: MDBX integrity checks
 
 ### Bloom Filter Recovery
 - **Load Failure**: Automatic rebuild from database
@@ -236,50 +203,40 @@ Bloom filter rebuilding happens:
 
 ## Configuration
 
-### Constructor Parameters
+### Constructor parameters
 ```cpp
-IDMapper(
-    const std::string& path,           // Storage directory
-    bool is_new = false,              // New index flag
-    UserType user_type = UserType::Starter,  // User tier (affects sizing)
-    size_t custom_bloom_size = 0      // Custom bloom filter size
-);
+IDMapper(MDBX_env* env,                         // shared per-index env from SharedIndexEnv
+         const std::string& index_id,           // for logs and on-disk bloom filter naming
+         bool is_new = false,                   // new index? -> skip the disk-bloom-load path
+         UserType user_type = UserType::Starter, // tier affects bloom sizing
+         size_t custom_bloom_size = 0);         // optional override
 ```
 
-### Sizing Configuration
-- **ID_MAPPER_SIZE_BITS**: LMDB map size (default: 30 = 1GB)
-- **BLOOM_FILTER_BITS**: Bloom filter size (default: 20 = 1M capacity)
-- **Custom sizing**: Override defaults via constructor parameter
+### Sizing
+- Storage is sized by the shared env (`settings::VECTOR_MAP_SIZE_BITS` / `_MAX_BITS`), not a per-component map.
+- `BLOOM_FILTER_BITS` still drives bloom-filter capacity; override via `custom_bloom_size`.
 
-## Usage Patterns
+## Usage patterns
 
-### Vector Addition
+### Vector addition (caller's write txn)
 ```cpp
-// During vector addition
-std::vector<std::string> str_ids = {"vec1", "vec2", "vec3"};
-WriteAheadLog* wal = getWAL();
-
-// Create mappings with deleted ID reuse
-auto mappings = id_mapper->create_ids_batch<true>(str_ids, wal);
-
-for (auto [numeric_id, is_new] : mappings) {
-    if (is_new) {
-        // Handle new vector
+MDBX_txn* txn = /* begun on shared env */;
+auto mappings = id_mapper->create_ids_batch(txn, str_ids);
+for (auto [numeric_id, is_new_to_db] : mappings) {
+    if (is_new_to_db) {
+        // Fresh insert: VECTOR_ADD already appended to op_log
     } else {
-        // Handle existing vector (update case)
+        // Upsert against existing live id
     }
 }
+// caller commits txn -> id_map + op_log row + vector bytes + meta + filter rows all land atomically
 ```
 
-### Vector Lookup
+### Vector lookup
 ```cpp
-// Fast ID lookup
-labelInt numeric_id = id_mapper->get_id("vec1");
-if (numeric_id == 0) {
-    // Vector doesn't exist
-} else {
-    // Use numeric_id for HNSW operations
-}
+MDBX_txn* read_txn = /* MDBX_TXN_RDONLY on shared env */;
+idInt numeric_id = id_mapper->get_id(read_txn, "vec1");
+// numeric_id == 0 means "not found"
 ```
 
 ### Vector Deletion
@@ -299,9 +256,9 @@ auto deleted_ids = id_mapper->deletePoints(to_delete);
 3. **ID Recycling**: Enable deleted ID reuse to minimize ID space growth
 
 ### Reliability
-1. **WAL Integration**: Always pass WAL pointer for crash recovery
-2. **Error Handling**: Check return values and handle exceptions
-3. **Regular Maintenance**: Monitor bloom filter hit rates
+1. **WAL Integration**: Always run `create_ids_batch` inside the caller's write txn so the `VECTOR_ADD` op_log append commits atomically with the data rows.
+2. **Error Handling**: Check return values and handle exceptions.
+3. **Regular Maintenance**: Monitor bloom filter hit rates.
 
 ### Monitoring
 1. **ID Space Usage**: Monitor `get_count()` for growth patterns
@@ -312,8 +269,8 @@ auto deleted_ids = id_mapper->deletePoints(to_delete);
 
 ### Key Design Decisions
 
-1. **LMDB Choice**: Provides ACID transactions, memory mapping, and excellent performance
-2. **Bloom Filter Integration**: Reduces unnecessary LMDB lookups significantly
+1. **MDBX Choice**: Provides ACID transactions, memory mapping, and excellent performance
+2. **Bloom Filter Integration**: Reduces unnecessary MDBX lookups significantly
 3. **ID Recycling**: Prevents ID space exhaustion in high-churn scenarios
 4. **WAL Coordination**: Ensures no IDs are lost during crashes
 5. **Batch Processing**: Amortizes transaction costs for better performance

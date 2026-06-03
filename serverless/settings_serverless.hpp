@@ -69,10 +69,10 @@ namespace serverless {
     constexpr size_t TOKEN_LENGTH = 32;  // bytes (64 hex chars)
 
     // Usage stats endpoint
-    const std::string DEFAULT_USAGE_STATS_URL = "https://login.endee.io/user/query-count/";
+    constexpr const char* DEFAULT_USAGE_STATS_URL = "https://login.endee.io/user/query-count/";
     inline std::string USAGE_STATS_URL = [] {
         const char* env = std::getenv("NDD_USAGE_STATS_URL");
-        return env ? std::string(env) : DEFAULT_USAGE_STATS_URL;
+        return std::string(env ? env : DEFAULT_USAGE_STATS_URL);
     }();
 }
 }

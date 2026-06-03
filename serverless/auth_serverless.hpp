@@ -243,7 +243,7 @@ class AuthManager {
         }
 
         rc = mdbx_env_open(env_, auth_path.c_str(),
-            MDBX_NOSUBDIR | MDBX_COALESCE | MDBX_LIFORECLAIM, 0664);
+            MDBX_NOSUBDIR | MDBX_LIFORECLAIM, 0664);
         if(rc != MDBX_SUCCESS) {
             mdbx_env_close(env_);
             throw std::runtime_error("Failed to open MDBX environment: " +

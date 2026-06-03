@@ -93,8 +93,33 @@ target_include_directories(ndd_acid_regression_test PRIVATE
 
 target_compile_definitions(ndd_acid_regression_test PRIVATE MDB_MAXKEYSIZE=512)
 
+# int16 AVX2 accuracy + performance regression. Only useful when the host can
+# execute AVX2 — guarded internally with #if defined(USE_AVX2). When the binary
+# is built without that flag the test reports a skip.
+add_executable(ndd_int16_avx2_test int16_avx2_test.cpp)
+
+target_link_libraries(ndd_int16_avx2_test GTest::gtest_main)
+
+target_include_directories(ndd_int16_avx2_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/core
+    ${CMAKE_SOURCE_DIR}/src/hnsw
+    ${CMAKE_SOURCE_DIR}/src/quant
+    ${CMAKE_SOURCE_DIR}/src/utils
+    ${CMAKE_SOURCE_DIR}/third_party
+    ${CMAKE_SOURCE_DIR}/third_party/json
+)
+
+target_compile_definitions(ndd_int16_avx2_test PRIVATE MDB_MAXKEYSIZE=512)
+
+if(USE_AVX2)
+    target_compile_options(ndd_int16_avx2_test PRIVATE -mavx2 -mfma -mf16c -O3)
+    target_compile_definitions(ndd_int16_avx2_test PRIVATE USE_AVX2)
+endif()
+
 include(GoogleTest)
 gtest_discover_tests(ndd_filter_test)
 gtest_discover_tests(ndd_request_validation_test)
 gtest_discover_tests(ndd_layout_migrator_test)
 gtest_discover_tests(ndd_acid_regression_test)
+gtest_discover_tests(ndd_int16_avx2_test)

@@ -17,7 +17,12 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <xsimd/xsimd.hpp>
+#if defined(USE_SVE2)
+#include <arm_sve.h>
+#endif
 
+namespace xs = xsimd;
 namespace ndd {
 
     namespace {
@@ -136,6 +141,7 @@ namespace ndd {
                  << (parse_calls ? (static_cast<double>(parse_total_ns) / 1000.0)
                                            / static_cast<double>(parse_calls)
                                  : 0.0));
+        LOG_INFO("xsimd batch size (floats/vector): " << xs::batch<float>::size);
         std::cout << "=================================\n";
     }
 
@@ -527,6 +533,100 @@ namespace ndd {
         return contributed;
     }
 
+    inline void process_phase3_simd_batch(
+        const float* scores_buf,
+        size_t batch_len,
+        ndd::idInt batch_start,
+        size_t k,
+        float& threshold,
+        std::priority_queue<ScoredDoc>& top_results,
+        const ndd::RoaringBitmap* filter
+    ) {
+        // Apply the filter and offer the candidate at `exact_local` to the
+        // top-k heap. Returns true if `threshold` changed, so callers that
+        // cache a broadcasted threshold vector know to refresh it.
+        auto consider = [&](size_t exact_local) -> bool {
+            ndd::idInt doc_id = batch_start + (ndd::idInt)exact_local;
+            if (filter && !filter->contains(doc_id)) return false;
+
+            float s = scores_buf[exact_local];
+            if (top_results.size() < k) {
+                top_results.emplace(doc_id, s);
+                if (top_results.size() == k) {
+                    threshold = top_results.top().score;
+                    return true;
+                }
+            } else if (s > threshold) {
+                top_results.pop();
+                top_results.emplace(doc_id, s);
+                threshold = top_results.top().score;
+                return true;
+            }
+            return false;
+        };
+
+#if defined(USE_SVE2)
+        // ---------------------------------------------------------
+        // ARM SVE2 Optimized Path
+        // ---------------------------------------------------------
+        size_t local = 0;
+        uint64_t v_len = svcntw(); 
+        svuint32_t step_indices = svindex_u32(0, 1); 
+        svbool_t pg = svwhilelt_b32_u64(local, batch_len);
+
+        while (svptest_any(svptrue_b32(), pg)) {
+            svfloat32_t thresh_vec = svdup_n_f32(threshold);
+            svfloat32_t scores = svld1_f32(pg, &scores_buf[local]);
+            svbool_t match_mask = svcmpgt_f32(pg, scores, thresh_vec);
+            
+            while (svptest_any(pg, match_mask)) {
+                svbool_t first_match = svpfirst_b(pg, match_mask); // svpfirst_b works on predicates
+                uint32_t bit_idx = svclastb_n_u32(first_match, 0, step_indices); 
+                
+                consider(local + bit_idx);
+                match_mask = sveor_b_z(pg, match_mask, first_match);
+            }
+            local += v_len;
+            pg = svwhilelt_b32_u64(local, batch_len);
+        }
+#else
+        // ---------------------------------------------------------
+        // Generic SIMD Path (AVX512 / AVX2 / NEON via xsimd)
+        // xsimd auto-selects the widest architecture enabled by the
+        // compiler flags (see CMakeLists.txt). The flag set must be
+        // internally consistent or the auto-pick can name an arch whose
+        // intrinsics weren't enabled -- e.g. AVX512 needs CD+DQ alongside
+        // BW/VNNI. With that satisfied, the bare batch<float> is correct.
+        // ---------------------------------------------------------
+        using batch_type = xs::batch<float>;
+        size_t local = 0;
+        constexpr size_t inc = batch_type::size;
+        batch_type thresh_vec = batch_type::broadcast(threshold);
+
+        for (; local + inc <= batch_len; local += inc) {
+            batch_type scores = batch_type::load_unaligned(&scores_buf[local]);
+            auto cmp_mask = scores > thresh_vec; 
+            uint32_t mask = static_cast<uint32_t>(cmp_mask.mask());
+            
+            if (mask == 0) continue; 
+            
+            while (mask != 0) {
+                int bit_idx = __builtin_ctz(mask);
+                if (consider(local + bit_idx)) {
+                    thresh_vec = batch_type::broadcast(threshold);
+                }
+                mask &= (mask - 1);
+            }
+        }
+
+        for (; local < batch_len; local++) {
+            // Cheap score gate before the (pricier) filter lookup, matching
+            // the `scores > thresh_vec` mask the SIMD loop applies above.
+            if (scores_buf[local] > threshold) consider(local);
+        }
+#endif
+    }
+
     std::vector<std::pair<ndd::idInt, float>>
     InvertedIndex::search(MDBX_txn* txn,
                               const SparseVector& query,
@@ -705,27 +805,7 @@ namespace ndd {
 
             {
                 LOG_TIME("search phase 3");
-            // Only scores inside the current batch can be non-zero, so convert that temporary
-            // dense buffer into top-k candidates before moving to the next window.
-            for (size_t local = 0; local < batch_len; local++) {
-                float s = scores_buf[local];
-                if (s == 0.0f || s <= threshold) continue;
-
-                ndd::idInt doc_id = batch_start + (ndd::idInt)local;
-                if (filter && !filter->contains(doc_id)) continue;
-
-                if (top_results.size() < k) {
-                    top_results.emplace(doc_id, s);
-                    if (top_results.size() == k) {
-                        threshold = top_results.top().score;
-                    }
-                } else if (s > threshold) {
-                    top_results.pop();
-                    top_results.emplace(doc_id, s);
-                    threshold = top_results.top().score;
-                }
-            }
-            //END OF SEARCH PHASE 3
+                process_phase3_simd_batch(scores_buf.data(), batch_len, batch_start, k, threshold, top_results, filter);
             }
 
             {

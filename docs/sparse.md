@@ -296,6 +296,26 @@ Scan `scores_buf`. For each non-zero score above the current threshold:
 - If a RoaringBitmap filter exists, skip docs not in the filter.
 - Push into a min-heap of size `k`. Update the threshold to the heap's minimum score.
 
+**SIMD Optimization:**
+This extraction phase is heavily accelerated using SIMD instructions (via `xsimd` for AVX512/AVX2/NEON, or direct intrinsics for SVE2).
+Previously, a scalar loop compared each document's score against the heap's threshold. This unpredictable branch caused significant branch prediction penalties. 
+
+![CPU Comparison](assets/cpu_comparison.png)
+
+By utilizing SIMD batched comparisons against a broadcasted threshold vector, we generate a bitmask of matching results. The loop can swiftly bypass chunks of scores where the mask is empty (`if (mask == 0) continue;`) and process only the exact matches using fast bit operations (`__builtin_ctz`). 
+This relies on architecture-specific flags provided via `CMakeLists.txt` (e.g., `-DUSE_AVX2=ON` or `-DUSE_AVX512=ON`). This optimization eliminates branch penalties, resulting in a **4x-5x increase in QPS** and at least a **3x reduction in latency**.
+
+### Benchmark Hardware Specifications
+
+For the performance comparisons, the following hardware configurations were used:
+
+| Architecture | CPU / Instance Type | Cores | RAM | Storage Type |
+| :--- | :--- | :--- | :--- | :--- |
+| **AVX-512** | AWS c7i.4xlarge | 16 | 32 GB | GP3 (EBS) |
+| **AVX2** | OVH b3-32 | 8 | 32 GB | NVMe |
+| **NEON** | AWS c8g.2xlarge | 8 | 16 GB | GP3 (EBS) |
+| **SVE / SVE2**| AWS c8g.2xlarge | 8 | 16 GB | GP3 (EBS) |
+
 ### Phase 4: Compact and prune
 
 - Remove exhausted iterators.

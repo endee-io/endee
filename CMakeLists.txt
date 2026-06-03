@@ -96,7 +96,7 @@ endif()
 
 
 # SIMD Optimization Options
-option(USE_AVX512 "Enable AVX512 (F, BW, VNNI, FP16)" OFF)
+option(USE_AVX512 "Enable AVX512 (F, CD, DQ, BW, VNNI, FP16)" OFF)
 option(USE_AVX2   "Enable AVX2 (FMA, F16C)" OFF)
 option(USE_SVE2   "Enable SVE2 (INT8/16, FP16)" OFF)
 option(USE_NEON   "Enable NEON (FP16, DotProd)" OFF)
@@ -232,6 +232,24 @@ else()
 endif()
 
 # =======================
+# Find or Fetch xsimd (header-only SIMD abstraction)
+# =======================
+set(XSIMD_PATH "${CMAKE_CURRENT_SOURCE_DIR}/third_party/xsimd/include")
+if(NOT EXISTS "${XSIMD_PATH}/xsimd/xsimd.hpp")
+    message(STATUS "xsimd not found, downloading...")
+    FetchContent_Declare(
+        xsimd
+        GIT_REPOSITORY https://github.com/xtensor-stack/xsimd.git
+        GIT_TAG        13.0.0
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_MakeAvailable(xsimd)
+    set(XSIMD_INCLUDE_DIR "${xsimd_SOURCE_DIR}/include")
+else()
+    set(XSIMD_INCLUDE_DIR "${XSIMD_PATH}")
+endif()
+
+# =======================
 # Find Other Dependencies
 # =======================
 find_package(Threads REQUIRED)
@@ -305,6 +323,7 @@ target_include_directories(ndd_core PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party
     ${CROW_INCLUDE_DIR}
     ${MSGPACK_INCLUDE_DIR}
+    ${XSIMD_INCLUDE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/src/roaring
     ${LMDB_INCLUDE_DIR}
     ${ASIO_INCLUDE_DIR}
@@ -320,6 +339,7 @@ target_include_directories(${NDD_BINARY_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party
     ${CROW_INCLUDE_DIR}
     ${MSGPACK_INCLUDE_DIR}
+    ${XSIMD_INCLUDE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/src/roaring
     ${LMDB_INCLUDE_DIR}
     ${ASIO_INCLUDE_DIR}
@@ -335,10 +355,10 @@ endif()
 
 # Apply Flags based on selection
 if(USE_AVX512)
-    message(STATUS "SIMD: AVX512 enabled (F, BW, VNNI, FP16)")
-    target_compile_options(ndd_core PRIVATE -mavx512f -mavx512bw -mavx512vnni -mavx512fp16 -mavx512vpopcntdq)
+    message(STATUS "SIMD: AVX512 enabled (F, CD, DQ, BW, VNNI, FP16)")
+    target_compile_options(ndd_core PRIVATE -mavx512f -mavx512cd -mavx512dq -mavx512bw -mavx512vnni -mavx512fp16 -mavx512vpopcntdq)
     target_compile_definitions(ndd_core PRIVATE USE_AVX512)
-    target_compile_options(${NDD_BINARY_NAME} PRIVATE -mavx512f -mavx512bw -mavx512vnni -mavx512fp16 -mavx512vpopcntdq)
+    target_compile_options(${NDD_BINARY_NAME} PRIVATE -mavx512f -mavx512cd -mavx512dq -mavx512bw -mavx512vnni -mavx512fp16 -mavx512vpopcntdq)
     target_compile_definitions(${NDD_BINARY_NAME} PRIVATE USE_AVX512)
 elseif(USE_AVX2)
     message(STATUS "SIMD: AVX2 enabled")

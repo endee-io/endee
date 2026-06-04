@@ -185,7 +185,6 @@ namespace hnswlib {
         size_t getMaxElements() const { return maxElements_; }
         // Get active elements count
         size_t getElementsCount() const { return curElementsCount_ - deletedElementsCount_; }
-        size_t getDeletedCount() const { return deletedElementsCount_; }
         std::string getElementStats() const {
             std::stringstream ss;
             ss << "Elements: " << curElementsCount_ << ", MaxLevel: " << maxLevel_

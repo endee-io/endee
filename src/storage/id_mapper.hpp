@@ -63,6 +63,8 @@ public:
             return {};
         }
 
+        ensure_deleted_count_seeded(txn);
+
         constexpr idInt INVALID_LABEL = static_cast<idInt>(-1);
         std::vector<std::tuple<std::string, idInt, bool, bool>> id_tuples;
         id_tuples.reserve(str_ids.size());
@@ -107,6 +109,11 @@ public:
             }
             fresh_ids_count -= deleted_index;
         }
+
+        LOG_DEBUG("create_ids_batch: requested=" << str_ids.size()
+                                                 << " new_ids_needed=" << total_new_ids_needed
+                                                 << " reused_from_deleted=" << deleted_index
+                                                 << " fresh_ids_needed=" << fresh_ids_count);
 
         std::vector<idInt> new_ids;
         if(fresh_ids_count > 0) {
@@ -181,6 +188,58 @@ public:
         return stat.ms_entries - 1;  // Subtract 1 for NEXT_ID_KEY
     }
 
+    /** 
+     * Cached number of deleted numeric IDs currently available for reuse.
+     * Returns the locally maintained counter without touching the database. If the
+     * counter has not been seeded yet (sentinel -1), reports 0 so callers take the
+     * safe fresh-id path; seeding happens via ensure_deleted_count_seeded().
+    */ 
+    size_t get_deleted_ids_count() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        LOG_DEBUG("get_deleted_ids_count: deleted_id_count_=" << deleted_id_count_);
+        return deleted_id_count_ < 0 ? 0 : static_cast<size_t>(deleted_id_count_);
+    }
+
+    /**
+     * Seed the cached deleted-id count from an existing transaction if it has not
+     * been initialized yet (sentinel -1). Cheap no-op once seeded. Lets callers
+     * that already hold a txn (e.g. addVectors' shared write txn) initialize the
+     * count without the constructor opening a transaction of its own.
+    */
+    void ensure_deleted_count_seeded(MDBX_txn* txn) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(deleted_id_count_ < 0) {
+            deleted_id_count_ = static_cast<int64_t>(read_deleted_count(txn));
+            LOG_DEBUG("ensure_deleted_count_seeded: seeded deleted_id_count_="
+                      << deleted_id_count_);
+        }
+    }
+
+    /**
+     * Promote the count staged by getDeletedIds/deletePoints during a
+     * caller-owned txn into the live cache. The caller MUST invoke this only
+     * after its mdbx_txn_commit succeeds, so the cache never gets ahead of the
+     * persisted DELETED_IDS_KEY blob. No-op if nothing was staged.
+    */
+    void commit_deleted_count() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(pending_deleted_id_count_ >= 0) {
+            deleted_id_count_ = pending_deleted_id_count_;
+            pending_deleted_id_count_ = -1;
+            LOG_DEBUG("commit_deleted_count: deleted_id_count_=" << deleted_id_count_);
+        }
+    }
+
+    /**
+     * Drop the count staged by getDeletedIds/deletePoints without touching the
+     * live cache. The caller MUST invoke this on every txn-abort path so an
+     * aborted mutation leaves the cache reflecting the still-persisted blob.
+    */
+    void discard_pending_deleted_count() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pending_deleted_id_count_ = -1;
+    }
+
     // Get ID for a string (returns 0 if not found)
     idInt get_id(MDBX_txn* txn, const std::string& str_id) const {
         MDBX_val key, data;
@@ -196,6 +255,8 @@ public:
 
     std::vector<idInt> deletePoints(MDBX_txn* txn,
                                         const std::vector<std::string>& external_ids) {
+        ensure_deleted_count_seeded(txn);
+
         std::vector<idInt> deleted_ids;
 
         MDBX_val key, data;
@@ -247,6 +308,15 @@ public:
                 throw std::runtime_error("Failed to update deleted ID list: "
                                          + std::string(mdbx_strerror(rc)));
             }
+            {
+                /**
+                 * Stage, don't commit: this txn is owned by the caller and may
+                 * still abort after deletePoints returns. commit_deleted_count()
+                 * promotes this only once the caller's mdbx_txn_commit lands.
+                */
+                std::lock_guard<std::mutex> lock(mutex_);
+                pending_deleted_id_count_ = static_cast<int64_t>(existing.size());
+            }
         }
 
         return deleted_ids;
@@ -265,12 +335,54 @@ private:
     MDBX_env* env_;
     MDBX_dbi dbi_;
     std::string dbi_name_;
-    mutable std::mutex mutex_;  // Only used for next_id management
+    mutable std::mutex mutex_;  // Only used for next_id management and deleted_id_count_
+    /**
+     * Cached count of pending reusable (deleted) IDs in DELETED_IDS_KEY.
+     * Sentinel -1 means "not yet seeded": the count is lazily read from the first
+     * transaction that needs it (see ensure_deleted_count_seeded), avoiding an
+     * extra read in the constructor. Once seeded it is maintained at every
+     * mutation site. Mutations made under a caller-owned txn (deletePoints/
+     * getDeletedIds) are not written here directly: they stage into
+     * pending_deleted_id_count_ and are promoted only after the caller commits
+     * (commit_deleted_count) or dropped on abort (discard_pending_deleted_count),
+     * so this never drifts ahead of the persisted DELETED_IDS_KEY blob.
+    */
+    int64_t deleted_id_count_ = -1;
+    /**
+     * Count staged by getDeletedIds/deletePoints during a caller-owned txn that
+     * has not yet committed. Sentinel -1 means "nothing staged". Promoted into
+     * deleted_id_count_ by commit_deleted_count() after the caller commits, or
+     * dropped by discard_pending_deleted_count() on abort. This is what keeps
+     * the live counter from drifting ahead of the persisted blob when a
+     * caller-owned txn is later rolled back.
+    */
+    int64_t pending_deleted_id_count_ = -1;
     // Along with string:number pairs, the database also stores a key for next_id. They key for next
     // id also has random alphanumeric characters to avoid collision with other keys. The key is
     // stored as a string.
     static const std::string NEXT_ID_KEY;
     static const std::string DELETED_IDS_KEY;
+
+    /**
+     * Returns the number of deleted IDs currently persisted under DELETED_IDS_KEY
+     * computed as blob_len / sizeof(idInt). Returns 0 if the key is absent.
+    */
+    size_t read_deleted_count(MDBX_txn* txn) const {
+        std::string del_key = DELETED_IDS_KEY;
+        MDBX_val key, val;
+        key.iov_len = del_key.size();
+        key.iov_base = const_cast<char*>(del_key.data());
+
+        int rc = mdbx_get(txn, dbi_, &key, &val);
+        if(rc == MDBX_NOTFOUND) {
+            return 0;
+        }
+        if(rc != MDBX_SUCCESS) {
+            throw std::runtime_error("Failed to read deleted IDs count: "
+                                     + std::string(mdbx_strerror(rc)));
+        }
+        return val.iov_len / sizeof(idInt);
+    }
 
     // Atomic operation to get and increment next_ids
     std::vector<idInt> get_next_ids(MDBX_txn* txn, size_t size = 1) {
@@ -303,6 +415,8 @@ private:
     }
 
     std::vector<idInt> getDeletedIds(MDBX_txn* txn, size_t max_count) {
+        ensure_deleted_count_seeded(txn);
+
         std::vector<idInt> result;
 
         std::string del_key = DELETED_IDS_KEY;
@@ -325,6 +439,10 @@ private:
         size_t count = std::min(max_count, total);
         result.insert(result.end(), raw, raw + count);
 
+        LOG_DEBUG("getDeletedIds: total available=" << total << " requested=" << max_count
+                                                    << " consumed=" << count
+                                                    << " remaining=" << (total - count));
+
         if(count < total) {
             // Copy the remainder out of MDBX-managed memory before calling
             // mdbx_put on the same key. With MDBX_WRITEMAP, passing a pointer
@@ -336,8 +454,18 @@ private:
             new_val.iov_len = remainder.size() * sizeof(idInt);
             new_val.iov_base = remainder.data();
             rc = mdbx_put(txn, dbi_, &key, &new_val, MDBX_UPSERT);
+            if(rc == MDBX_SUCCESS) {
+                /** Stage, don't commit: caller owns txn and may still abort. */
+                std::lock_guard<std::mutex> lock(mutex_);
+                pending_deleted_id_count_ = static_cast<int64_t>(remainder.size());
+            }
         } else {
             rc = mdbx_del(txn, dbi_, &key, nullptr);
+            if(rc == MDBX_SUCCESS) {
+                /** Stage, don't commit: caller owns txn and may still abort. */
+                std::lock_guard<std::mutex> lock(mutex_);
+                pending_deleted_id_count_ = 0;
+            }
         }
         if(rc != MDBX_SUCCESS && rc != MDBX_NOTFOUND) {
             throw std::runtime_error("Failed to update deleted IDs: "
@@ -393,7 +521,17 @@ private:
             del_mdb_val.iov_base = existing.data();
             mdbx_put(txn, dbi_, &del_mdb_key, &del_mdb_val, MDBX_UPSERT);
 
-            mdbx_txn_commit(txn);
+            rc = mdbx_txn_commit(txn);
+            if(rc == MDBX_SUCCESS) {
+                /**
+                 * Only update the cached counter after the commit lands so a
+                 * rollback does not leave it ahead of the persisted blob. This is
+                 * an absolute value read from the DB, so it also seeds the counter
+                 * if it was still the -1 sentinel.
+                */ 
+                std::lock_guard<std::mutex> lock(mutex_);
+                deleted_id_count_ = static_cast<int64_t>(existing.size());
+            }
         } catch(...) {
             mdbx_txn_abort(txn);
         }

@@ -1213,13 +1213,25 @@ public:
                 if(txn) {
                     mdbx_txn_abort(txn);
                     txn = nullptr;
+                    /**
+                     * Drop any deleted-id count staged by create_ids_batch's
+                     * getDeletedIds: the consume was rolled back with the txn.
+                    */
+                    entry.id_mapper->discard_pending_deleted_count();
                     entry.vector_storage->reload_filter_schema_cache();
                 }
             };
 
             try {
+                /**
+                 * Seed the deleted-id count from this shared write txn before the
+                 * reuse check below. The IDMapper constructor no longer reads it,
+                 * so the first operation initializes it here without a new txn.
+                */ 
+                entry.id_mapper->ensure_deleted_count_seeded(txn);
+
                 // Get or create numeric IDs in the same write transaction as the data rows.
-                if(entry.alg->getDeletedCount() > 0) {
+                if(entry.id_mapper->get_deleted_ids_count() > 0) {
                     numeric_ids = entry.id_mapper->create_ids_batch<true>(txn, str_ids);
                 } else {
                     numeric_ids = entry.id_mapper->create_ids_batch<false>(txn, str_ids);
@@ -1300,10 +1312,16 @@ public:
             rc = mdbx_txn_commit(txn);
             txn = nullptr;
             if(rc != MDBX_SUCCESS) {
+                entry.id_mapper->discard_pending_deleted_count();
                 entry.vector_storage->reload_filter_schema_cache();
                 return {100, "Failed to commit shared index transaction: "
                                      + std::string(mdbx_strerror(rc))};
             }
+            /**
+             * Commit landed: promote the deleted-id count consumed by
+             * create_ids_batch into the live cache.
+            */
+            entry.id_mapper->commit_deleted_count();
             if(filter_schema_changed) {
                 auto schema_result = entry.vector_storage->reload_filter_schema_cache();
                 if(!schema_result.ok()) {
@@ -1607,6 +1625,11 @@ public:
                 if(txn) {
                     mdbx_txn_abort(txn);
                     txn = nullptr;
+                    /**
+                     * Drop the deleted-id count staged by deletePoints: the
+                     * appended IDs were rolled back with the txn.
+                    */
+                    entry.id_mapper->discard_pending_deleted_count();
                     entry.vector_storage->reload_filter_schema_cache();
                 }
             };
@@ -1697,9 +1720,15 @@ public:
                 rc = mdbx_txn_commit(txn);
                 txn = nullptr;
                 if(rc != MDBX_SUCCESS) {
+                    entry.id_mapper->discard_pending_deleted_count();
                     return {100, "Failed to commit shared delete transaction: "
                                          + std::string(mdbx_strerror(rc))};
                 }
+                /**
+                 * Commit landed: promote the deleted-id count appended by
+                 * deletePoints into the live cache.
+                */
+                entry.id_mapper->commit_deleted_count();
 
                 if(entry.sparse_storage && sparse_vector_count_delta != 0) {
                     entry.sparse_storage->apply_vector_count_delta(sparse_vector_count_delta);

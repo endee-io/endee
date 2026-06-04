@@ -34,7 +34,29 @@ BLOOM_FILTER_FILENAME = "id_bloom.bin"     // Bloom filter file
 - **ID Recycling**: Deleted IDs are stored and reused before generating new ones
 - **Batch Generation**: Multiple IDs generated atomically in single transaction
 
-#### 4. Bloom Filter Integration
+#### 4. Cached deleted-id count (`deleted_id_count_`)
+
+`DELETED_IDS_KEY` holds the array of reusable ids, but reading its length means an `mdbx_get` plus a byte-length divide. To let the insert path cheaply decide *whether* to attempt id recycling, `IDMapper` keeps an in-memory cache of that count.
+
+- **Members**:
+  - `int64_t deleted_id_count_` — the **committed** count: how many ids are pending reuse in the *persisted* `DELETED_IDS_KEY`. This is what `get_deleted_ids_count()` reports.
+  - `int64_t pending_deleted_id_count_` — the count **staged** by a mutation made under a caller-owned txn that has not yet committed. Sentinel `-1` means "nothing staged".
+- **Sentinel `-1` = "not yet seeded"** (for `deleted_id_count_`). The constructor does **not** read `DELETED_IDS_KEY`; the count is initialized lazily on first use. This keeps the constructor's setup txn free of an extra read and means an index that is opened but never written never pays for the read at all.
+- **Lazy seeding** — `ensure_deleted_count_seeded(MDBX_txn* txn)`: if the value is still `-1`, it reads the true count from the *caller's* transaction (0 when the key is absent) and caches it. Once seeded it is a cheap no-op (one mutex acquire, no DB access). It is invoked at the entry of every txn-bearing read path (`create_ids_batch`, `deletePoints`, `getDeletedIds`) and, crucially, from `addVectors` in `src/core/ndd.hpp` on the shared write txn *before* the recycle decision is made.
+- **Stage-then-commit maintenance** — mutations made under a **caller-owned txn never write `deleted_id_count_` directly**, because that txn may still abort after the method returns. Instead they stage the new persisted size into `pending_deleted_id_count_`:
+  - `deletePoints` → `pending_deleted_id_count_ = existing.size()` after the append.
+  - `getDeletedIds` → `pending_deleted_id_count_ = remainder.size()` on partial consume, `= 0` when the key is fully drained and deleted.
+
+  The caller then resolves the staged value based on the txn outcome:
+  - `commit_deleted_count()` — promotes `pending_deleted_id_count_` into `deleted_id_count_`. The caller invokes this **only after `mdbx_txn_commit` succeeds**.
+  - `discard_pending_deleted_count()` — drops the staged value, leaving `deleted_id_count_` reflecting the still-persisted blob. The caller invokes this on **every txn-abort path** (including a failed commit).
+
+  `add_to_deleted_ids` is the exception: it owns its own txn, so it writes `deleted_id_count_ = existing.size()` directly **after its own commit** (an absolute value read from the DB, so it also seeds if still `-1`).
+- **Accessor** — `size_t get_deleted_ids_count()`: returns the **committed** count (`deleted_id_count_`) under `mutex_`; it never reflects an uncommitted staged value. While unseeded (`-1`) it reports `0`, which routes `addVectors` to the safe `create_ids_batch<false>` (allocate-fresh) path.
+
+**Consistency guarantee**: because caller-owned-txn mutations stage rather than write, and the staged value is promoted only after the owning `mdbx_txn_commit` lands (or dropped on abort), the cached `deleted_id_count_` never drifts ahead of the persisted `DELETED_IDS_KEY` blob. The previous optimistic-update model could leave the cache too high after a rolled-back delete or too low after a rolled-back insert; staging removes that drift. The two staging hooks (`commit_deleted_count`/`discard_pending_deleted_count`) are wired into `addVectors` and `deleteVectors` in `src/core/ndd.hpp` alongside their existing commit/`abort_txn` paths.
+
+#### 5. Bloom Filter Integration
 - **Purpose**: Fast negative lookups to avoid unnecessary MDBX queries
 - **False Positive Rate**: 1% (0.01)
 - **Auto-sizing**: Grows based on element count using bit-doubling
@@ -55,6 +77,7 @@ Returns `(numeric_id, is_new_to_db)` per input string. `is_new_to_db == true` me
 
 **Process flow** (all inside the caller's txn):
 
+0. **Seed the deleted-id count** — `ensure_deleted_count_seeded(txn)` lazily initializes `deleted_id_count_` from the caller's txn on first use (no-op once seeded). See "Cached deleted-id count" above.
 1. **Bloom filter check** — quick negative filter; only `might_exist` strings proceed to MDBX.
 2. **MDBX lookup** via the caller's txn — returns existing numeric ids for found strings, marks the rest for creation.
 3. **Deleted id recycling** — consume from `DELETED_IDS_KEY` first (see `getDeletedIds`); newly-recycled numeric ids are *fresh inserts to HNSW* even though the numeric id is reused, so `is_new_to_db` stays `true`. (This invariant is the Bug A fix; see "Recovery and known bugs" below.)
@@ -83,9 +106,11 @@ std::vector<idInt> deletePoints(MDBX_txn* txn,
                                 const std::vector<std::string>& external_ids);
 ```
 
+- Seeds `deleted_id_count_` from `txn` if not yet initialized.
 - Looks up numeric ids for each string id.
 - Deletes string→numeric rows from `id_map` through `txn`.
-- Pushes the freed numeric ids onto `DELETED_IDS_KEY` via `add_to_deleted_ids` (inside the same txn).
+- Appends the freed numeric ids onto `DELETED_IDS_KEY` (inside the caller's `txn`).
+- **Stages** the new size into `pending_deleted_id_count_` rather than writing the cache. The caller must call `commit_deleted_count()` after committing `txn`, or `discard_pending_deleted_count()` if it aborts.
 - Returns the vector of freed numeric ids (`0` for not-found entries).
 
 ### 4. Deleted ID Retrieval - `getDeletedIds()`
@@ -94,9 +119,10 @@ std::vector<idInt> deletePoints(MDBX_txn* txn,
 std::vector<idInt> getDeletedIds(MDBX_txn* txn, size_t max_count);
 ```
 
+- Seeds `deleted_id_count_` from `txn` if not yet initialized.
 - Reads the `DELETED_IDS_KEY` array.
 - Pops up to `max_count` ids from the head.
-- Writes back the remainder (or deletes the key if empty) through `txn`.
+- Writes back the remainder (or deletes the key if empty) through `txn`, and **stages** the remaining size into `pending_deleted_id_count_` (`0` when drained). As with `deletePoints`, the caller promotes via `commit_deleted_count()` after commit or drops via `discard_pending_deleted_count()` on abort. Called from inside `create_ids_batch`, so the staged value rides on `addVectors`' shared write txn.
 - Returns the popped ids for reuse.
 - The remainder is copied into a caller-owned `std::vector<idInt>` before being written back; the original `MDBX_val` from `mdbx_get` aliases the mapped page and using it as the source of `mdbx_put` under `MDBX_WRITEMAP` is documented UB.
 
@@ -221,7 +247,13 @@ IDMapper(MDBX_env* env,                         // shared per-index env from Sha
 ### Vector addition (caller's write txn)
 ```cpp
 MDBX_txn* txn = /* begun on shared env */;
-auto mappings = id_mapper->create_ids_batch(txn, str_ids);
+
+// Seed the cached deleted-id count from this txn (no-op once seeded), then pick
+// the recycle path only when there are ids to reuse.
+id_mapper->ensure_deleted_count_seeded(txn);
+auto mappings = id_mapper->get_deleted_ids_count() > 0
+                    ? id_mapper->create_ids_batch<true>(txn, str_ids)   // reuse deleted ids
+                    : id_mapper->create_ids_batch<false>(txn, str_ids); // allocate fresh only
 for (auto [numeric_id, is_new_to_db] : mappings) {
     if (is_new_to_db) {
         // Fresh insert: VECTOR_ADD already appended to op_log
@@ -229,7 +261,13 @@ for (auto [numeric_id, is_new_to_db] : mappings) {
         // Upsert against existing live id
     }
 }
+// On any abort path: id_mapper->discard_pending_deleted_count();
+//
 // caller commits txn -> id_map + op_log row + vector bytes + meta + filter rows all land atomically
+if (mdbx_txn_commit(txn) == MDBX_SUCCESS) {
+    // Promote the deleted-id count consumed by create_ids_batch only now that the txn committed.
+    id_mapper->commit_deleted_count();
+}
 ```
 
 ### Vector lookup
@@ -263,7 +301,7 @@ auto deleted_ids = id_mapper->deletePoints(to_delete);
 ### Monitoring
 1. **ID Space Usage**: Monitor `get_count()` for growth patterns
 2. **Bloom Filter Efficiency**: Track false positive rates
-3. **Deleted ID Pool**: Monitor recycling effectiveness
+3. **Deleted ID Pool**: Monitor recycling effectiveness via `get_deleted_ids_count()` (cached, no DB read)
 
 ## Implementation Notes
 

@@ -9,6 +9,7 @@
 #include "float16.hpp"
 #include "float32.hpp"
 #include "int8.hpp"
+#include "int8e.hpp"
 #include "int16.hpp"
 #include "binary.hpp"
 

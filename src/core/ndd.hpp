@@ -2193,28 +2193,51 @@ public:
                     bitmap.toUint32Array(valid_ids.data());
 
                     auto* space = entry.alg->getSpace();
-                    auto distance_func = space->get_dist_func();
-                    void* dist_func_param = space->get_dist_func_param();
-                    std::priority_queue<std::pair<float, ndd::idInt>> top_results;
+
+                    std::vector<ndd::idInt> fetched_ids;
+                    std::vector<const void*> vector_ptrs;
+                    fetched_ids.reserve(valid_ids.size());
+                    vector_ptrs.reserve(valid_ids.size());
 
                     entry.vector_storage->visit_vectors_by_ids(
                             main_txn, valid_ids,
                             [&](ndd::idInt numeric_id, const void* vector_data) {
-                                float distance = distance_func(query_bytes.data(),
-                                                               vector_data,
-                                                               dist_func_param);
-                                if(top_results.size() < top_k) {
-                                    top_results.emplace(distance, numeric_id);
-                                } else if(distance < top_results.top().first) {
-                                    top_results.pop();
-                                    top_results.emplace(distance, numeric_id);
-                                }
+                                fetched_ids.push_back(numeric_id);
+                                vector_ptrs.push_back(vector_data);
                             });
 
-                    dense_results.resize(top_results.size());
-                    for(auto it = dense_results.rbegin(); it != dense_results.rend(); ++it) {
-                        *it = top_results.top();
-                        top_results.pop();
+                    if(!vector_ptrs.empty()) {
+                        std::vector<float> sims;
+                        entry.alg->computeBatchSimilaritiesFromPtrs(
+                                query_bytes.data(),
+                                vector_ptrs,
+                                space->get_sim_func(),
+                                space->get_dist_func_param(),
+                                sims);
+
+                        auto cmp = [](const std::pair<float, ndd::idInt>& a,
+                                      const std::pair<float, ndd::idInt>& b) {
+                            return a.first > b.first;
+                        };
+                        std::priority_queue<std::pair<float, ndd::idInt>,
+                                            std::vector<std::pair<float, ndd::idInt>>,
+                                            decltype(cmp)> topk_min_heap(cmp);
+                        for(size_t i = 0; i < sims.size(); ++i) {
+                            const std::pair<float, ndd::idInt> candidate{sims[i], fetched_ids[i]};
+                            if(topk_min_heap.size() < top_k) {
+                                topk_min_heap.push(candidate);
+                            } else if(candidate.first > topk_min_heap.top().first) {
+                                topk_min_heap.pop();
+                                topk_min_heap.push(candidate);
+                            }
+                        }
+
+                        dense_results.reserve(topk_min_heap.size());
+                        while(!topk_min_heap.empty()) {
+                            dense_results.push_back(topk_min_heap.top());
+                            topk_min_heap.pop();
+                        }
+                        std::reverse(dense_results.begin(), dense_results.end());
                     }
                 }
             }

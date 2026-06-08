@@ -44,6 +44,7 @@ namespace serverless {
     };
     const std::vector<ndd::quant::QuantizationLevel> ALLOWED_PRECISIONS_PRO = {
         ndd::quant::QuantizationLevel::INT8,
+        ndd::quant::QuantizationLevel::INT8E,
         ndd::quant::QuantizationLevel::INT16,
         ndd::quant::QuantizationLevel::FP16,
         ndd::quant::QuantizationLevel::FP32,
@@ -51,6 +52,7 @@ namespace serverless {
     };
     const std::vector<ndd::quant::QuantizationLevel> ALLOWED_PRECISIONS_SCALE = {
         ndd::quant::QuantizationLevel::INT8,
+        ndd::quant::QuantizationLevel::INT8E,
         ndd::quant::QuantizationLevel::INT16,
         ndd::quant::QuantizationLevel::FP16,
         ndd::quant::QuantizationLevel::FP32,

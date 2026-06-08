@@ -29,6 +29,7 @@ namespace ndd {
             FP32 = 32,   // Full precision float (4 bytes per dimension)
             INT16 = 16,  // Dynamic 16-bit integer quantization
             FP16 = 15,   // Half precision float (2 bytes per dimension)
+            INT8E = 9,   // Dynamic 8-bit quantization with roundoff-sign bits + correction
             BINARY = 1,  // Binary quantization (1 bit per dimension)
             INT8 = 8,    // Dynamic 8-bit integer quantization
             UNKNOWN = 0
@@ -346,13 +347,8 @@ namespace ndd {
                     final_max = _mm512_max_ps(final_max, vec);
                 }
 
-                // Horizontal reduction of final_max
-                float result[16];
-                _mm512_storeu_ps(result, final_max);
-                float abs_max = 0.0f;
-                for(int j = 0; j < 16; ++j) {
-                    abs_max = std::max(abs_max, result[j]);
-                }
+                // Horizontal reduction using single intrinsic (avoids store + scalar loop)
+                float abs_max = _mm512_reduce_max_ps(final_max);
 
                 // Handle remaining elements
                 for(; i < size; ++i) {
@@ -476,13 +472,13 @@ namespace ndd {
                     final_max = _mm256_max_ps(final_max, vec);
                 }
 
-                // Horizontal reduction
-                float result[8];
-                _mm256_storeu_ps(result, final_max);
-                float abs_max = 0.0f;
-                for(int j = 0; j < 8; ++j) {
-                    abs_max = std::max(abs_max, result[j]);
-                }
+                // Horizontal reduction using tree reduction (avoids store + scalar loop)
+                __m128 lo128 = _mm256_castps256_ps128(final_max);
+                __m128 hi128 = _mm256_extractf128_ps(final_max, 1);
+                lo128 = _mm_max_ps(lo128, hi128);
+                lo128 = _mm_max_ps(lo128, _mm_movehl_ps(lo128, lo128));
+                lo128 = _mm_max_ps(lo128, _mm_shuffle_ps(lo128, lo128, 1));
+                float abs_max = _mm_cvtss_f32(lo128);
 
                 // Handle remaining elements
                 for(; i < size; ++i) {

@@ -14,7 +14,7 @@ constexpr uint64_t TB = (1024ULL * GB);
 
 namespace settings {
     // === Compile-time constants ===
-    inline const std::string VERSION = "1.1.0";
+    inline const std::string VERSION = "1.3.5";
     inline uint16_t INDEX_VERSION = 1;
     inline uint32_t INDEX_LAYOUT_VERSION = 2;
     inline constexpr uint32_t LEGACY_INDEX_LAYOUT_VERSION = 0;

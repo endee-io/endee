@@ -557,6 +557,127 @@ int main(int argc, char** argv) {
                 }
             });
 
+    // Rebuild an index's HNSW graph with new M/ef_con (async, 202 + status endpoint)
+    CROW_ROUTE(app, "/api/v1/index/<string>/rebuild")
+            .CROW_MIDDLEWARES(app, AuthMiddleware)
+            .methods("POST"_method)([&index_manager, &app](const crow::request& req,
+                                                           const std::string& index_name) {
+                auto& ctx = app.get_context<AuthMiddleware>(req);
+                std::string index_id = ctx.username + "/" + index_name;
+
+                std::optional<size_t> new_M;
+                std::optional<size_t> new_ef;
+
+                // Body is optional (both parameters optional); parse only if present.
+                if(!req.body.empty()) {
+                    auto body = crow::json::load(req.body);
+                    if(!body) {
+                        LOG_WARN(1083, ctx.username, index_name,
+                                 "Rebuild request contained invalid JSON");
+                        return json_error(400, "Invalid JSON");
+                    }
+
+                    // Only M and ef_con may change; everything else is immutable in a rebuild.
+                    if(body.has("space_type") || body.has("precision") || body.has("dim")
+                       || body.has("sparse_model")) {
+                        LOG_WARN(1077, ctx.username, index_name,
+                                 "Rebuild request included an immutable field");
+                        return json_error(400,
+                                          "Rebuild can only change M and ef_con; space_type, "
+                                          "precision, dim and sparse_model are immutable");
+                    }
+
+                    if(body.has("M")) {
+                        size_t m = (size_t)body["M"].i();
+                        if(m < settings::MIN_M || m > settings::MAX_M) {
+                            LOG_WARN(1078, ctx.username, index_name, "Rebuild invalid M: " << m);
+                            return json_error(400,
+                                              "M must be between " + std::to_string(settings::MIN_M)
+                                                      + " and " + std::to_string(settings::MAX_M));
+                        }
+                        new_M = m;
+                    }
+
+                    if(body.has("ef_con")) {
+                        size_t ef = (size_t)body["ef_con"].i();
+                        if(ef < settings::MIN_EF_CONSTRUCT || ef > settings::MAX_EF_CONSTRUCT) {
+                            LOG_WARN(1079, ctx.username, index_name,
+                                     "Rebuild invalid ef_con: " << ef);
+                            return json_error(400,
+                                              "ef_con must be between "
+                                                      + std::to_string(settings::MIN_EF_CONSTRUCT)
+                                                      + " and "
+                                                      + std::to_string(settings::MAX_EF_CONSTRUCT));
+                        }
+                        new_ef = ef;
+                    }
+                }
+
+                try {
+                    /**
+                     * createRebuildAsync runs its exclusion checks before any lock-taking
+                     * call and returns the config in its value, so we do NOT call
+                     * getIndexInfo here - doing so would take the per-index shared lock that
+                     * an in-progress rebuild holds, blocking this request instead of
+                     * rejecting it.
+                     */
+                    auto result = index_manager.createRebuildAsync(index_id, new_M, new_ef);
+                    if(!result.ok()) {
+                        if(result.code == 1) {
+                            LOG_WARN(1080, ctx.username, index_name,
+                                     "Rebuild requested for missing index");
+                            return json_error(404, result.message);
+                        }
+                        if(operation_error_is_client_error(result)) {
+                            LOG_WARN(1081, ctx.username, index_name,
+                                     "Rebuild request rejected: " << result.message);
+                            return json_error(400, result.message);
+                        }
+                        return json_error_500(ctx.username, index_name, req.url, result.message);
+                    }
+
+                    const auto& rinfo = result.value_or_throw();
+                    crow::json::wvalue response;
+                    response["status"] = "in_progress";
+                    response["previous_config"]["M"] = rinfo.prev_M;
+                    response["previous_config"]["ef_con"] = rinfo.prev_ef;
+                    response["new_config"]["M"] = rinfo.new_M;
+                    response["new_config"]["ef_con"] = rinfo.new_ef;
+                    response["total_vectors"] = rinfo.total_vectors;
+                    LOG_INFO(1082, ctx.username, index_name, "Rebuild accepted");
+                    return crow::response(202, response.dump());
+                } catch(const std::runtime_error& e) {
+                    return json_error(409, e.what());
+                } catch(const std::exception& e) {
+                    return json_error_500(ctx.username, index_name, req.url, e.what());
+                }
+            });
+
+    /**
+     * Rebuild status. NOTE: <name> is currently informational. Rebuild status is tracked per
+     * user (one rebuild per user), so getRebuildStatus ignores the index and returns the
+     * user's current/last rebuild regardless of <name>; the response's index_id identifies
+     * which index it targets. <name> is kept in the path and reserved to select a specific
+     * index's rebuild once multi-rebuild-per-user is supported, so the API need not change then.
+     */
+    CROW_ROUTE(app, "/api/v1/index/<string>/rebuild/status")
+            .CROW_MIDDLEWARES(app, AuthMiddleware)
+            .methods("GET"_method)([&index_manager, &app](const crow::request& req,
+                                                          const std::string& index_name) {
+                auto& ctx = app.get_context<AuthMiddleware>(req);
+                std::string index_id = ctx.username + "/" + index_name;
+                try {
+                    auto status = index_manager.getRebuildStatus(index_id);
+                    crow::response res;
+                    res.code = 200;
+                    res.set_header("Content-Type", "application/json");
+                    res.body = status.dump();
+                    return res;
+                } catch(const std::exception& e) {
+                    return json_error_500(ctx.username, index_name, req.url, e.what());
+                }
+            });
+
     // List Backups
     CROW_ROUTE(app, "/api/v1/backups")
             .CROW_MIDDLEWARES(app, AuthMiddleware)

@@ -293,6 +293,7 @@ set(NDD_FILTER_SOURCES
 set(NDD_CORE_SOURCES
     src/sparse/inverted_index.cpp
     src/utils/system_sanity/system_sanity.cpp
+    src/core/rebuild.cpp
     ${NDD_FILTER_SOURCES}
 )
 
@@ -329,6 +330,10 @@ target_include_directories(ndd_core PRIVATE
     ${ASIO_INCLUDE_DIR}
     ${OPENSSL_INCLUDE_DIR}
     ${CURL_INCLUDE_DIRS}
+    # rebuild.cpp (now in NDD_CORE_SOURCES) pulls in backup_store.hpp -> archive.h; the
+    # executable gets this transitively from the archive_static target it links, but this
+    # OBJECT library links nothing, so it needs the libarchive include dir explicitly.
+    ${LIBARCHIVE_INCLUDE_DIR}
 )
 target_include_directories(${NDD_BINARY_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src

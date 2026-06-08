@@ -11,6 +11,7 @@
 #include "log.hpp"
 #include "settings.hpp"
 #include "../core/types.hpp"
+#include "../utils/types.hpp"
 #include "mdbx/mdbx.h"
 #include "quant/common.hpp"
 
@@ -137,6 +138,35 @@ public:
         }
         metadata->total_elements = count;
         return storeMetadata(index_id, *metadata);
+    }
+
+    /**
+     * Update the persisted HNSW build parameters (M, ef_construction) for an index.
+     *
+     * Used by the rebuild operation after a new graph with new parameters has been
+     * swapped into place. The authoritative copy of these values lives inside the
+     * `default.idx` file; this keeps the denormalized metadata copy (read by the
+     * not-in-memory getIndexInfo path) in sync.
+     *
+     * Return codes:
+     * 0   = success
+     * 100 = metadata missing for the index (invariant violation - the index is live), or
+     *       the metadata write failed; caller should log and continue (the .idx is
+     *       authoritative for a loaded index, so the denormalized copy self-heals on the
+     *       next save).
+     */
+    ndd::OperationResult<> updateHnswParams(const std::string& index_id, size_t M, size_t ef_con) {
+        auto metadata = getMetadata(index_id);
+        if(!metadata) {
+            LOG_WARN(1522, index_id, "Cannot update HNSW params because metadata was not found");
+            return {100, "metadata not found for index " + index_id};
+        }
+        metadata->M = M;
+        metadata->ef_con = ef_con;
+        if(!storeMetadata(index_id, *metadata)) {
+            return {100, "failed to persist HNSW params for index " + index_id};
+        }
+        return {SUCCESS, ""};
     }
 
     // Retrieve metadata for an index

@@ -125,6 +125,26 @@ public:
         }
     }
 
+    /**
+     * Writes a defragmented copy of `env`'s data file to `dest_path` (a single
+     * file, regardless of the source's subdir mode), omitting free/garbage
+     * pages via MDBX_CP_COMPACT. The source env is only read, never modified, so
+     * this is safe to run on a live env; the caller should hold the index
+     * operation lock so the internal read snapshot does not pin pages against a
+     * concurrent writer for longer than necessary.
+     *
+     * The caller is responsible for atomically renaming `dest_path` over the
+     * live `mdbx.dat` and reopening the env. Returns the MDBX result code
+     * (MDBX_SUCCESS on success); on failure `dest_path` may be partially written
+     * and should be removed by the caller, and the source is untouched.
+     */
+    static int copy_compact(MDBX_env* env, const std::string& dest_path) {
+        return mdbx_env_copy(
+                env,
+                dest_path.c_str(),
+                static_cast<MDBX_copy_flags_t>(MDBX_CP_COMPACT | MDBX_CP_FORCE_DYNAMIC_SIZE));
+    }
+
     static uint32_t read_layout_version(MDBX_env* env) {
         MDBX_txn* txn = nullptr;
         int rc = mdbx_txn_begin(env, nullptr, MDBX_TXN_RDONLY, &txn);

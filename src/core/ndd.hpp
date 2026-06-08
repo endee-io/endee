@@ -59,7 +59,7 @@ struct IndexInfo {
 struct CacheEntry {
     std::string index_id;
     ndd::SparseScoringModel sparse_model = ndd::SparseScoringModel::NONE;
-    std::unique_ptr<hnswlib::HierarchicalNSW<float>> alg;
+    std::shared_ptr<hnswlib::HierarchicalNSW<float>> alg;
     std::shared_ptr<IDMapper> id_mapper;
     std::shared_ptr<VectorStorage> vector_storage;
     std::unique_ptr<ndd::SparseVectorStorage> sparse_storage;
@@ -133,6 +133,22 @@ struct CacheEntry {
      * TODO: Revisit the locking mechanism to make it finegrained for performance.
      */
     std::shared_mutex operation_mutex;
+
+    /**
+     * Guards ONLY the hand-off of the `alg` pointer between a rebuild's hot-swap and the
+     * lock-free readers (search, getVector) - never the search itself.
+     *
+     * Readers take it in shared mode just long enough to copy `alg` into a local shared_ptr,
+     * then run the query against that local copy with no lock held. Rebuild::run (and
+     * reloadIndex) take it exclusively for the single `alg = std::move(...)`. The captured
+     * shared_ptr keeps the old graph alive until the in-flight query finishes, so the swap
+     * never frees a HierarchicalNSW out from under a running searchKnn.
+     *
+     * A dedicated mutex - not operation_mutex - because the rebuild holds operation_mutex
+     * exclusively for the whole (multi-minute) build, which would otherwise block readers for
+     * the entire rebuild. This one is held only for a pointer copy.
+     */
+    std::shared_mutex alg_swap_mutex;
 
     // Default constructor required for map
     CacheEntry() :
@@ -209,9 +225,11 @@ struct PersistenceConfig {
 };
 
 #include "../storage/backup_store.hpp"
+#include "rebuild.hpp"
 
 class IndexManager {
 private:
+    friend class Rebuild;  // Rebuild's worker uses IndexManager internals; see rebuild.cpp.
     std::deque<std::string> indices_list_;
     std::unordered_map<std::string, std::shared_ptr<CacheEntry>> indices_;
 
@@ -231,7 +249,16 @@ private:
     // Autosave methods
     std::thread autosave_thread_;
     std::atomic<bool> running_{true};
+    /**
+     * Serializes the start decision of a backup vs a rebuild for one user. Both
+     * createBackupAsync and Rebuild::start hold it across their entire "check the other
+     * subsystem is idle + reserve this one" sequence, so the two can never both launch for
+     * the same user. Without it the two checks race - each sees the other idle and both
+     * start - violating the backup/rebuild mutual exclusion (docs/rebuild.md).
+     */
+    std::mutex backup_rebuild_exclusion_mutex_;
     BackupStore backup_store_;
+    Rebuild rebuild_;
     void executeBackupJob(const std::string& index_id, const std::string& backup_name,
                           std::stop_token st);
 
@@ -634,7 +661,8 @@ public:
                 const PersistenceConfig& persistence_config = PersistenceConfig{}) :
         data_dir_(data_dir),
         persistence_config_(persistence_config),
-        backup_store_(data_dir) {
+        backup_store_(data_dir),
+        rebuild_(this, data_dir) {
         std::filesystem::create_directories(data_dir);
         metadata_manager_ = std::make_unique<MetadataManager>(data_dir);
         // Start the autosave thread
@@ -648,6 +676,9 @@ public:
         // Join background backup threads before destroying members
         // (prevents use-after-free when detached threads outlive IndexManager)
         backup_store_.joinAllThreads();
+
+        // Stop + join any in-flight rebuild worker for the same reason.
+        rebuild_.joinAll();
 
         /**
          * Don't wait for autosave thread to exit.
@@ -911,6 +942,10 @@ public:
         }
         const ndd::SparseScoringModel sparse_model = metadata->sparse_model;
 
+        // Remove an orphan rebuild temp left by a rebuild that crashed before its rename.
+        std::error_code rebuild_tmp_ec;
+        std::filesystem::remove(index_path + ".rebuild", rebuild_tmp_ec);
+
         if(!std::filesystem::exists(index_path) || !std::filesystem::exists(vector_storage_dir)) {
             throw std::runtime_error("Required files missing for index: " + index_id);
         }
@@ -923,6 +958,22 @@ public:
 
         } catch(const std::exception& e) {
             throw std::runtime_error("Cannot load index '" + index_id + "': " + e.what());
+        }
+
+        /**
+         * Reconcile the denormalized metadata copy of M/ef_con with the authoritative .idx
+         * header just loaded. A rebuild that crashed - or whose best-effort metadata update
+         * failed - between its atomic rename and the metadata write leaves the metadata DB
+         * with the old values while the .idx (and hence this graph) carries the new ones. Heal
+         * the copy on load so the cold getIndexInfo / list-indexes paths report the truth.
+         * updateHnswParams logs its own warning on failure; the .idx stays authoritative.
+         */
+        if(metadata->M != alg->getM() || metadata->ef_con != alg->getEfConstruction()) {
+            LOG_WARN(2068, index_id,
+                     "Reconciling stale HNSW params in metadata: M " << metadata->M << " -> "
+                             << alg->getM() << ", ef_con " << metadata->ef_con << " -> "
+                             << alg->getEfConstruction());
+            metadata_manager_->updateHnswParams(index_id, alg->getM(), alg->getEfConstruction());
         }
 
         // Step 2: Create shared-env stores. IDMapper handles sequence initialization.
@@ -1079,8 +1130,15 @@ public:
             return vs->get_vectors_batch_into(txn, labels, buffers, success, count);
         });
 
-        // Replace the algorithm in the existing entry
-        entry->alg = std::move(new_alg);
+        /**
+         * Replace the algorithm in the existing entry. Guard the swap with alg_swap_mutex
+         * (same as Rebuild::run) so a concurrent lock-free reader (search/getVector) cannot
+         * observe a torn pointer; readers that already captured the old graph keep it alive.
+         */
+        {
+            std::lock_guard<std::shared_mutex> swap_lock(entry->alg_swap_mutex);
+            entry->alg = std::move(new_alg);
+        }
     }
 
     /**
@@ -1522,11 +1580,16 @@ public:
             auto& entry = *entry_ptr;
 
             /**
-             * XXX: We aren't using reader's lock here to enable reads while
-             * writing.
-             * TODO: check correctness when stressing the system.
+             * Capture the current graph under the brief alg_swap_mutex (see search()); the
+             * local shared_ptr keeps it alive if a rebuild hot-swaps entry.alg while this read
+             * is in flight. We do NOT take operation_mutex (a rebuild holds it for its whole
+             * build).
              */
-            // std::shared_lock<std::shared_mutex> operation_lock(entry.operation_mutex);
+            std::shared_ptr<hnswlib::HierarchicalNSW<float>> alg;
+            {
+                std::shared_lock<std::shared_mutex> swap_lock(entry.alg_swap_mutex);
+                alg = entry.alg;
+            }
 
             MDBX_txn* txn = nullptr;
             int rc = mdbx_txn_begin(
@@ -1569,10 +1632,10 @@ public:
                 obj.filter = meta.filter;
                 obj.norm = meta.norm;
 
-                ndd::quant::QuantizationLevel quant_level = entry.alg->getQuantLevel();
+                ndd::quant::QuantizationLevel quant_level = alg->getQuantLevel();
                 std::vector<float> float_data =
                         ndd::quant::get_quantizer_dispatch(quant_level)
-                                .dequantize(vec_bytes.data(), entry.alg->getDimension());
+                                .dequantize(vec_bytes.data(), alg->getDimension());
                 obj.vector = {float_data.begin(), float_data.end()};
 
                 if(entry.sparse_storage) {
@@ -2006,11 +2069,17 @@ public:
             auto& entry = *entry_ptr;
 
             /**
-             * XXX: We aren't using reader's lock here to enable reads while
-             * writing.
-             * TODO: check correctness when stressing the system.
+             * We intentionally do NOT take operation_mutex here - a rebuild holds it
+             * exclusively for its entire build, which would block search for the whole
+             * rebuild. Instead capture the current graph under the brief alg_swap_mutex; the
+             * local shared_ptr keeps it alive even if a rebuild hot-swaps entry.alg
+             * mid-search, so this query safely runs against the graph it started with.
              */
-            // std::shared_lock<std::shared_mutex> operation_lock(entry.operation_mutex);
+            std::shared_ptr<hnswlib::HierarchicalNSW<float>> alg;
+            {
+                std::shared_lock<std::shared_mutex> swap_lock(entry.alg_swap_mutex);
+                alg = entry.alg;
+            }
 
             entry.searchCount += 1;
 
@@ -2034,7 +2103,7 @@ public:
              * with meaningless scores. Empty dense query stays legal so sparse-only
              * search continues to work.
              */
-            const size_t configured_dim_search = entry.alg->getDimension();
+            const size_t configured_dim_search = alg->getDimension();
             if(!query.empty() && query.size() != configured_dim_search) {
                 LOG_WARN(2055,
                          index_id,
@@ -2164,7 +2233,7 @@ public:
             std::vector<std::pair<float, ndd::idInt>> dense_results;
             if(run_dense_search) {
                 std::vector<uint8_t> query_bytes =
-                        ndd::quant::get_quantizer_dispatch(entry.alg->getQuantLevel())
+                        ndd::quant::get_quantizer_dispatch(alg->getQuantLevel())
                                 .quantize(query);
 
                 /**
@@ -2181,7 +2250,7 @@ public:
                     if(filter_ptr) {
                         functor.emplace(*filter_ptr);
                     }
-                    dense_results = entry.alg->searchKnn(
+                    dense_results = alg->searchKnn(
                             query_bytes.data(), top_k, ef,
                             functor ? &*functor : nullptr,
                             filter_ptr ? params.boost_percentage : settings::FILTER_BOOST_PERCENTAGE,
@@ -2192,7 +2261,7 @@ public:
                     std::vector<ndd::idInt> valid_ids(bitmap.cardinality());
                     bitmap.toUint32Array(valid_ids.data());
 
-                    auto* space = entry.alg->getSpace();
+                    auto* space = alg->getSpace();
 
                     std::vector<ndd::idInt> fetched_ids;
                     std::vector<const void*> vector_ptrs;
@@ -2208,7 +2277,7 @@ public:
 
                     if(!vector_ptrs.empty()) {
                         std::vector<float> sims;
-                        entry.alg->computeBatchSimilaritiesFromPtrs(
+                        alg->computeBatchSimilaritiesFromPtrs(
                                 query_bytes.data(),
                                 vector_ptrs,
                                 space->get_sim_func(),
@@ -2311,9 +2380,9 @@ public:
             LOG_DEBUG("Search results size: " << final_candidates.size());
 
             // Loop-invariants for the include_vectors dequantization path.
-            const auto quant_level = entry.alg->getQuantLevel();
+            const auto quant_level = alg->getQuantLevel();
             const auto quant_dispatch = ndd::quant::get_quantizer_dispatch(quant_level);
-            const size_t vec_dim = entry.alg->getDimension();
+            const size_t vec_dim = alg->getDimension();
 
             /**
              * Postfilter strategy:
@@ -2551,6 +2620,40 @@ public:
     std::pair<bool, std::string> uploadBackup(const std::string& backup_name,
                                                 const std::string& username,
                                                 const std::string& file_content);
+
+    // ========== Rebuild operations ==========
+
+    /** True iff a backup is running for this user (used by Rebuild for mutual exclusion). */
+    bool backupActive(const std::string& username) {
+        return backup_store_.hasActiveBackup(username);
+    }
+
+    /**
+     * Start an async graph rebuild with new M/ef. Forwards to the Rebuild member.
+     *
+     * Return codes mirror Rebuild::start: 0 = accepted (value holds the config for the 202
+     * body); 1 = index not found (HTTP 404); 2-99 = caller-fixable rejection (HTTP 400);
+     * 100+ = internal (HTTP 500). May propagate the layout-error throw from getIndexInfo,
+     * which the HTTP layer maps to 409.
+     */
+    ndd::OperationResult<RebuildInfo> createRebuildAsync(const std::string& index_id,
+                                                         std::optional<size_t> new_M,
+                                                         std::optional<size_t> new_ef) {
+        return rebuild_.start(index_id, new_M, new_ef);
+    }
+
+    /**
+     * Per-user rebuild status JSON for the status endpoint. Intentionally extracts only the
+     * username from index_id and ignores the index part: rebuilds are tracked one-per-user, so
+     * the status is per-user and any requested index returns the user's current/last rebuild
+     * (its index_id is in the returned JSON). The index part is reserved for a future per-index
+     * lookup once multi-rebuild-per-user is supported - do not "fix" the discard as a bug.
+     */
+    nlohmann::json getRebuildStatus(const std::string& index_id) {
+        auto pos = index_id.find('/');
+        std::string username = pos == std::string::npos ? index_id : index_id.substr(0, pos);
+        return rebuild_.status(username);
+    }
 };
 
 // ========== IndexManager backup implementations ==========
@@ -2904,21 +3007,35 @@ inline std::pair<bool, std::string> IndexManager::createBackupAsync(const std::s
         return {false, "Invalid index ID format"};
     }
 
-    if (backup_store_.hasActiveBackup(username)) {
-        return {false, "Backup already in progress for user: " + username};
-    }
+    {
+        /**
+         * Hold backup_rebuild_exclusion_mutex_ across the whole check-and-reserve so a
+         * concurrent Rebuild::start for this user cannot interleave between these checks and
+         * setActiveBackup. Without it both could observe the other idle and both launch. The
+         * spawned backup worker does not take this mutex, so there is no deadlock.
+         */
+        std::lock_guard<std::mutex> exclusion(backup_rebuild_exclusion_mutex_);
 
-    std::string user_backup_dir = backup_store_.getUserBackupDir(username);
-    std::filesystem::create_directories(user_backup_dir);
-    std::string backup_tar = user_backup_dir + "/" + backup_name + ".tar";
-    if (std::filesystem::exists(backup_tar)) {
-        return {false, "Backup already exists: " + backup_name};
-    }
+        if (backup_store_.hasActiveBackup(username)) {
+            return {false, "Backup already in progress for user: " + username};
+        }
 
-    std::jthread t([this, index_id, backup_name](std::stop_token st) {
-        executeBackupJob(index_id, backup_name, st);
-    });
-    backup_store_.setActiveBackup(username, index_id, backup_name, std::move(t));
+        if (rebuild_.isActive(username)) {
+            return {false, "Rebuild in progress for user: " + username};
+        }
+
+        std::string user_backup_dir = backup_store_.getUserBackupDir(username);
+        std::filesystem::create_directories(user_backup_dir);
+        std::string backup_tar = user_backup_dir + "/" + backup_name + ".tar";
+        if (std::filesystem::exists(backup_tar)) {
+            return {false, "Backup already exists: " + backup_name};
+        }
+
+        std::jthread t([this, index_id, backup_name](std::stop_token st) {
+            executeBackupJob(index_id, backup_name, st);
+        });
+        backup_store_.setActiveBackup(username, index_id, backup_name, std::move(t));
+    }
 
     LOG_INFO(2046, index_id, "Backup started: " << backup_name);
 

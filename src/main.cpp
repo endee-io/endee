@@ -1488,6 +1488,14 @@ int main(int argc, char** argv) {
     });
 
     LOG_INFO(1008, "Using: " << settings::NUM_SERVER_THREADS << " server threads.");
+
+    std::cout << "__________        _________            \n"
+                 "___  ____/_______ ______  /_____ _____ \n"
+                 "__  __/   __  __ \\_  __  / _  _ \\_  _ \\\n"
+                 "_  /___   _  / / // /_/ /  /  __//  __/\n"
+                 "/_____/   /_/ /_/ \\__,_/   \\___/ \\___/ \n"
+                 "\nVersion: " << settings::VERSION << "\n\n";
+
     app.port(settings::SERVER_PORT).concurrency(settings::NUM_SERVER_THREADS).run();
     return 0;
 }

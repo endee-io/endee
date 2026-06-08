@@ -13,7 +13,7 @@ constexpr uint64_t TB = (1024ULL * GB);
 
 namespace settings {
     // === Compile-time constants ===
-    inline const std::string VERSION = "1.3.0";
+    inline const std::string VERSION = "1.3.5";
     inline uint16_t INDEX_VERSION = 1;
     inline uint16_t SPARSE_ONDISK_VERSION = 1;
     inline const std::string DEFAULT_SPACE_TYPE = "cosine";

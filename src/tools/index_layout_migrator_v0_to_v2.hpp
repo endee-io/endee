@@ -35,6 +35,39 @@ class IndexLayoutMigratorV0toV2 {
 public:
     static void migrateBackupV0toV2(const std::filesystem::path& backup_dir,
                                     const std::filesystem::path& target_dir) {
+        /**
+         * Guard against re-running the migrator on an already-current backup.
+         * The v0->v2 migrator assumes the legacy per-concern layout (separate
+         * meta/, ids/, filters/, sparse/ MDBX envs); a layout-v2 backup has
+         * only the single shared vectors/ env, so migration would copy a DBI or
+         * two and then die on the missing meta env with a cryptic "Backup MDBX
+         * environment missing" error. Read the carried-forward layout_version
+         * up front and refuse cleanly. The parsed metadata is reused below to
+         * stamp the migrated target, so metadata.json is read only once.
+         */
+        const std::filesystem::path source_metadata = backup_dir / "metadata.json";
+        const bool have_metadata = std::filesystem::exists(source_metadata);
+        nlohmann::json meta_json;
+        if(have_metadata) {
+            std::ifstream meta_in(source_metadata);
+            meta_json = nlohmann::json::parse(meta_in);
+            uint32_t source_layout = settings::LEGACY_INDEX_LAYOUT_VERSION;
+            if(meta_json.contains("params")) {
+                source_layout = meta_json["params"].value(
+                        "layout_version", settings::LEGACY_INDEX_LAYOUT_VERSION);
+            }
+            if(source_layout >= settings::INDEX_LAYOUT_VERSION) {
+                throw std::runtime_error(
+                        "Backup is already layout_version="
+                        + std::to_string(source_layout)
+                        + "; this tool only upgrades legacy layout_version="
+                        + std::to_string(settings::LEGACY_INDEX_LAYOUT_VERSION)
+                        + " backups to layout_version="
+                        + std::to_string(settings::INDEX_LAYOUT_VERSION)
+                        + ". Nothing to migrate - restore this backup as-is.");
+            }
+        }
+
         prepareMigrationTarget(target_dir);
         std::filesystem::create_directories(target_dir / "vectors");
 
@@ -59,13 +92,11 @@ public:
         /**
          * The server's restoreBackup path reads metadata.json from the inner
          * folder to recover index params (dim, M, ef_con, ...) and gates on
-         * params.layout_version. Carry the legacy metadata.json forward and
-         * stamp layout_version = current so the restored tar is accepted.
+         * params.layout_version. Carry the legacy metadata.json forward (parsed
+         * above) and stamp layout_version = current so the restored tar is
+         * accepted.
          */
-        const std::filesystem::path source_metadata = backup_dir / "metadata.json";
-        if(std::filesystem::exists(source_metadata)) {
-            std::ifstream meta_in(source_metadata);
-            nlohmann::json meta_json = nlohmann::json::parse(meta_in);
+        if(have_metadata) {
             meta_json["params"]["layout_version"] = settings::INDEX_LAYOUT_VERSION;
             std::ofstream meta_out(target_dir / "metadata.json", std::ios::binary);
             meta_out << meta_json.dump(4);

@@ -23,6 +23,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "json/nlohmann_json.hpp"
@@ -118,6 +119,46 @@ void extract_tar(const fs::path& archive_path, const fs::path& dest_dir) {
     archive_write_free(ext);
 }
 
+/**
+ * Read metadata.json out of a backup tar without extracting any other entry.
+ * Walks headers and skips each entry's payload with archive_read_data_skip(),
+ * so the cost is O(entries) of seek/skim rather than O(payload bytes) - a
+ * backup tar can be tens of GB. Returns an empty (null) json if the entry is
+ * missing or unparseable; callers treat that as "no usable metadata". Mirrors
+ * BackupStore::readMetadataJsonFromTar - replicated here to keep this offline
+ * tool free of server backup-store machinery, just as extract_tar/write_tar
+ * already locally re-implement the BackupStore archive helpers.
+ */
+nlohmann::json read_metadata_json_from_tar(const fs::path& archive_path) {
+    nlohmann::json result;
+    struct archive* a = archive_read_new();
+    archive_read_support_format_all(a);
+    archive_read_support_filter_all(a);
+
+    if(archive_read_open_filename(a, archive_path.string().c_str(), 10240) == ARCHIVE_OK) {
+        struct archive_entry* entry;
+        while(archive_read_next_header(a, &entry) == ARCHIVE_OK) {
+            std::string_view path = archive_entry_pathname(entry);
+            if(path.ends_with("metadata.json")) {
+                std::string content;
+                char buf[4096];
+                la_ssize_t n;
+                while((n = archive_read_data(a, buf, sizeof(buf))) > 0) {
+                    content.append(buf, static_cast<size_t>(n));
+                }
+                try {
+                    result = nlohmann::json::parse(content);
+                } catch(...) {
+                }
+                break;
+            }
+            archive_read_data_skip(a);
+        }
+    }
+    archive_read_free(a);
+    return result;
+}
+
 void write_tar(const fs::path& source_dir,
                const fs::path& archive_path,
                const std::string& inner_name = "") {
@@ -181,14 +222,25 @@ int do_in_place(const std::vector<std::string>& args) {
         throw std::runtime_error("index folder does not exist: " + index_dir.string());
     }
 
+    // Read the catalog up front so an already-migrated index is refused before
+    // any disk is touched, and reuse the row for the post-migration bump.
+    // MetadataManager opens <data_dir>/meta/ directly; it does not coordinate
+    // with a running server, so the server must be stopped.
+    MetadataManager catalog(data_dir);
+    auto meta = catalog.getMetadata(index_id);
+    if(meta && meta->layout_version >= settings::INDEX_LAYOUT_VERSION) {
+        throw std::runtime_error(
+                "catalog reports index_id=" + index_id + " is already layout_version="
+                + std::to_string(meta->layout_version) + " (current is "
+                + std::to_string(settings::INDEX_LAYOUT_VERSION)
+                + "); nothing to migrate.");
+    }
+
     std::cout << "in-place migrating " << index_dir << " ...\n";
     ndd::tools::IndexLayoutMigratorV0toV2::migrateInPlaceV0toV2(index_dir);
 
     // Bump the catalog row so the server's loadIndex accepts this index on
-    // next start. MetadataManager opens <data_dir>/meta/ directly; it does
-    // not coordinate with a running server, so the server must be stopped.
-    MetadataManager catalog(data_dir);
-    auto meta = catalog.getMetadata(index_id);
+    // next start.
     if(!meta) {
         throw std::runtime_error(
                 "migration rewrote disk layout but catalog has no row for index_id="
@@ -218,6 +270,31 @@ int do_from_backup(const std::vector<std::string>& args) {
     }
     if(!fs::exists(backup_tar)) {
         throw std::runtime_error("backup tar does not exist: " + backup_tar.string());
+    }
+
+    /**
+     * Scan-first: peek metadata.json straight out of the tar stream and refuse
+     * an already-current backup before extracting anything. A backup tar can be
+     * tens of GB, so the old order (extract -> read metadata -> reject) wrote
+     * the whole payload to scratch just to throw it away. Mirrors the server's
+     * restoreBackup pre-extraction layout_version gate.
+     */
+    {
+        const nlohmann::json scanned = read_metadata_json_from_tar(backup_tar);
+        const uint32_t scanned_layout =
+                scanned.is_object() && scanned.contains("params")
+                        ? scanned["params"].value("layout_version",
+                                                  settings::LEGACY_INDEX_LAYOUT_VERSION)
+                        : settings::LEGACY_INDEX_LAYOUT_VERSION;
+        if(scanned_layout >= settings::INDEX_LAYOUT_VERSION) {
+            throw std::runtime_error(
+                    "Backup is already layout_version=" + std::to_string(scanned_layout)
+                    + "; this tool only upgrades legacy layout_version="
+                    + std::to_string(settings::LEGACY_INDEX_LAYOUT_VERSION)
+                    + " backups to layout_version="
+                    + std::to_string(settings::INDEX_LAYOUT_VERSION)
+                    + ". Nothing to migrate - restore this backup as-is.");
+        }
     }
 
     /**

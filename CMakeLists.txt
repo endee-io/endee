@@ -1,54 +1,56 @@
-# For Server x86_64 install clang for fp16 support and use the following commands
 cmake_minimum_required(VERSION 3.14)
+
+# Select a Clang toolchain before project() so CMake configures the matching
+# standard library and platform SDK paths.
+if(NOT DEFINED CMAKE_C_COMPILER AND NOT DEFINED ENV{CC})
+    if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
+        execute_process(
+            COMMAND xcrun --find clang
+            OUTPUT_VARIABLE CLANG_CANDIDATE_C
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+        )
+    else()
+        find_program(CLANG_CANDIDATE_C NAMES clang-21 clang-20 clang-19 clang)
+    endif()
+
+    if(CLANG_CANDIDATE_C)
+        set(CMAKE_C_COMPILER "${CLANG_CANDIDATE_C}" CACHE FILEPATH "C compiler")
+    endif()
+endif()
+
+if(NOT DEFINED CMAKE_CXX_COMPILER AND NOT DEFINED ENV{CXX})
+    if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
+        execute_process(
+            COMMAND xcrun --find clang++
+            OUTPUT_VARIABLE CLANG_CANDIDATE_CXX
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+        )
+    else()
+        find_program(CLANG_CANDIDATE_CXX NAMES clang++-21 clang++-20 clang++-19 clang++)
+    endif()
+
+    if(CLANG_CANDIDATE_CXX)
+        set(CMAKE_CXX_COMPILER "${CLANG_CANDIDATE_CXX}" CACHE FILEPATH "C++ compiler")
+    endif()
+endif()
+
 project(ndd)
 
-
-#check for the correct clang version
-find_program(CLANG_CANDIDATE_C
-    NAMES clang-21 clang-20 clang-19 clang
-)
-
-find_program(CLANG_CANDIDATE_CXX
-    NAMES clang++-21 clang++-20 clang++-19 clang++
-)
-
-if (NOT CLANG_CANDIDATE_C OR NOT CLANG_CANDIDATE_CXX)
-    message(FATAL_ERROR "Clang not found. Please install clang >= 19.")
+if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang" OR NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR "Clang >= 17 is required. Set CC/CXX or CMAKE_C_COMPILER/CMAKE_CXX_COMPILER to a Clang toolchain.")
 endif()
 
-# Query clang version
-execute_process(
-    COMMAND ${CLANG_CANDIDATE_C} --version
-    OUTPUT_VARIABLE CLANG_VERSION_OUTPUT
-    ERROR_VARIABLE CLANG_VERSION_ERROR
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-)
-
-if (NOT CLANG_VERSION_OUTPUT)
-    message(FATAL_ERROR "Failed to query clang version.")
+if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 17)
+    message(FATAL_ERROR "Clang ${CMAKE_CXX_COMPILER_VERSION} detected, but Clang >= 17 is required.")
 endif()
 
-# Extract major version
-string(REGEX MATCH "clang version ([0-9]+)" _match "${CLANG_VERSION_OUTPUT}")
-set(CLANG_VERSION_MAJOR "${CMAKE_MATCH_1}")
-
-if (NOT CLANG_VERSION_MAJOR)
-    message(FATAL_ERROR
-        "Unable to determine clang version from:\n${CLANG_VERSION_OUTPUT}\n"
-    )
+if(APPLE AND (CMAKE_C_COMPILER MATCHES "[/\\\\]Android[/\\\\].*[/\\\\]ndk[/\\\\]" OR CMAKE_CXX_COMPILER MATCHES "[/\\\\]Android[/\\\\].*[/\\\\]ndk[/\\\\]"))
+    message(FATAL_ERROR "Android NDK Clang was selected for a macOS build. Use Xcode Command Line Tools Clang, for example: CC=$(xcrun --find clang) CXX=$(xcrun --find clang++) cmake ...")
 endif()
 
-if (CLANG_VERSION_MAJOR LESS 17)
-    message(FATAL_ERROR
-        "Clang ${CLANG_VERSION_MAJOR} detected, but clang >= 17 is required "
-    )
-endif()
-
-# Lock compilers
-set(CMAKE_C_COMPILER   "${CLANG_CANDIDATE_C}"   CACHE STRING "" FORCE)
-set(CMAKE_CXX_COMPILER "${CLANG_CANDIDATE_CXX}" CACHE STRING "" FORCE)
-
-message(STATUS "Using Clang ${CLANG_VERSION_MAJOR}")
+message(STATUS "Using ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
 message(STATUS "C compiler : ${CMAKE_C_COMPILER}")
 message(STATUS "C++ compiler: ${CMAKE_CXX_COMPILER}")
 
@@ -250,6 +252,15 @@ endif()
 
 message(STATUS "Binary name: ${NDD_BINARY_NAME}")
 
+# Filter sources are split out so filter headers only expose declarations.
+set(NDD_FILTER_SOURCES
+    src/filter/category_index.cpp
+    src/filter/filter.cpp
+    src/filter/numeric_index.cpp
+)
+
+add_library(ndd_filter STATIC ${NDD_FILTER_SOURCES})
+
 # Add new src/*.cpp files here when they should be compiled into ndd.
 set(NDD_CORE_SOURCES
     src/sparse/inverted_index.cpp
@@ -289,6 +300,15 @@ target_include_directories(ndd_core PRIVATE
     ${OPENSSL_INCLUDE_DIR}
     ${CURL_INCLUDE_DIRS}
 )
+target_include_directories(ndd_filter PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/filter
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/utils
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/json
+    ${LMDB_INCLUDE_DIR}
+)
 target_include_directories(${NDD_BINARY_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/src/server
@@ -307,8 +327,9 @@ target_include_directories(${NDD_BINARY_NAME} PRIVATE
 
 # Set compiler flags
 if(NOT DEBUG)
-    target_compile_options(ndd_core PRIVATE -O3 -ffast-math -fno-finite-math-only)
-    target_compile_options(${NDD_BINARY_NAME} PRIVATE -O3 -ffast-math -fno-finite-math-only)
+    target_compile_options(ndd_core PRIVATE -O3 -ffast-math -fno-finite-math-only -falign-functions=64)
+    target_compile_options(ndd_filter PRIVATE -O3 -ffast-math -fno-finite-math-only -falign-functions=64)
+    target_compile_options(${NDD_BINARY_NAME} PRIVATE -O3 -ffast-math -fno-finite-math-only -falign-functions=64)
 endif()
 
 # Apply Flags based on selection
@@ -355,6 +376,7 @@ target_compile_definitions(ndd_core PRIVATE
     ASIO_HAS_STD_STRING_VIEW
     MDB_MAXKEYSIZE=512
 )
+target_compile_definitions(ndd_filter PRIVATE MDB_MAXKEYSIZE=512)
 target_compile_definitions(${NDD_BINARY_NAME} PRIVATE 
     ASIO_STANDALONE 
     ASIO_HAS_STD_CHRONO 
@@ -364,6 +386,7 @@ target_compile_definitions(${NDD_BINARY_NAME} PRIVATE
 
 # Link libraries
 target_link_libraries(${NDD_BINARY_NAME} PRIVATE
+    ndd_filter
     Threads::Threads
     OpenSSL::SSL
     OpenSSL::Crypto
@@ -382,6 +405,15 @@ option(ENABLE_TESTING "Enable building tests" OFF)
 if(ENABLE_TESTING)
     enable_testing()
     add_subdirectory(tests)
+    if(TARGET ndd_filter_test)
+        target_link_libraries(ndd_filter_test ndd_filter)
+    endif()
+    if(TARGET ndd_vector_storage_test)
+        target_link_libraries(ndd_vector_storage_test ndd_filter)
+    endif()
+    if(TARGET ndd_numeric_index_stress_test)
+        target_link_libraries(ndd_numeric_index_stress_test ndd_filter)
+    endif()
 endif()
 
 message(STATUS "Processor: ${CMAKE_SYSTEM_PROCESSOR}")

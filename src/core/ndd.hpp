@@ -26,6 +26,7 @@
 #include <thread>
 #include <atomic>
 #include <optional>
+#include <queue>
 #include <random>
 #include <type_traits>
 #include <future>
@@ -988,8 +989,18 @@ public:
         entry->alg = std::move(new_alg);
     }
 
+    /**
+     * Adds or updates a batch of vectors and their associated filter documents.
+     *
+     * Return codes:
+     * 0 = success; value is true when vectors were inserted and false for an empty batch
+     * 1-99 = propagated filter validation failure from vector storage
+     * 100-199 = storage, sparse, or propagated filter storage failure; caller should return HTTP 500
+     * 200-299 = propagated filter corruption/invariant failure; caller should return HTTP 500
+     */
     template <typename VectorType>
-    bool addVectors(const std::string& index_id, const std::vector<VectorType>& vectors) {
+    ndd::OperationResult<bool> addVectors(const std::string& index_id,
+                                          const std::vector<VectorType>& vectors) {
         try {
             // Get the index entry (loads if needed, handles all locking)
             auto entry_ptr = getIndexEntry(index_id);
@@ -1002,7 +1013,7 @@ public:
             LOG_DEBUG("Adding " << vectors.size() << " vectors to index " << index_id);
             if(vectors.empty()) {
                 LOG_DEBUG("No vectors to add");
-                return false;
+                return {SUCCESS, "No vectors to add", false};
             }
 
             // CRITICAL FIX: Pass WAL to create_ids_batch for atomic logging
@@ -1068,7 +1079,7 @@ public:
                                       index_id,
                                       "Failed to update sparse storage for batch size "
                                               << sparse_batch.size());
-                            return false;
+                            return {100, "Failed to update sparse storage"};
                         }
                     }
                 }
@@ -1100,7 +1111,15 @@ public:
                 // Copy QuantVectorObject for storage (we need to keep original for HNSW)
                 storage_vectors.emplace_back(numeric_ids[i].first, quantized_vectors[i]);
             }
-            entry.vector_storage->store_vectors_batch(storage_vectors);
+            auto storage_result = entry.vector_storage->store_vectors_batch(storage_vectors);
+            if(!storage_result.ok()) {
+                if(storage_result.code < 100) {
+                    LOG_WARN(1212, index_id, "Insert filters rejected: " << storage_result.message);
+                } else {
+                    LOG_ERROR(1219, index_id, "Insert filters failed: " << storage_result.message);
+                }
+                return {storage_result.code, storage_result.message};
+            }
             LOG_DEBUG("Stored " << storage_vectors.size()
                                 << " pre-quantized vectors in vector storage");
 
@@ -1160,7 +1179,7 @@ public:
             }
 
             PRINT_LOG_TIME();
-            return true;
+            return {SUCCESS, "", true};
         } catch(const std::runtime_error& e) {
             // Re-throw runtime_error (includes backup-in-progress check)
             // so it can be caught by API layer and returned as proper JSON error
@@ -1330,9 +1349,19 @@ public:
         }
     }
 
-    // Delete vectors from id mapper, delete filter and mark as deleted in HNSW. Does not delete
-    // meta, vector data Meta and vector data will be overwritten when the id is reused
-    bool deleteVectorsByIds(CacheEntry& entry, const std::vector<ndd::idInt>& numeric_ids) {
+    /**
+     * Deletes vectors from id mapper, filter indexes, sparse storage, and HNSW live set.
+     * XXX: Does not delete meta, vector data Meta and vector data will be overwritten when
+     * the id is reused.
+     *
+     * Return codes:
+     * 0 = success
+     * 1-99 = propagated filter validation failure from vector storage
+     * 100-199 = storage or propagated filter storage failure; caller should return HTTP 500
+     * 200-299 = propagated filter corruption/invariant failure; caller should return HTTP 500
+     */
+    ndd::OperationResult<bool>
+    deleteVectorsByIds(CacheEntry& entry, const std::vector<ndd::idInt>& numeric_ids) {
         try {
             for(ndd::idInt numeric_id : numeric_ids) {
                 auto meta = entry.vector_storage->get_meta(numeric_id);
@@ -1344,9 +1373,23 @@ public:
                     continue;
                 }
                 // Remove the filter
-                entry.vector_storage->deleteFilter(numeric_id, meta.filter);
-                // Mark as deleted in HNSW index
+                auto filter_result = entry.vector_storage->deleteFilter(numeric_id, meta.filter);
+                if(!filter_result.ok()) {
+                    if(filter_result.code < 100) {
+                        LOG_WARN(1216,
+                                 entry.index_id,
+                                 "Delete-vector filter removal rejected: "
+                                         << filter_result.message);
+                    } else {
+                        LOG_ERROR(1217,
+                                  entry.index_id,
+                                  "Delete-vector filter removal failed: "
+                                          << filter_result.message);
+                    }
+                    return {filter_result.code, filter_result.message};
+                }
 
+                // Mark as deleted in HNSW index
                 entry.alg->markDelete(numeric_id);
 
                 // Delete from sparse storage if hybrid index
@@ -1360,14 +1403,24 @@ public:
             // Mark the index as dirty
             entry.markDirty();
 
-            return true;
+            return {SUCCESS, "", true};
         } catch(const std::exception& e) {
             LOG_ERROR(2035, entry.index_id, "Failed to delete vectors: " << e.what());
-            return false;
+            return {100, std::string("Failed to delete vectors: ") + e.what()};
         }
     }
 
-    size_t deleteVectorsByFilter(const std::string& index_id, const nlohmann::json& filter_array) {
+    /**
+     * Deletes all vectors matching a filter query.
+     *
+     * Return codes:
+     * 0 = success; value is the number of deleted vectors
+     * 1-99 = propagated filter validation failure; caller should return HTTP 400
+     * 100-199 = storage or propagated filter storage failure; caller should return HTTP 500
+     * 200-299 = propagated filter corruption/invariant failure; caller should return HTTP 500
+     */
+    ndd::OperationResult<size_t>
+    deleteVectorsByFilter(const std::string& index_id, const nlohmann::json& filter_array) {
         try {
             auto entry_ptr = getIndexEntry(index_id);
             auto& entry = *entry_ptr;
@@ -1375,11 +1428,27 @@ public:
             // Use per-index operation mutex to prevent concurrent operations
             std::unique_lock<std::shared_mutex> operation_lock(entry.operation_mutex);
 
-            auto numeric_ids =
+            auto numeric_ids_result =
                     entry.vector_storage->filter_store_->getIdsMatchingFilter(filter_array);
+            if(!numeric_ids_result.ok()) {
+                if(numeric_ids_result.code < 100) {
+                    LOG_WARN(1213,
+                             index_id,
+                             "Delete-by-filter rejected: " << numeric_ids_result.message);
+                } else {
+                    LOG_ERROR(1214,
+                              index_id,
+                              "Delete-by-filter failed while computing filter: "
+                                      << numeric_ids_result.message);
+                }
+                return {numeric_ids_result.code, numeric_ids_result.message};
+            }
+
+            auto& numeric_ids = numeric_ids_result.value_or_throw();
             LOG_DEBUG("Filter matched " << numeric_ids.size() << " vectors");
 
-            if(deleteVectorsByIds(entry, numeric_ids)) {
+            auto delete_result = deleteVectorsByIds(entry, numeric_ids);
+            if(delete_result.ok() && delete_result.value_or_throw()) {
                 // Check if we need to save based on WAL entry count after logging
                 WriteAheadLog* wal = getOrCreateWAL(entry);
                 if(wal->getEntryCount() >= persistence_config_.save_every_n_updates) {
@@ -1387,22 +1456,34 @@ public:
                                               << " updates");
                     saveIndexInternal(entry);
                 }
-                return numeric_ids.size();
+                return {SUCCESS, "", numeric_ids.size()};
             } else {
-                return 0;
+                if(!delete_result.ok()) {
+                    return {delete_result.code, delete_result.message};
+                }
+                return {SUCCESS, "", static_cast<size_t>(0)};
             }
         } catch(const std::runtime_error& e) {
             // Re-throw runtime_error (includes backup-in-progress check)
             throw;
         } catch(const std::exception& e) {
             LOG_ERROR(2036, index_id, "Failed to delete vectors by filter: " << e.what());
-            return 0;
+            return {100, std::string("Failed to delete vectors by filter: ") + e.what()};
         }
     }
 
-    // Update filters for a batch of vectors
-    size_t updateFilters(const std::string& index_id,
-                         const std::vector<std::pair<std::string, std::string>>& updates) {
+    /**
+     * Replaces filter documents for a batch of vectors.
+     *
+     * Return codes:
+     * 0 = success; value is the number of updated filters
+     * 1-99 = propagated filter validation failure; caller should return HTTP 400
+     * 100-199 = storage or propagated filter storage failure; caller should return HTTP 500
+     * 200-299 = propagated filter corruption/invariant failure; caller should return HTTP 500
+     */
+    ndd::OperationResult<size_t>
+    updateFilters(const std::string& index_id,
+                  const std::vector<std::pair<std::string, std::string>>& updates) {
         try {
             auto entry_ptr = getIndexEntry(index_id);
             auto& entry = *entry_ptr;
@@ -1417,7 +1498,19 @@ public:
                     continue;
                 }
 
-                entry.vector_storage->updateFilter(numeric_id, new_filter);
+                auto filter_result = entry.vector_storage->updateFilter(numeric_id, new_filter);
+                if(!filter_result.ok()) {
+                    if(filter_result.code < 100) {
+                        LOG_WARN(1215,
+                                 index_id,
+                                 "Update-filters rejected: " << filter_result.message);
+                    } else {
+                        LOG_ERROR(1218,
+                                  index_id,
+                                  "Update-filters failed: " << filter_result.message);
+                    }
+                    return {filter_result.code, filter_result.message};
+                }
                 updated_count++;
             }
 
@@ -1425,20 +1518,29 @@ public:
                 entry.markDirty();
             }
 
-            return updated_count;
+            return {SUCCESS, "", updated_count};
         } catch(const std::runtime_error& e) {
             // Re-throw runtime_error (includes backup-in-progress check)
             throw;
         } catch(const std::exception& e) {
             LOG_ERROR(2037, index_id, "Failed to update filters: " << e.what());
-            return 0;
+            return {100, std::string("Failed to update filters: ") + e.what()};
         }
     }
 
-    // Delete a single vector by string ID - vector data will not be deleted. The meta and filter
-    // will be deleted and the vector will be marked as deleted in HNSW. The id will be put in the
-    // deleted_ids in id mapper and will be reused for new vectors
-    bool deleteVector(const std::string& index_id, const std::string& str_id) {
+    /**
+     * Deletes one vector by string id and removes its filter index entries.
+     * The meta and filter will be deleted and the vector will be marked as
+     * deleted in HNSW. The id will be put in the deleted_ids in id mapper and will be reused for new vectors.
+     *
+     * Return codes:
+     * 0 = success; value is false when the vector id does not exist
+     * 1-99 = propagated filter validation failure; caller should return HTTP 400
+     * 100-199 = storage or propagated filter storage failure; caller should return HTTP 500
+     * 200-299 = propagated filter corruption/invariant failure; caller should return HTTP 500
+     */
+    ndd::OperationResult<bool> deleteVector(const std::string& index_id,
+                                            const std::string& str_id) {
         try {
             auto entry_ptr = getIndexEntry(index_id);
             auto& entry = *entry_ptr;
@@ -1448,12 +1550,12 @@ public:
 
             size_t numeric_id = entry.id_mapper->get_id(str_id);
             if(numeric_id == 0) {
-                return false;
+                return {SUCCESS, "", false};
             }
-            bool result = deleteVectorsByIds(entry, {static_cast<idInt>(numeric_id)});
+            auto result = deleteVectorsByIds(entry, {static_cast<idInt>(numeric_id)});
 
             // Check if we need to save based on WAL entry count after logging
-            if(result) {
+            if(result.ok() && result.value_or_throw()) {
                 WriteAheadLog* wal = getOrCreateWAL(entry);
                 if(wal->getEntryCount() >= persistence_config_.save_every_n_updates) {
                     LOG_DEBUG("Saving index " << index_id << " after " << wal->getEntryCount()
@@ -1468,21 +1570,20 @@ public:
             throw;
         } catch(const std::exception& e) {
             LOG_ERROR(2038, index_id, "Failed to delete vector: " << e.what());
-            return false;
+            return {100, std::string("Failed to delete vector: ") + e.what()};
         }
     }
 
-    std::optional<std::vector<ndd::VectorResult>> searchKNN(const std::string& index_id,
-                                                            const std::vector<float>& query,
-                                                            size_t k,
-                                                            const nlohmann::json& filter_array,
-                                                            ndd::FilterParams params = {},
-                                                            bool include_vectors = false,
-                                                            size_t ef = 0) {
-        return searchKNN(index_id, query, {}, {}, k, filter_array, params, include_vectors, ef);
-    }
-
-    std::optional<std::vector<ndd::VectorResult>>
+    /**
+     * Searches an index with optional filter bitmap computation.
+     *
+     * Return codes:
+     * 0 = success
+     * 1-99 = propagated filter validation failure; caller should return HTTP 400
+     * 100-199 = search or propagated filter storage failure; caller should return HTTP 500
+     * 200-299 = propagated filter corruption/invariant failure; caller should return HTTP 500
+     */
+    ndd::OperationResult<std::vector<ndd::VectorResult>>
     searchKNN(const std::string& index_id,
                 const std::vector<float>& query,
                 const std::vector<uint32_t>& sparse_indices,
@@ -1516,13 +1617,25 @@ public:
             // Zero-weight sources cannot influence the final ranking, so skip their retrieval
             // work entirely.
             if(!run_dense_search && !run_sparse_search) {
-                return std::vector<ndd::VectorResult>();
+                return {SUCCESS, "", std::vector<ndd::VectorResult>()};
             }
 
             // 0. Compute Filter Bitmap (Shared)
             std::optional<ndd::RoaringBitmap> active_filter_bitmap;
             if (!filter_array.empty()) {
-                active_filter_bitmap = entry.vector_storage->filter_store_->computeFilterBitmap(filter_array);
+                auto filter_result =
+                        entry.vector_storage->filter_store_->computeFilterBitmap(filter_array);
+                if(!filter_result.ok()) {
+                    if(filter_result.code < 100) {
+                        LOG_WARN(1220, index_id, "Search filter rejected: " << filter_result.message);
+                    } else {
+                        LOG_ERROR(1221,
+                                  index_id,
+                                  "Search filter computation failed: " << filter_result.message);
+                    }
+                    return {filter_result.code, filter_result.message};
+                }
+                active_filter_bitmap = std::move(filter_result.value_or_throw());
             }
             const ndd::RoaringBitmap* filter_ptr =
                     active_filter_bitmap ? &(*active_filter_bitmap) : nullptr;
@@ -1579,26 +1692,47 @@ public:
                     if (card == 0) {
                         // No results match filter
                     } else if (card < params.prefilter_threshold) {
-                         // Strategy A: Brute Force on Small Subset
+                        // Strategy A: Brute Force on Small Subset
                         std::vector<ndd::idInt> valid_ids;
-                        valid_ids.reserve(card);
-                        bitmap.iterate([](ndd::idInt id, void* ptr){
-                        static_cast<std::vector<ndd::idInt>*>(ptr)->push_back(id);
-                        return true;
-                        }, &valid_ids);
-
-                         // Fetch vectors
-                        auto vector_batch = entry.vector_storage->get_vectors_batch(valid_ids);
-
-                        // Prepare subset for bruteforce search
-                        std::vector<std::pair<idInt, std::vector<uint8_t>>> vector_subset;
-                        vector_subset.reserve(vector_batch.size());
-                        for(auto& [nid, vbytes] : vector_batch) {
-                            vector_subset.emplace_back(nid, std::move(vbytes));
+                        {
+                            valid_ids.reserve(card);
+                            bitmap.iterate(
+                                    [](ndd::idInt id, void* ptr) {
+                                        static_cast<std::vector<ndd::idInt>*>(ptr)->push_back(id);
+                                        return true;
+                                    },
+                                    &valid_ids);
                         }
 
-                        dense_results = hnswlib::searchKnnSubset<float>(
-                            query_bytes.data(), vector_subset, k, space);
+                        {
+                            auto distance_func = space->get_dist_func();
+                            void* dist_func_param = space->get_dist_func_param();
+                            std::priority_queue<std::pair<float, ndd::idInt>> top_results;
+
+                            if(k > 0) {
+                                entry.vector_storage->visit_vectors_by_ids(
+                                        valid_ids,
+                                        [&](ndd::idInt numeric_id, const void* vector_data) {
+                                            float distance = distance_func(query_bytes.data(),
+                                                                           vector_data,
+                                                                           dist_func_param);
+
+                                            if(top_results.size() < k) {
+                                                top_results.emplace(distance, numeric_id);
+                                            } else if(distance < top_results.top().first) {
+                                                top_results.pop();
+                                                top_results.emplace(distance, numeric_id);
+                                            }
+                                        });
+                            }
+
+                            dense_results.reserve(top_results.size());
+                            while(!top_results.empty()) {
+                                dense_results.push_back(top_results.top());
+                                top_results.pop();
+                            }
+                            std::reverse(dense_results.begin(), dense_results.end());
+                        }
 
                     } else {
                         // Strategy B: Filtered HNSW Search
@@ -1634,7 +1768,7 @@ public:
             std::vector<std::pair<float, ndd::idInt>> final_candidates;
 
             if(dense_results.empty() && sparse_results.empty()) {
-                return std::vector<ndd::VectorResult>();
+                return {SUCCESS, "", std::vector<ndd::VectorResult>()};
             } else if(sparse_results.empty()) {
                 // Only dense results
                 final_candidates.reserve(dense_results.size());
@@ -1687,16 +1821,26 @@ public:
             results.reserve(final_candidates.size());
             LOG_DEBUG("Search results size: " << final_candidates.size());
 
-            // Process and filter results
+            // Postfilter strategy:
+            //   Every code path that feeds final_candidates already enforces filter_ptr:
+            //     - Filtered HNSW search drops ids via BitMapFilterFunctor (filter.hpp).
+            //     - Prefilter brute-force only iterates ids drawn from the bitmap.
+            //     - Sparse search drops non-matching ids inside its scoring phase
+            //       (inverted_index.cpp).
+            //   So on the dense-only path the per-result contains() check is dead and
+            //   we skip it. On the hybrid path we keep it as defense-in-depth in case
+            //   sparse search ever stops honoring the filter; either way the check now
+            //   runs before get_meta() so a (defensive) reject does not pay an MDBX read.
+            const bool postfilter_active = filter_ptr != nullptr && run_sparse_search;
+            size_t postfilter_drops = 0;
             size_t filtered_count = 0;
             for(const auto& p : final_candidates) {
-                // Get metadata
-                ndd::VectorMeta meta = entry.vector_storage->get_meta(p.second);
-
-                // Apply filter
-                if(filter_ptr && !filter_ptr->contains(p.second)) {
+                if(postfilter_active && !filter_ptr->contains(p.second)) {
+                    ++postfilter_drops;
                     continue;
                 }
+
+                ndd::VectorMeta meta = entry.vector_storage->get_meta(p.second);
 
                 ndd::VectorResult result;
                 result.id = meta.id;
@@ -1730,10 +1874,19 @@ public:
             if(results.size() > k) {
                 results.resize(k);
             }
-            return results;
+
+            // A drop here means an upstream filter step failed to honor filter_ptr.
+            // Log once per request rather than per-result to respect the hot-loop rule.
+            if(postfilter_drops > 0) {
+                LOG_WARN(1222,
+                         index_id,
+                         "Postfilter dropped " << postfilter_drops
+                                               << " ids that bypassed upstream filter checks");
+            }
+            return {SUCCESS, "", std::move(results)};
         } catch(const std::exception& e) {
             LOG_ERROR(2039, index_id, "Search failed: " << e.what());
-            return std::nullopt;
+            return {100, std::string("Search failed: ") + e.what()};
         }
     }
 

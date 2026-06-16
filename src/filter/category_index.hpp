@@ -2,11 +2,10 @@
 
 #include <string>
 #include <vector>
-#include <stdexcept>
-#include <iostream>
+
 #include "mdbx/mdbx.h"
-#include "../utils/log.hpp"
 #include "../core/types.hpp"
+#include "../utils/types.hpp"
 
 namespace ndd {
     namespace filter {
@@ -17,194 +16,114 @@ namespace ndd {
             MDBX_dbi dbi_;
 
             static std::string format_filter_key(const std::string& field,
-                                                 const std::string& value) {
-                return field + ":" + value;
-            }
+                                                 const std::string& value);
 
-            // Load bitmap from LMDB
-            ndd::RoaringBitmap get_bitmap_internal(const std::string& filter_key) const {
-                MDBX_txn* txn;
-                int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_RDONLY, &txn);
-                if(rc != MDBX_SUCCESS) {
-                    throw std::runtime_error("Failed to begin read transaction: "
-                                             + std::string(mdbx_strerror(rc)));
-                }
+            static ndd::OperationResult<ndd::RoaringBitmap>
+            read_bitmap_payload(const void* data, size_t len);
 
-                try {
-                    MDBX_val key{const_cast<char*>(filter_key.c_str()), filter_key.size()};
-                    MDBX_val data;
+            /*
+             * Loads the bitmap stored for a formatted category filter key.
+             *
+             * Return codes:
+             * 0 = success
+             * 100 = MDBX transaction or read failure; caller should log ERROR and return HTTP 500
+             * 200 = corrupt stored bitmap payload; caller should log ERROR and return HTTP 500
+             */
+            ndd::OperationResult<ndd::RoaringBitmap>
+            get_bitmap_internal(const std::string& filter_key) const;
 
-                    rc = mdbx_get(txn, dbi_, &key, &data);
-                    if(rc == MDBX_NOTFOUND) {
-                        mdbx_txn_abort(txn);
-                        // LOG_DEBUG("Filter key not found: " << filter_key);
-                        return ndd::RoaringBitmap();  // Return empty bitmap
-                    }
-                    if(rc != MDBX_SUCCESS) {
-                        mdbx_txn_abort(txn);
-                        throw std::runtime_error("Failed to read filter key '" + filter_key
-                                                 + "': " + std::string(mdbx_strerror(rc)));
-                    }
-
-                    if(data.iov_len == 0) {
-                        mdbx_txn_abort(txn);
-                        // LOG_DEBUG("Empty data for filter key: " << filter_key);
-                        return ndd::RoaringBitmap();
-                    }
-
-                    ndd::RoaringBitmap bitmap =
-                            ndd::RoaringBitmap::read(static_cast<const char*>(data.iov_base));
-                    mdbx_txn_abort(txn);
-                    return bitmap;
-                } catch(...) {
-                    mdbx_txn_abort(txn);
-                    throw;
-                }
-            }
-
-            void store_bitmap_internal(const std::string& filter_key,
-                                       const ndd::RoaringBitmap& bitmap) {
-                if(bitmap.cardinality() == 0) {
-                    // LOG_DEBUG("Storing empty bitmap for key: " << filter_key);
-                }
-
-                size_t required_size = bitmap.getSizeInBytes();
-                if(required_size == 0) {
-                    throw std::runtime_error("Invalid bitmap serialization: size is 0");
-                }
-
-                std::vector<char> buffer(required_size);
-                bitmap.write(buffer.data(), true);
-
-                MDBX_val key{const_cast<char*>(filter_key.c_str()), filter_key.size()};
-                MDBX_val data{const_cast<char*>(buffer.data()), buffer.size()};
-
-                MDBX_txn* txn;
-                int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
-                if(rc != MDBX_SUCCESS) {
-                    throw std::runtime_error("Failed to begin write transaction: "
-                                             + std::string(mdbx_strerror(rc)));
-                }
-
-                rc = mdbx_put(txn, dbi_, &key, &data, MDBX_UPSERT);
-                if(rc != MDBX_SUCCESS) {
-                    mdbx_txn_abort(txn);
-                    throw std::runtime_error("Failed to store bitmap: "
-                                             + std::string(mdbx_strerror(rc)));
-                }
-
-                rc = mdbx_txn_commit(txn);
-                if(rc != MDBX_SUCCESS) {
-                    throw std::runtime_error("Failed to commit transaction: "
-                                             + std::string(mdbx_strerror(rc)));
-                }
-            }
+            /*
+             * Stores the bitmap for a formatted category filter key.
+             *
+             * Return codes:
+             * 0 = success
+             * 100 = MDBX transaction or write failure; caller should log ERROR and return HTTP 500
+             * 200 = invalid bitmap serialization; caller should log ERROR and return HTTP 500
+             */
+            ndd::OperationResult<> store_bitmap_internal(const std::string& filter_key,
+                                                         const ndd::RoaringBitmap& bitmap);
 
         public:
-            CategoryIndex(MDBX_env* env) :
-                env_(env) {
-                MDBX_txn* txn;
-                int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
-                if(rc != MDBX_SUCCESS) {
-                    throw std::runtime_error(std::string("Failed to begin txn for CategoryIndex init: ") + mdbx_strerror(rc));
-                }
+            CategoryIndex(MDBX_env* env);
 
-                // Open named DB for category/boolean
-                rc = mdbx_dbi_open(txn, "category_idx", MDBX_CREATE, &dbi_);
-                if(rc != MDBX_SUCCESS) {
-                    mdbx_txn_abort(txn);
-                    throw std::runtime_error(std::string("Failed to open category_idx dbi: ") + mdbx_strerror(rc));
-                }
+            /*
+             * Lists all unique category values stored for one field.
+             *
+             * Return codes:
+             * 0 = success
+             * 100 = MDBX transaction, cursor, or scan failure; caller should log ERROR and return HTTP 500
+             */
+            ndd::OperationResult<std::vector<std::string>>
+            scan_values(const std::string& field) const;
 
-                mdbx_txn_commit(txn);
-            }
+            /*
+             * Loads the bitmap for one category field/value pair.
+             *
+             * Return codes:
+             * 0 = success
+             * 100-199 = propagated MDBX/storage failure from the bitmap read helper
+             * 200-299 = propagated corruption/invariant failure from the bitmap read helper
+             */
+            ndd::OperationResult<ndd::RoaringBitmap>
+            get_bitmap(const std::string& field, const std::string& value) const;
 
-            // Faceting: List all unique values for a field
-            std::vector<std::string> scan_values(const std::string& field) const {
-                std::vector<std::string> values;
-                MDBX_txn* txn;
-                if (mdbx_txn_begin(env_, nullptr, MDBX_TXN_RDONLY, &txn) != MDBX_SUCCESS) return values;
+            /*
+             * Loads the bitmap for an already formatted category key.
+             *
+             * Return codes:
+             * 0 = success
+             * 100-199 = propagated MDBX/storage failure from the bitmap read helper
+             * 200-299 = propagated corruption/invariant failure from the bitmap read helper
+             */
+            ndd::OperationResult<ndd::RoaringBitmap>
+            get_bitmap_by_key(const std::string& key) const;
 
-                MDBX_cursor* cursor;
-                mdbx_cursor_open(txn, dbi_, &cursor);
+            /*
+             * Adds one id to a category field/value bitmap.
+             *
+             * Return codes:
+             * 0 = success
+             * 100-199 = propagated MDBX/storage failure from bitmap read/write helpers
+             * 200-299 = propagated corruption/invariant failure from bitmap read/write helpers
+             */
+            ndd::OperationResult<>
+            add(const std::string& field, const std::string& value, ndd::idInt id);
 
-                std::string prefix = field + ":";
-                MDBX_val key{const_cast<char*>(prefix.c_str()), prefix.size()};
-                MDBX_val data;
+            /*
+             * Removes one id from a category field/value bitmap.
+             *
+             * Return codes:
+             * 0 = success
+             * 100-199 = propagated MDBX/storage failure from bitmap read/write helpers
+             * 200-299 = propagated corruption/invariant failure from bitmap read/write helpers
+             */
+            ndd::OperationResult<>
+            remove(const std::string& field, const std::string& value, ndd::idInt id);
 
-                int rc = mdbx_cursor_get(cursor, &key, &data, MDBX_SET_RANGE);
-                while(rc == MDBX_SUCCESS) {
-                    std::string found_key((char*)key.iov_base, key.iov_len);
-                    if(found_key.rfind(prefix, 0) != 0) break;
+            /*
+             * Checks whether one id is present in a category field/value bitmap.
+             *
+             * Return codes:
+             * 0 = success
+             * 100-199 = propagated MDBX/storage failure from the bitmap read helper
+             * 200-299 = propagated corruption/invariant failure from the bitmap read helper
+             */
+            ndd::OperationResult<bool>
+            contains(const std::string& field, const std::string& value, ndd::idInt id) const;
 
-                    values.push_back(found_key.substr(prefix.size()));
-                    rc = mdbx_cursor_get(cursor, &key, &data, MDBX_NEXT);
-                }
-                mdbx_cursor_close(cursor);
-                mdbx_txn_abort(txn);
-                return values;
-            }
-
-            ndd::RoaringBitmap get_bitmap(const std::string& field,
-                                          const std::string& value) const {
-                return get_bitmap_internal(format_filter_key(field, value));
-            }
-
-            // Direct key access for internal use if needed, or expose format_filter_key
-            ndd::RoaringBitmap get_bitmap_by_key(const std::string& key) const {
-                return get_bitmap_internal(key);
-            }
-
-            void add(const std::string& field, const std::string& value, ndd::idInt id) {
-                std::string filter_key = format_filter_key(field, value);
-                ndd::RoaringBitmap bitmap = get_bitmap_internal(filter_key);
-                bitmap.add(id);
-                store_bitmap_internal(filter_key, bitmap);
-            }
-
-            void remove(const std::string& field, const std::string& value, ndd::idInt id) {
-                std::string filter_key = format_filter_key(field, value);
-                ndd::RoaringBitmap bitmap = get_bitmap_internal(filter_key);
-                bitmap.remove(id);
-                store_bitmap_internal(filter_key, bitmap);
-            }
-
-            bool contains(const std::string& field, const std::string& value, ndd::idInt id) const {
-                std::string filter_key = format_filter_key(field, value);
-                ndd::RoaringBitmap bitmap = get_bitmap_internal(filter_key);
-                return bitmap.contains(id);
-            }
-
-            void add_batch(const std::string& field,
-                           const std::string& value,
-                           const std::vector<ndd::idInt>& ids) {
-                if(ids.empty()) {
-                    return;
-                }
-                std::string filter_key = format_filter_key(field, value);
-                ndd::RoaringBitmap bitmap = get_bitmap_internal(filter_key);
-                for(const auto& id : ids) {
-                    bitmap.add(id);
-                }
-                store_bitmap_internal(filter_key, bitmap);
-            }
-
-            // Helper for batch operations where key is already formatted
-            void add_batch_by_key(const std::string& key, const std::vector<ndd::idInt>& ids) {
-                if(ids.empty()) {
-                    return;
-                }
-                ndd::RoaringBitmap bitmap = get_bitmap_internal(key);
-                for(const auto& id : ids) {
-                    bitmap.add(id);
-                }
-                store_bitmap_internal(key, bitmap);
-            }
+            /*
+             * Adds a batch of ids to an already formatted category key.
+             *
+             * Return codes:
+             * 0 = success
+             * 100-199 = propagated MDBX/storage failure from bitmap read/write helpers
+             * 200-299 = propagated corruption/invariant failure from bitmap read/write helpers
+             */
+            ndd::OperationResult<>
+            add_batch_by_key(const std::string& key, const std::vector<ndd::idInt>& ids);
 
             // Expose key formatting for external batching logic
-            static std::string make_key(const std::string& field, const std::string& value) {
-                return format_filter_key(field, value);
-            }
+            static std::string make_key(const std::string& field, const std::string& value);
 
             MDBX_dbi get_dbi() const { return dbi_; }
         };

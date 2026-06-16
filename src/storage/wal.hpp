@@ -86,6 +86,7 @@ public:
 
     // Read all entries from the WAL file
     std::vector<WALEntry> readEntries() {
+        std::lock_guard<std::mutex> lock(file_mutex_);
         std::vector<WALEntry> entries;
 
         std::ifstream infile(log_path_, std::ios::binary);
@@ -99,32 +100,15 @@ public:
 
             // Read operation type
             infile.read(reinterpret_cast<char*>(&op), sizeof(op));
-            if(infile.eof()) {
+            if(!infile) {
                 break;
             }
 
             // Read numeric ID
             infile.read(reinterpret_cast<char*>(&numeric_id), sizeof(numeric_id));
-            if(infile.eof()) {
+            if(!infile) {
+                // Ignore a trailing partial record (e.g. crash while writing).
                 break;
-            }
-
-            std::string string_id;
-            // Only VECTOR_ADD has string_id
-            if(static_cast<WALOperationType>(op) == WALOperationType::VECTOR_ADD) {
-                // Read string length
-                size_t str_len;
-                infile.read(reinterpret_cast<char*>(&str_len), sizeof(str_len));
-                if(infile.eof()) {
-                    break;
-                }
-
-                // Read string content
-                string_id.resize(str_len);
-                infile.read(&string_id[0], str_len);
-                if(infile.eof()) {
-                    break;
-                }
             }
 
             entries.push_back({static_cast<WALOperationType>(op), numeric_id});
@@ -134,9 +118,18 @@ public:
     }
     // Clear the WAL file
     void clear() {
+        std::lock_guard<std::mutex> lock(file_mutex_);
         log_file_.close();
-        std::filesystem::remove(log_path_);
+        std::error_code ec;
+        std::filesystem::remove(log_path_, ec);
         log_file_.open(log_path_, std::ios::binary | std::ios::app);
+        if(!log_file_) {
+            std::string err_string = "Failed to reopen WAL file after clear: " + log_path_
+                                     + " errno: " + std::to_string(errno)
+                                     + " errcode: " + std::strerror(errno);
+            LOG_ERROR(1402, index_id_, err_string);
+            throw std::runtime_error(err_string);
+        }
         entry_count_ = 0;
     }
 

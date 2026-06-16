@@ -20,7 +20,9 @@ class IDMapper {
 public:
     IDMapper(const std::string& path, bool is_new = false, UserType user_type = UserType::Admin) :
         path_(path),
-        user_type_(user_type) {
+        user_type_(user_type),
+        owns_env_(true),
+        dbi_name_() {
         if(is_new) {
             std::filesystem::create_directories(path);
         }
@@ -74,16 +76,157 @@ public:
         }
     }
 
+    IDMapper(MDBX_env* env,
+             const std::string& dbi_name,
+             bool is_new = false,
+             UserType user_type = UserType::Admin) :
+        env_(env),
+        dbi_(0),
+        path_(),
+        user_type_(user_type),
+        owns_env_(false),
+        dbi_name_(dbi_name) {
+        MDBX_txn* txn;
+        int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
+        if(rc != MDBX_SUCCESS) {
+            throw std::runtime_error(std::string("Failed to begin transaction: ")
+                                     + mdbx_strerror(rc));
+        }
+
+        rc = mdbx_dbi_open(txn, dbi_name_.c_str(), MDBX_CREATE, &dbi_);
+        if(rc != MDBX_SUCCESS) {
+            mdbx_txn_abort(txn);
+            throw std::runtime_error(std::string("Failed to open database: ") + mdbx_strerror(rc));
+        }
+
+        rc = mdbx_txn_commit(txn);
+        if(rc != MDBX_SUCCESS) {
+            throw std::runtime_error(std::string("Failed to commit transaction: ")
+                                     + mdbx_strerror(rc));
+        }
+
+        if(is_new) {
+            init_next_id();
+        }
+    }
+
     ~IDMapper() {
         mdbx_dbi_close(env_, dbi_);
-        mdbx_env_close(env_);
+        if(owns_env_) {
+            mdbx_env_close(env_);
+        }
     }
 
     // Create string ID to numeric ID mapping. If string ids exists in the database, it will return
     // the existing numeric ID along with flag It will also use old numeric IDs of deleted points
     template <bool use_deleted_ids>
+    std::vector<std::pair<idInt, bool>>
+    create_ids_batch_txn(MDBX_txn* txn, const std::vector<std::string>& str_ids) {
+        if(str_ids.empty()) {
+            return {};
+        }
+
+        constexpr idInt INVALID_LABEL = static_cast<idInt>(-1);
+        std::vector<std::tuple<std::string, idInt, bool, bool>> id_tuples;
+        id_tuples.reserve(str_ids.size());
+        for(const auto& str_id : str_ids) {
+            id_tuples.emplace_back(str_id, INVALID_LABEL, true, false);
+        }
+
+        for(auto& tup : id_tuples) {
+            const std::string& str_id = std::get<0>(tup);
+            MDBX_val key{(void*)str_id.c_str(), str_id.size()};
+            MDBX_val data;
+
+            int rc = mdbx_get(txn, dbi_, &key, &data);
+            if(rc == MDBX_SUCCESS) {
+                idInt existing_id = *(idInt*)data.iov_base;
+                std::get<1>(tup) = existing_id;
+                std::get<2>(tup) = false;
+            } else if(rc == MDBX_NOTFOUND) {
+                std::get<1>(tup) = 0;
+            } else {
+                throw std::runtime_error("Database error checking ID: "
+                                         + std::string(mdbx_strerror(rc)));
+            }
+        }
+
+        size_t total_new_ids_needed =
+                std::count_if(id_tuples.begin(), id_tuples.end(), [](const auto& t) {
+                    return std::get<1>(t) == 0;
+                });
+
+        size_t fresh_ids_count = total_new_ids_needed;
+        size_t deleted_index = 0;
+
+        if(use_deleted_ids) {
+            std::vector<idInt> deletedIds = getDeletedIds_txn(txn, fresh_ids_count);
+
+            for(auto& tup : id_tuples) {
+                if(std::get<1>(tup) == 0 && std::get<2>(tup) == true
+                   && deleted_index < deletedIds.size()) {
+                    std::get<1>(tup) = deletedIds[deleted_index++];
+                    std::get<3>(tup) = true;
+                }
+            }
+            fresh_ids_count -= deleted_index;
+        }
+
+        std::vector<idInt> new_ids;
+        if(fresh_ids_count > 0) {
+            new_ids = get_next_ids_txn(txn, fresh_ids_count);
+        }
+
+        size_t new_id_index = 0;
+        for(auto& tup : id_tuples) {
+            if(std::get<2>(tup) == true && std::get<1>(tup) != 0) {
+                const std::string& str_id = std::get<0>(tup);
+                idInt id = std::get<1>(tup);
+
+                MDBX_val key{(void*)str_id.c_str(), str_id.size()};
+                MDBX_val data{&id, sizeof(idInt)};
+
+                int rc = mdbx_put(txn, dbi_, &key, &data, MDBX_UPSERT);
+                if(rc != MDBX_SUCCESS) {
+                    throw std::runtime_error("Failed to insert IDs: "
+                                             + std::string(mdbx_strerror(rc)));
+                }
+            } else if(std::get<1>(tup) == 0) {
+                if(new_id_index >= new_ids.size()) {
+                    throw std::runtime_error("Mismatch in generated ID count");
+                }
+                idInt new_id = new_ids[new_id_index++];
+                const std::string& str_id = std::get<0>(tup);
+
+                MDBX_val key{(void*)str_id.c_str(), str_id.size()};
+                MDBX_val data{&new_id, sizeof(idInt)};
+
+                int rc = mdbx_put(txn, dbi_, &key, &data, MDBX_UPSERT);
+                if(rc != MDBX_SUCCESS) {
+                    throw std::runtime_error("Failed to insert IDs: "
+                                             + std::string(mdbx_strerror(rc)));
+                }
+
+                std::get<1>(tup) = new_id;
+            }
+        }
+
+        std::vector<std::pair<idInt, bool>> result;
+        result.reserve(id_tuples.size());
+        for(const auto& tup : id_tuples) {
+            bool is_new_to_hnsw = std::get<2>(tup);
+            if(std::get<3>(tup)) {
+                is_new_to_hnsw = false;
+            }
+            result.emplace_back(std::get<1>(tup), is_new_to_hnsw);
+        }
+        return result;
+    }
+
+    template <bool use_deleted_ids>
     std::vector<std::pair<idInt, bool>> create_ids_batch(const std::vector<std::string>& str_ids,
                                                          void* wal_ptr = nullptr) {
+        (void)wal_ptr;
         if(str_ids.empty()) {
             return {};
         }
@@ -192,28 +335,6 @@ public:
             std::vector<idInt> new_ids;
             if(fresh_ids_count > 0) {
                 new_ids = get_next_ids(fresh_ids_count);
-            }
-
-            // CRITICAL FIX: Log to WAL AFTER generating IDs (minimal risk window)
-            if(wal_ptr) {
-                WriteAheadLog* wal = static_cast<WriteAheadLog*>(wal_ptr);
-                std::vector<WriteAheadLog::WALEntry> wal_entries;
-
-                // Log reused IDs
-                for(const auto& tup : id_tuples) {
-                    if(std::get<2>(tup) && std::get<1>(tup) != 0) {
-                        wal_entries.push_back({WALOperationType::VECTOR_ADD, std::get<1>(tup)});
-                    }
-                }
-
-                // Log fresh IDs
-                for(idInt id : new_ids) {
-                    wal_entries.push_back({WALOperationType::VECTOR_ADD, id});
-                }
-
-                if(!wal_entries.empty()) {
-                    wal->log(wal_entries);
-                }
             }
 
             if(fresh_ids_count > 0 && new_ids.size() != fresh_ids_count) {
@@ -352,6 +473,18 @@ public:
     }
 
     // Get ID for a string (returns 0 if not found)
+    idInt get_id_txn(MDBX_txn* txn, const std::string& str_id) const {
+        MDBX_val key, data;
+        key.iov_len = str_id.size();
+        key.iov_base = (void*)str_id.c_str();
+
+        int rc = mdbx_get(txn, dbi_, &key, &data);
+        if(rc == MDBX_SUCCESS) {
+            return *(idInt*)data.iov_base;
+        }
+        return 0;
+    }
+
     idInt get_id(const std::string& str_id) const {
         LOG_DEBUG("=== get_id START for: [" << str_id << "] size: " << str_id.size() << " ===");
 
@@ -386,6 +519,52 @@ public:
         mdbx_txn_abort(txn);
         LOG_DEBUG("=== get_id END - NOT FOUND ===");
         return 0;  // Not found
+    }
+
+    std::vector<idInt> deletePoints_txn(MDBX_txn* txn,
+                                        const std::vector<std::string>& external_ids) {
+        std::vector<idInt> deleted_ids;
+
+        MDBX_val key, data;
+        for(const auto& ext_id : external_ids) {
+            key.iov_len = ext_id.size();
+            key.iov_base = const_cast<char*>(ext_id.data());
+
+            if(mdbx_get(txn, dbi_, &key, &data) == MDBX_SUCCESS) {
+                idInt label = *reinterpret_cast<idInt*>(data.iov_base);
+                deleted_ids.push_back(label);
+                mdbx_del(txn, dbi_, &key, nullptr);
+            } else {
+                deleted_ids.push_back(0);
+            }
+        }
+
+        if(!deleted_ids.empty()) {
+            std::string del_key = DELETED_IDS_KEY;
+            MDBX_val del_mdb_key, del_mdb_val;
+
+            del_mdb_key.iov_len = del_key.size();
+            del_mdb_key.iov_base = const_cast<char*>(del_key.data());
+
+            std::vector<idInt> existing;
+            if(mdbx_get(txn, dbi_, &del_mdb_key, &del_mdb_val) == MDBX_SUCCESS) {
+                size_t count = del_mdb_val.iov_len / sizeof(idInt);
+                idInt* raw = reinterpret_cast<idInt*>(del_mdb_val.iov_base);
+                existing.insert(existing.end(), raw, raw + count);
+            }
+
+            for(idInt l : deleted_ids) {
+                if(l != 0) {
+                    existing.push_back(l);
+                }
+            }
+
+            del_mdb_val.iov_len = existing.size() * sizeof(idInt);
+            del_mdb_val.iov_base = existing.data();
+            mdbx_put(txn, dbi_, &del_mdb_key, &del_mdb_val, MDBX_UPSERT);
+        }
+
+        return deleted_ids;
     }
 
     // Deletes mapping from string_id to numeric_id, append to DELETED_IDS_KEY
@@ -489,11 +668,15 @@ public:
         // It will grow automatically as needed via compact operations
     }
 
+    MDBX_env* get_env() const { return env_; }
+
 private:
     MDBX_env* env_;
     MDBX_dbi dbi_;
     std::string path_;
     UserType user_type_;
+    bool owns_env_;
+    std::string dbi_name_;
     mutable std::mutex mutex_;  // Only used for next_id management
     // Along with string:number pairs, the database also stores a key for next_id. They key for next
     // id also has random alphanumeric characters to avoid collision with other keys. The key is
@@ -502,6 +685,65 @@ private:
     static const std::string DELETED_IDS_KEY;
 
     // Atomic operation to get and increment next_ids
+    std::vector<idInt> get_next_ids_txn(MDBX_txn* txn, size_t size = 1) {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        MDBX_val key{(void*)NEXT_ID_KEY.c_str(), NEXT_ID_KEY.size()};
+        MDBX_val data;
+        idInt current_id = 0;
+
+        int rc = mdbx_get(txn, dbi_, &key, &data);
+        if(rc == MDBX_SUCCESS) {
+            current_id = *(idInt*)data.iov_base;
+        } else if(rc != MDBX_NOTFOUND) {
+            throw std::runtime_error(std::string("Failed to get next_id: ") + mdbx_strerror(rc));
+        }
+
+        idInt next_id = current_id + size;
+        data.iov_len = sizeof(idInt);
+        data.iov_base = &next_id;
+
+        rc = mdbx_put(txn, dbi_, &key, &data, MDBX_UPSERT);
+        if(rc != MDBX_SUCCESS) {
+            throw std::runtime_error(std::string("Failed to store next_id: ")
+                                     + mdbx_strerror(rc));
+        }
+
+        std::vector<idInt> ids(size);
+        std::iota(ids.begin(), ids.end(), current_id);
+        return ids;
+    }
+
+    std::vector<idInt> getDeletedIds_txn(MDBX_txn* txn, size_t max_count) {
+        std::vector<idInt> result;
+
+        std::string del_key = DELETED_IDS_KEY;
+        MDBX_val key, val;
+        key.iov_len = del_key.size();
+        key.iov_base = const_cast<char*>(del_key.data());
+
+        if(mdbx_get(txn, dbi_, &key, &val) != MDBX_SUCCESS) {
+            return result;
+        }
+
+        size_t total = val.iov_len / sizeof(idInt);
+        idInt* raw = reinterpret_cast<idInt*>(val.iov_base);
+
+        size_t count = std::min(max_count, total);
+        result.insert(result.end(), raw, raw + count);
+
+        if(count < total) {
+            MDBX_val new_val;
+            new_val.iov_len = (total - count) * sizeof(idInt);
+            new_val.iov_base = raw + count;
+            mdbx_put(txn, dbi_, &key, &new_val, MDBX_UPSERT);
+        } else {
+            mdbx_del(txn, dbi_, &key, nullptr);
+        }
+
+        return result;
+    }
+
     std::vector<idInt> get_next_ids(size_t size = 1) {
         std::lock_guard<std::mutex> lock(mutex_);
         MDBX_txn* txn;

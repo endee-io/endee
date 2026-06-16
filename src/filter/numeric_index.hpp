@@ -250,34 +250,57 @@ namespace ndd {
                 }
             }
 
+            void put(MDBX_txn* txn, const std::string& field, ndd::idInt id, uint32_t value) {
+                put_internal(txn, field, id, value);
+            }
+
             void put(const std::string& field, ndd::idInt id, uint32_t value) {
                 MDBX_txn* txn;
-                mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
+                int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
+                if(rc != MDBX_SUCCESS) {
+                    throw std::runtime_error("Failed to begin numeric put transaction: "
+                                             + std::string(mdbx_strerror(rc)));
+                }
                 try {
                     put_internal(txn, field, id, value);
-                    mdbx_txn_commit(txn);
+                    rc = mdbx_txn_commit(txn);
+                    if(rc != MDBX_SUCCESS) {
+                        throw std::runtime_error("Failed to commit numeric put transaction: "
+                                                 + std::string(mdbx_strerror(rc)));
+                    }
                 } catch(...) {
                     mdbx_txn_abort(txn);
                     throw;
                 }
             }
 
+            void remove(MDBX_txn* txn, const std::string& field, ndd::idInt id) {
+                std::string fwd_key_str = make_forward_key(field, id);
+                MDBX_val fwd_key{const_cast<char*>(fwd_key_str.data()), fwd_key_str.size()};
+                MDBX_val fwd_val;
+
+                if(mdbx_get(txn, forward_dbi_, &fwd_key, &fwd_val) == MDBX_SUCCESS) {
+                    uint32_t old_val;
+                    std::memcpy(&old_val, fwd_val.iov_base, sizeof(uint32_t));
+                    remove_from_buckets(txn, field, old_val, id);
+                    mdbx_del(txn, forward_dbi_, &fwd_key, nullptr);
+                }
+            }
+
             void remove(const std::string& field, ndd::idInt id) {
                 MDBX_txn* txn;
-                mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
+                int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
+                if(rc != MDBX_SUCCESS) {
+                    throw std::runtime_error("Failed to begin numeric remove transaction: "
+                                             + std::string(mdbx_strerror(rc)));
+                }
                 try {
-                    std::string fwd_key_str = make_forward_key(field, id);
-                    MDBX_val fwd_key{const_cast<char*>(fwd_key_str.data()), fwd_key_str.size()};
-                    MDBX_val fwd_val;
-
-                    if(mdbx_get(txn, forward_dbi_, &fwd_key, &fwd_val) == MDBX_SUCCESS) {
-                        uint32_t old_val;
-                        std::memcpy(&old_val, fwd_val.iov_base, sizeof(uint32_t));
-                        remove_from_buckets(txn, field, old_val, id);
-                        mdbx_del(txn, forward_dbi_, &fwd_key, nullptr);
+                    remove(txn, field, id);
+                    rc = mdbx_txn_commit(txn);
+                    if(rc != MDBX_SUCCESS) {
+                        throw std::runtime_error("Failed to commit numeric remove transaction: "
+                                                 + std::string(mdbx_strerror(rc)));
                     }
-
-                    mdbx_txn_commit(txn);
                 } catch(...) {
                     mdbx_txn_abort(txn);
                     throw;

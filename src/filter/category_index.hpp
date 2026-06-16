@@ -21,7 +21,27 @@ namespace ndd {
                 return field + ":" + value;
             }
 
-            // Load bitmap from LMDB
+            // Load bitmap using an existing transaction (avoids opening a nested txn)
+            ndd::RoaringBitmap get_bitmap_with_txn(MDBX_txn* txn,
+                                                    const std::string& filter_key) const {
+                MDBX_val key{const_cast<char*>(filter_key.c_str()), filter_key.size()};
+                MDBX_val data;
+
+                int rc = mdbx_get(txn, dbi_, &key, &data);
+                if(rc == MDBX_NOTFOUND) {
+                    return ndd::RoaringBitmap();
+                }
+                if(rc != MDBX_SUCCESS) {
+                    throw std::runtime_error("Failed to read filter key '" + filter_key
+                                             + "': " + std::string(mdbx_strerror(rc)));
+                }
+                if(data.iov_len == 0) {
+                    return ndd::RoaringBitmap();
+                }
+                return ndd::RoaringBitmap::read(static_cast<const char*>(data.iov_base));
+            }
+
+            // Load bitmap from LMDB (opens its own read transaction)
             ndd::RoaringBitmap get_bitmap_internal(const std::string& filter_key) const {
                 MDBX_txn* txn;
                 int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_RDONLY, &txn);
@@ -31,29 +51,7 @@ namespace ndd {
                 }
 
                 try {
-                    MDBX_val key{const_cast<char*>(filter_key.c_str()), filter_key.size()};
-                    MDBX_val data;
-
-                    rc = mdbx_get(txn, dbi_, &key, &data);
-                    if(rc == MDBX_NOTFOUND) {
-                        mdbx_txn_abort(txn);
-                        // LOG_DEBUG("Filter key not found: " << filter_key);
-                        return ndd::RoaringBitmap();  // Return empty bitmap
-                    }
-                    if(rc != MDBX_SUCCESS) {
-                        mdbx_txn_abort(txn);
-                        throw std::runtime_error("Failed to read filter key '" + filter_key
-                                                 + "': " + std::string(mdbx_strerror(rc)));
-                    }
-
-                    if(data.iov_len == 0) {
-                        mdbx_txn_abort(txn);
-                        // LOG_DEBUG("Empty data for filter key: " << filter_key);
-                        return ndd::RoaringBitmap();
-                    }
-
-                    ndd::RoaringBitmap bitmap =
-                            ndd::RoaringBitmap::read(static_cast<const char*>(data.iov_base));
+                    ndd::RoaringBitmap bitmap = get_bitmap_with_txn(txn, filter_key);
                     mdbx_txn_abort(txn);
                     return bitmap;
                 } catch(...) {
@@ -62,7 +60,8 @@ namespace ndd {
                 }
             }
 
-            void store_bitmap_internal(const std::string& filter_key,
+            void store_bitmap_internal(MDBX_txn* txn,
+                                       const std::string& filter_key,
                                        const ndd::RoaringBitmap& bitmap) {
                 if(bitmap.cardinality() == 0) {
                     // LOG_DEBUG("Storing empty bitmap for key: " << filter_key);
@@ -79,23 +78,9 @@ namespace ndd {
                 MDBX_val key{const_cast<char*>(filter_key.c_str()), filter_key.size()};
                 MDBX_val data{const_cast<char*>(buffer.data()), buffer.size()};
 
-                MDBX_txn* txn;
-                int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
+                int rc = mdbx_put(txn, dbi_, &key, &data, MDBX_UPSERT);
                 if(rc != MDBX_SUCCESS) {
-                    throw std::runtime_error("Failed to begin write transaction: "
-                                             + std::string(mdbx_strerror(rc)));
-                }
-
-                rc = mdbx_put(txn, dbi_, &key, &data, MDBX_UPSERT);
-                if(rc != MDBX_SUCCESS) {
-                    mdbx_txn_abort(txn);
                     throw std::runtime_error("Failed to store bitmap: "
-                                             + std::string(mdbx_strerror(rc)));
-                }
-
-                rc = mdbx_txn_commit(txn);
-                if(rc != MDBX_SUCCESS) {
-                    throw std::runtime_error("Failed to commit transaction: "
                                              + std::string(mdbx_strerror(rc)));
                 }
             }
@@ -155,18 +140,66 @@ namespace ndd {
                 return get_bitmap_internal(key);
             }
 
-            void add(const std::string& field, const std::string& value, ndd::idInt id) {
+            void add(MDBX_txn* txn,
+                     const std::string& field,
+                     const std::string& value,
+                     ndd::idInt id) {
                 std::string filter_key = format_filter_key(field, value);
-                ndd::RoaringBitmap bitmap = get_bitmap_internal(filter_key);
+                ndd::RoaringBitmap bitmap = get_bitmap_with_txn(txn, filter_key);
                 bitmap.add(id);
-                store_bitmap_internal(filter_key, bitmap);
+                store_bitmap_internal(txn, filter_key, bitmap);
+            }
+
+            void add(const std::string& field, const std::string& value, ndd::idInt id) {
+                MDBX_txn* txn;
+                int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
+                if(rc != MDBX_SUCCESS) {
+                    throw std::runtime_error("Failed to begin write transaction: "
+                                             + std::string(mdbx_strerror(rc)));
+                }
+
+                try {
+                    add(txn, field, value, id);
+                    rc = mdbx_txn_commit(txn);
+                    if(rc != MDBX_SUCCESS) {
+                        throw std::runtime_error("Failed to commit transaction: "
+                                                 + std::string(mdbx_strerror(rc)));
+                    }
+                } catch(...) {
+                    mdbx_txn_abort(txn);
+                    throw;
+                }
+            }
+
+            void remove(MDBX_txn* txn,
+                        const std::string& field,
+                        const std::string& value,
+                        ndd::idInt id) {
+                std::string filter_key = format_filter_key(field, value);
+                ndd::RoaringBitmap bitmap = get_bitmap_with_txn(txn, filter_key);
+                bitmap.remove(id);
+                store_bitmap_internal(txn, filter_key, bitmap);
             }
 
             void remove(const std::string& field, const std::string& value, ndd::idInt id) {
-                std::string filter_key = format_filter_key(field, value);
-                ndd::RoaringBitmap bitmap = get_bitmap_internal(filter_key);
-                bitmap.remove(id);
-                store_bitmap_internal(filter_key, bitmap);
+                MDBX_txn* txn;
+                int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
+                if(rc != MDBX_SUCCESS) {
+                    throw std::runtime_error("Failed to begin write transaction: "
+                                             + std::string(mdbx_strerror(rc)));
+                }
+
+                try {
+                    remove(txn, field, value, id);
+                    rc = mdbx_txn_commit(txn);
+                    if(rc != MDBX_SUCCESS) {
+                        throw std::runtime_error("Failed to commit transaction: "
+                                                 + std::string(mdbx_strerror(rc)));
+                    }
+                } catch(...) {
+                    mdbx_txn_abort(txn);
+                    throw;
+                }
             }
 
             bool contains(const std::string& field, const std::string& value, ndd::idInt id) const {
@@ -181,24 +214,65 @@ namespace ndd {
                 if(ids.empty()) {
                     return;
                 }
-                std::string filter_key = format_filter_key(field, value);
-                ndd::RoaringBitmap bitmap = get_bitmap_internal(filter_key);
+                MDBX_txn* txn;
+                int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
+                if(rc != MDBX_SUCCESS) {
+                    throw std::runtime_error("Failed to begin write transaction: "
+                                             + std::string(mdbx_strerror(rc)));
+                }
+
+                try {
+                    std::string filter_key = format_filter_key(field, value);
+                    ndd::RoaringBitmap bitmap = get_bitmap_with_txn(txn, filter_key);
+                    for(const auto& id : ids) {
+                        bitmap.add(id);
+                    }
+                    store_bitmap_internal(txn, filter_key, bitmap);
+
+                    rc = mdbx_txn_commit(txn);
+                    if(rc != MDBX_SUCCESS) {
+                        throw std::runtime_error("Failed to commit transaction: "
+                                                 + std::string(mdbx_strerror(rc)));
+                    }
+                } catch(...) {
+                    mdbx_txn_abort(txn);
+                    throw;
+                }
+            }
+
+            void add_batch_by_key(MDBX_txn* txn,
+                                  const std::string& key,
+                                  const std::vector<ndd::idInt>& ids) {
+                if(ids.empty()) {
+                    return;
+                }
+                ndd::RoaringBitmap bitmap = get_bitmap_with_txn(txn, key);
                 for(const auto& id : ids) {
                     bitmap.add(id);
                 }
-                store_bitmap_internal(filter_key, bitmap);
+                store_bitmap_internal(txn, key, bitmap);
             }
 
             // Helper for batch operations where key is already formatted
             void add_batch_by_key(const std::string& key, const std::vector<ndd::idInt>& ids) {
-                if(ids.empty()) {
-                    return;
+                MDBX_txn* txn;
+                int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
+                if(rc != MDBX_SUCCESS) {
+                    throw std::runtime_error("Failed to begin write transaction: "
+                                             + std::string(mdbx_strerror(rc)));
                 }
-                ndd::RoaringBitmap bitmap = get_bitmap_internal(key);
-                for(const auto& id : ids) {
-                    bitmap.add(id);
+
+                try {
+                    add_batch_by_key(txn, key, ids);
+                    rc = mdbx_txn_commit(txn);
+                    if(rc != MDBX_SUCCESS) {
+                        throw std::runtime_error("Failed to commit transaction: "
+                                                 + std::string(mdbx_strerror(rc)));
+                    }
+                } catch(...) {
+                    mdbx_txn_abort(txn);
+                    throw;
                 }
-                store_bitmap_internal(key, bitmap);
             }
 
             // Expose key formatting for external batching logic

@@ -27,7 +27,20 @@ namespace ndd {
             db_path_(db_path),
             index_id_(index_id),
             sparse_model_(sparse_model),
-            env_(nullptr) {
+            env_(nullptr),
+            owns_env_(true) {
+            sparse_index_ = nullptr;
+        }
+
+        SparseVectorStorage(MDBX_env* env,
+                            const std::string& index_id,
+                            ndd::SparseScoringModel sparse_model =
+                                ndd::SparseScoringModel::DEFAULT) :
+            db_path_(),
+            index_id_(index_id),
+            sparse_model_(sparse_model),
+            env_(env),
+            owns_env_(false) {
             sparse_index_ = nullptr;
         }
 
@@ -35,8 +48,14 @@ namespace ndd {
 
         // Initialize storage
         bool initialize() {
-            if(!initializeMDBX()) {
-                return false;
+            if(owns_env_) {
+                if(!initializeMDBX()) {
+                    return false;
+                }
+            } else {
+                if(!initializeDBIs()) {
+                    return false;
+                }
             }
 
             sparse_index_ =
@@ -222,6 +241,76 @@ namespace ndd {
             return txn->commit();
         }
 
+        bool store_vectors_batch_txn(
+                MDBX_txn* txn,
+                const std::vector<std::pair<ndd::idInt, SparseVector>>& batch,
+                int64_t* vector_count_delta_out = nullptr) {
+            std::unique_lock<std::shared_mutex> lock(mutex_);
+            int64_t delta = 0;
+
+            for(const auto& [doc_id, sparse_vec] : batch) {
+                const auto existing_vec = getVectorInternal(txn, doc_id);
+                const bool had_sparse_terms = existing_vec.has_value() && !existing_vec->empty();
+                const bool has_sparse_terms = !sparse_vec.empty();
+
+                if(had_sparse_terms
+                   && !sparse_index_->removeDocument(txn, doc_id, *existing_vec)) {
+                    return false;
+                }
+
+                if(existing_vec.has_value() && !deleteVectorInternal(txn, doc_id)) {
+                    return false;
+                }
+
+                if(has_sparse_terms) {
+                    if(!storeVectorInternal(txn, doc_id, sparse_vec)) {
+                        return false;
+                    }
+
+                    if(!sparse_index_->addDocumentsBatch(txn, {{doc_id, sparse_vec}})) {
+                        return false;
+                    }
+                }
+
+                delta += static_cast<int64_t>(has_sparse_terms)
+                       - static_cast<int64_t>(had_sparse_terms);
+            }
+
+            if(vector_count_delta_out) {
+                *vector_count_delta_out = delta;
+            }
+            return true;
+        }
+
+        bool delete_vector_txn(MDBX_txn* txn,
+                               ndd::idInt doc_id,
+                               int64_t* vector_count_delta_out = nullptr) {
+            std::unique_lock<std::shared_mutex> lock(mutex_);
+
+            auto vec = getVectorInternal(txn, doc_id);
+            if(!vec) {
+                LOG_WARN(2242, index_id_, "delete_vector_txn could not find doc_id=" << doc_id);
+                return false;
+            }
+
+            const bool had_sparse_terms = !vec->empty();
+            if(had_sparse_terms && !sparse_index_->removeDocument(txn, doc_id, *vec)) {
+                return false;
+            }
+
+            if(!deleteVectorInternal(txn, doc_id)) {
+                return false;
+            }
+
+            if(vector_count_delta_out) {
+                *vector_count_delta_out = had_sparse_terms ? -1 : 0;
+            }
+            return true;
+        }
+
+        void apply_vector_count_delta(int64_t delta) { applyVectorCountDelta(delta); }
+        bool uses_shared_env() const { return !owns_env_; }
+
         /*NOT BEING USED FOR NOW*/
 #if 0
         bool delete_vectors_batch(const std::vector<ndd::idInt>& doc_ids) {
@@ -254,6 +343,7 @@ namespace ndd {
         std::string index_id_;
         ndd::SparseScoringModel sparse_model_;
         MDBX_env* env_;
+        bool owns_env_;
         MDBX_dbi docs_dbi_;
 
         std::unique_ptr<InvertedIndex> sparse_index_;
@@ -263,6 +353,31 @@ namespace ndd {
         std::unordered_set<ndd::idInt> deleted_docs_;
 
         // Helper methods
+        bool initializeDBIs() {
+            MDBX_txn* txn;
+            int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
+            if(rc != 0) {
+                LOG_ERROR(2250, index_id_, "mdbx_txn_begin failed: " << mdbx_strerror(rc));
+                return false;
+            }
+
+            rc = mdbx_dbi_open(txn, "sparse_docs", MDBX_CREATE | MDBX_INTEGERKEY, &docs_dbi_);
+            if(rc != 0) {
+                LOG_ERROR(2251,
+                          index_id_,
+                          "mdbx_dbi_open failed for sparse_docs: " << mdbx_strerror(rc));
+                mdbx_txn_abort(txn);
+                return false;
+            }
+
+            rc = mdbx_txn_commit(txn);
+            if(rc != 0) {
+                LOG_ERROR(2252, index_id_, "mdbx_txn_commit failed: " << mdbx_strerror(rc));
+                return false;
+            }
+            return true;
+        }
+
         bool initializeMDBX() {
             int rc = mdbx_env_create(&env_);
             if(rc != 0) {
@@ -302,30 +417,11 @@ namespace ndd {
                 return false;
             }
 
-            MDBX_txn* txn;
-            rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
-            if(rc != 0) {
-                LOG_ERROR(2250, index_id_, "mdbx_txn_begin failed: " << mdbx_strerror(rc));
-                return false;
-            }
-
-            rc = mdbx_dbi_open(txn, "sparse_docs", MDBX_CREATE | MDBX_INTEGERKEY, &docs_dbi_);
-            if(rc != 0) {
-                LOG_ERROR(2251, index_id_, "mdbx_dbi_open failed for sparse_docs: " << mdbx_strerror(rc));
-                mdbx_txn_abort(txn);
-                return false;
-            }
-
-            rc = mdbx_txn_commit(txn);
-            if(rc != 0) {
-                LOG_ERROR(2252, index_id_, "mdbx_txn_commit failed: " << mdbx_strerror(rc));
-                return false;
-            }
-            return true;
+            return initializeDBIs();
         }
 
         void closeMDBX() {
-            if(env_) {
+            if(owns_env_ && env_) {
                 mdbx_env_close(env_);
                 env_ = nullptr;
             }

@@ -14,6 +14,59 @@
 #include <stdexcept>
 #include <filesystem>
 
+class SharedIndexEnv {
+private:
+    MDBX_env* env_;
+
+public:
+    explicit SharedIndexEnv(const std::string& env_path) :
+        env_(nullptr) {
+        std::filesystem::create_directories(env_path);
+
+        int rc = mdbx_env_create(&env_);
+        if(rc != MDBX_SUCCESS) {
+            throw std::runtime_error(std::string("Failed to create shared MDBX env: ")
+                                     + mdbx_strerror(rc));
+        }
+
+        rc = mdbx_env_set_geometry(env_,
+                                   -1,
+                                   1ULL << settings::VECTOR_MAP_SIZE_BITS,
+                                   1ULL << settings::VECTOR_MAP_SIZE_MAX_BITS,
+                                   1ULL << settings::VECTOR_MAP_SIZE_BITS,
+                                   -1,
+                                   -1);
+        if(rc != MDBX_SUCCESS) {
+            mdbx_env_close(env_);
+            throw std::runtime_error(std::string("Failed to set shared env geometry: ")
+                                     + mdbx_strerror(rc));
+        }
+
+        rc = mdbx_env_set_maxdbs(env_, 32);
+        if(rc != MDBX_SUCCESS) {
+            mdbx_env_close(env_);
+            throw std::runtime_error(std::string("Failed to set shared env maxdbs: ")
+                                     + mdbx_strerror(rc));
+        }
+
+        rc = mdbx_env_open(
+                env_, env_path.c_str(), MDBX_WRITEMAP | MDBX_MAPASYNC | MDBX_NORDAHEAD, 0664);
+        if(rc != MDBX_SUCCESS) {
+            mdbx_env_close(env_);
+            throw std::runtime_error(std::string("Failed to open shared MDBX env: ")
+                                     + mdbx_strerror(rc));
+        }
+    }
+
+    ~SharedIndexEnv() {
+        if(env_) {
+            mdbx_env_close(env_);
+        }
+    }
+
+    MDBX_env* get() const { return env_; }
+};
+
 // Handles vector storage
 class VectorStore {
 private:
@@ -21,9 +74,32 @@ private:
     MDBX_dbi dbi_;
     std::string index_id_;
     std::string path_;
+    std::string dbi_name_;
+    bool owns_env_;
     size_t vector_dim_;
     ndd::quant::QuantizationLevel quant_level_;
     size_t bytes_per_vector_;
+
+    void init_dbi() {
+        MDBX_txn* txn;
+        int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
+        if(rc != MDBX_SUCCESS) {
+            throw std::runtime_error(std::string("Failed to begin transaction: ")
+                                     + mdbx_strerror(rc));
+        }
+
+        const char* db_name = dbi_name_.empty() ? settings::DEFAULT_SUBINDEX.c_str() : dbi_name_.c_str();
+        rc = mdbx_dbi_open(txn, db_name, MDBX_CREATE | MDBX_INTEGERKEY, &dbi_);
+        if(rc != MDBX_SUCCESS) {
+            mdbx_txn_abort(txn);
+            throw std::runtime_error(std::string("Failed to open database: ") + mdbx_strerror(rc));
+        }
+
+        rc = mdbx_txn_commit(txn);
+        if(rc != MDBX_SUCCESS) {
+            throw std::runtime_error("Failed to commit transaction: " + std::string(mdbx_strerror(rc)));
+        }
+    }
 
     void init_environment() {
         int rc = mdbx_env_create(&env_);
@@ -52,24 +128,7 @@ private:
             throw std::runtime_error(std::string("Failed to open environment: ") + mdbx_strerror(rc));
 
         }
-
-        MDBX_txn* txn;
-        rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
-        if(rc != MDBX_SUCCESS) {
-            throw std::runtime_error(std::string("Failed to begin transaction: ") + mdbx_strerror(rc));
-        }
-
-        rc = mdbx_dbi_open(txn, settings::DEFAULT_SUBINDEX.c_str(), MDBX_CREATE | MDBX_INTEGERKEY, &dbi_);
-        if(rc != MDBX_SUCCESS) {
-            mdbx_txn_abort(txn);
-            throw std::runtime_error(std::string("Failed to open database: ") + mdbx_strerror(rc));
-        }
-
-        rc = mdbx_txn_commit(txn);
-        if(rc != MDBX_SUCCESS) {
-            throw std::runtime_error("Failed to commit transaction: "
-                                        + std::string(mdbx_strerror(rc)));
-        }
+        init_dbi();
     }
 
 public:
@@ -79,6 +138,8 @@ public:
                 const std::string& index_id) :
         index_id_(index_id),
         path_(path),
+        dbi_name_(),
+        owns_env_(true),
         vector_dim_(vector_dim),
         quant_level_(quant_level) {
         bytes_per_vector_ =
@@ -87,9 +148,28 @@ public:
         init_environment();
     }
 
+    VectorStore(MDBX_env* env,
+                size_t vector_dim,
+                ndd::quant::QuantizationLevel quant_level,
+                const std::string& index_id,
+                const std::string& dbi_name) :
+        env_(env),
+        index_id_(index_id),
+        path_(),
+        dbi_name_(dbi_name),
+        owns_env_(false),
+        vector_dim_(vector_dim),
+        quant_level_(quant_level) {
+        bytes_per_vector_ =
+                ndd::quant::get_quantizer_dispatch(quant_level_).get_storage_size(vector_dim);
+        init_dbi();
+    }
+
     ~VectorStore() {
         mdbx_dbi_close(env_, dbi_);
-        mdbx_env_close(env_);
+        if(owns_env_) {
+            mdbx_env_close(env_);
+        }
     }
     // Nested Cursor struct
 
@@ -256,6 +336,28 @@ public:
     }
 
     // Batch operations with raw bytes
+    void store_vectors_batch_txn(
+            MDBX_txn* txn,
+            const std::vector<std::pair<ndd::idInt, std::vector<uint8_t>>>& batch) {
+        if(batch.empty()) {
+            return;
+        }
+
+        for(const auto& [numeric_id, vector_bytes] : batch) {
+            if(vector_bytes.size() != bytes_per_vector_) {
+                throw std::runtime_error("Vector byte size mismatch");
+            }
+
+            MDBX_val key{const_cast<ndd::idInt*>(&numeric_id), sizeof(ndd::idInt)};
+            MDBX_val data{const_cast<uint8_t*>(vector_bytes.data()), vector_bytes.size()};
+
+            int rc = mdbx_put(txn, dbi_, &key, &data, MDBX_UPSERT);
+            if(rc != MDBX_SUCCESS) {
+                throw std::runtime_error(std::string("Failed to store vector: ") + mdbx_strerror(rc));
+            }
+        }
+    }
+
     void
     store_vectors_batch(const std::vector<std::pair<ndd::idInt, std::vector<uint8_t>>>& batch) {
         if(batch.empty()) {
@@ -270,34 +372,17 @@ public:
             }
         };
 
-        auto write_batch = [&](MDBX_txn* txn) -> int {
-            for(const auto& [numeric_id, vector_bytes] : batch) {
-                if(vector_bytes.size() != bytes_per_vector_) {
-                    throw std::runtime_error("Vector byte size mismatch");
-                }
-
-                MDBX_val key{const_cast<ndd::idInt*>(&numeric_id), sizeof(ndd::idInt)};
-                MDBX_val data{const_cast<uint8_t*>(vector_bytes.data()), vector_bytes.size()};
-
-                int rc = mdbx_put(txn, dbi_, &key, &data, MDBX_UPSERT);
-                if(rc != MDBX_SUCCESS) {
-                    return rc;
-                }
-            }
-            return MDBX_SUCCESS;
-        };
-
         MDBX_txn* txn;
         int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
         if(rc != MDBX_SUCCESS) {
             throw std::runtime_error(std::string("Failed to begin transaction: ") + mdbx_strerror(rc));
         }
 
-        rc = write_batch(txn);
-        // MDBX auto-grows, no manual resize needed
-        if(rc != MDBX_SUCCESS) {
+        try {
+            store_vectors_batch_txn(txn, batch);
+        } catch(...) {
             mdbx_txn_abort(txn);
-            throw std::runtime_error(std::string("Failed to store vector: ") + mdbx_strerror(rc));
+            throw;
         }
 
         try_commit(txn);
@@ -339,6 +424,15 @@ public:
         }
     }
 
+    void remove_txn(MDBX_txn* txn, ndd::idInt numeric_id) {
+        MDBX_val key{const_cast<ndd::idInt*>(&numeric_id), sizeof(ndd::idInt)};
+
+        int rc = mdbx_del(txn, dbi_, &key, nullptr);
+        if(rc != MDBX_SUCCESS && rc != MDBX_NOTFOUND) {
+            throw std::runtime_error(std::string("Failed to delete vector data: ") + mdbx_strerror(rc));
+        }
+    }
+
     void remove(ndd::idInt numeric_id) {
         MDBX_txn* txn;
         int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
@@ -347,12 +441,7 @@ public:
         }
 
         try {
-            MDBX_val key{const_cast<ndd::idInt*>(&numeric_id), sizeof(ndd::idInt)};
-
-            rc = mdbx_del(txn, dbi_, &key, nullptr);
-            if(rc != MDBX_SUCCESS && rc != MDBX_NOTFOUND) {
-                throw std::runtime_error(std::string("Failed to delete vector data: ") + mdbx_strerror(rc));
-            }
+            remove_txn(txn, numeric_id);
 
             rc = mdbx_txn_commit(txn);
             if(rc != MDBX_SUCCESS) {
@@ -379,6 +468,29 @@ private:
     MDBX_env* env_;
     MDBX_dbi dbi_;
     std::string path_;
+    std::string dbi_name_;
+    bool owns_env_;
+
+    void init_dbi() {
+        MDBX_txn* txn;
+        int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
+        if(rc != MDBX_SUCCESS) {
+            throw std::runtime_error(std::string("Failed to begin transaction: ") + mdbx_strerror(rc));
+        }
+
+        const char* db_name = dbi_name_.empty() ? nullptr : dbi_name_.c_str();
+        rc = mdbx_dbi_open(txn, db_name, MDBX_CREATE | MDBX_INTEGERKEY, &dbi_);
+        if(rc != MDBX_SUCCESS) {
+            mdbx_txn_abort(txn);
+            throw std::runtime_error(std::string("Failed to open database: ") + mdbx_strerror(rc));
+        }
+
+        rc = mdbx_txn_commit(txn);
+        if(rc != MDBX_SUCCESS) {
+            throw std::runtime_error("Failed to commit transaction: "
+                                     + std::string(mdbx_strerror(rc)));
+        }
+    }
 
     void init_environment() {
         int rc = mdbx_env_create(&env_);
@@ -407,36 +519,51 @@ private:
             // throw std::runtime_error("Failed to open environment");
             throw std::runtime_error(std::string("Failed to open environment: ") + mdbx_strerror(rc));
         }
-
-        MDBX_txn* txn;
-        rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
-        if(rc != MDBX_SUCCESS) {
-            throw std::runtime_error(std::string("Failed to begin transaction: ") + mdbx_strerror(rc));
-        }
-
-        rc = mdbx_dbi_open(txn, nullptr, MDBX_CREATE | MDBX_INTEGERKEY, &dbi_);
-        if(rc != MDBX_SUCCESS) {
-            mdbx_txn_abort(txn);
-            throw std::runtime_error(std::string("Failed to open database: ") + mdbx_strerror(rc));
-        }
-
-        rc = mdbx_txn_commit(txn);
-        if(rc != MDBX_SUCCESS) {
-            throw std::runtime_error("Failed to commit transaction: "
-                                     + std::string(mdbx_strerror(rc)));
-        }
+        init_dbi();
     }
 
 public:
     MetaStore(const std::string& path) :
-        path_(path) {
+        path_(path),
+        dbi_name_(),
+        owns_env_(true) {
         std::filesystem::create_directories(path);
         init_environment();
     }
 
+    MetaStore(MDBX_env* env, const std::string& dbi_name) :
+        env_(env),
+        path_(),
+        dbi_name_(dbi_name),
+        owns_env_(false) {
+        init_dbi();
+    }
+
     ~MetaStore() {
         mdbx_dbi_close(env_, dbi_);
-        mdbx_env_close(env_);
+        if(owns_env_) {
+            mdbx_env_close(env_);
+        }
+    }
+
+    void store_meta_batch_txn(MDBX_txn* txn,
+                              const std::vector<std::pair<ndd::idInt, ndd::VectorMeta>>& batch) {
+        if(batch.empty()) {
+            return;
+        }
+
+        for(const auto& [numeric_id, meta] : batch) {
+            msgpack::sbuffer sbuf;
+            msgpack::pack(sbuf, meta);
+
+            MDBX_val key{const_cast<ndd::idInt*>(&numeric_id), sizeof(ndd::idInt)};
+            MDBX_val data{const_cast<char*>(sbuf.data()), sbuf.size()};
+
+            int rc = mdbx_put(txn, dbi_, &key, &data, MDBX_UPSERT);
+            if(rc != MDBX_SUCCESS) {
+                throw std::runtime_error(std::string("Failed to store meta: ") + mdbx_strerror(rc));
+            }
+        }
     }
 
     void store_meta_batch(const std::vector<std::pair<ndd::idInt, ndd::VectorMeta>>& batch) {
@@ -452,39 +579,36 @@ public:
             }
         };
 
-        auto write_batch = [&](MDBX_txn* txn) -> int {
-            for(const auto& [numeric_id, meta] : batch) {
-                msgpack::sbuffer sbuf;
-                msgpack::pack(sbuf, meta);
-
-                MDBX_val key{const_cast<ndd::idInt*>(&numeric_id), sizeof(ndd::idInt)};
-                MDBX_val data{const_cast<char*>(sbuf.data()), sbuf.size()};
-
-                int rc = mdbx_put(txn, dbi_, &key, &data, MDBX_UPSERT);
-                if(rc != MDBX_SUCCESS) {
-                    return rc;
-                }
-            }
-            return MDBX_SUCCESS;
-        };
-
         MDBX_txn* txn;
         int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
         if(rc != MDBX_SUCCESS) {
             throw std::runtime_error(std::string("Failed to begin transaction: ") + mdbx_strerror(rc));
         }
 
-        rc = write_batch(txn);
-        // MDBX auto-grows, no manual resize needed
-        if(rc != MDBX_SUCCESS) {
+        try {
+            store_meta_batch_txn(txn, batch);
+        } catch(...) {
             mdbx_txn_abort(txn);
-            throw std::runtime_error(std::string("Failed to store meta: ") + mdbx_strerror(rc));
+            throw;
         }
 
         try_commit(txn);
     }
 
     void store_meta(ndd::idInt id, const ndd::VectorMeta& meta) { store_meta_batch({{id, meta}}); }
+    ndd::VectorMeta get_meta_txn(MDBX_txn* txn, ndd::idInt numeric_id) const {
+        MDBX_val key{const_cast<ndd::idInt*>(&numeric_id), sizeof(ndd::idInt)};
+        MDBX_val data;
+
+        int rc = mdbx_get(txn, dbi_, &key, &data);
+        if(rc == MDBX_NOTFOUND) {
+            throw std::runtime_error("Meta not found");
+        }
+
+        auto oh = msgpack::unpack(reinterpret_cast<const char*>(data.iov_base), data.iov_len);
+        return oh.get().as<ndd::VectorMeta>();
+    }
+
     ndd::VectorMeta get_meta(ndd::idInt numeric_id) const {
         MDBX_txn* txn;
         int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_RDONLY, &txn);
@@ -493,21 +617,21 @@ public:
         }
 
         try {
-            MDBX_val key{const_cast<ndd::idInt*>(&numeric_id), sizeof(ndd::idInt)};
-            MDBX_val data;
-
-            rc = mdbx_get(txn, dbi_, &key, &data);
-            if(rc == MDBX_NOTFOUND) {
-                mdbx_txn_abort(txn);
-                throw std::runtime_error("Meta not found");
-            }
-            auto oh = msgpack::unpack(reinterpret_cast<const char*>(data.iov_base), data.iov_len);
-            auto meta = oh.get().as<ndd::VectorMeta>();
+            auto meta = get_meta_txn(txn, numeric_id);
             mdbx_txn_abort(txn);
             return meta;
         } catch(...) {
             mdbx_txn_abort(txn);
             throw;
+        }
+    }
+
+    void remove_txn(MDBX_txn* txn, ndd::idInt numeric_id) {
+        MDBX_val key{const_cast<ndd::idInt*>(&numeric_id), sizeof(ndd::idInt)};
+
+        int rc = mdbx_del(txn, dbi_, &key, nullptr);
+        if(rc != MDBX_SUCCESS && rc != MDBX_NOTFOUND) {
+            throw std::runtime_error(std::string("Failed to delete metadata: ") + mdbx_strerror(rc));
         }
     }
 
@@ -519,12 +643,7 @@ public:
         }
 
         try {
-            MDBX_val key{const_cast<ndd::idInt*>(&numeric_id), sizeof(ndd::idInt)};
-
-            rc = mdbx_del(txn, dbi_, &key, nullptr);
-            if(rc != MDBX_SUCCESS && rc != MDBX_NOTFOUND) {
-                throw std::runtime_error(std::string("Failed to delete metadata: ") + mdbx_strerror(rc));
-            }
+            remove_txn(txn, numeric_id);
 
             rc = mdbx_txn_commit(txn);
             if(rc != MDBX_SUCCESS) {
@@ -541,6 +660,8 @@ public:
 class VectorStorage {
 private:
     std::string index_id_;
+    bool use_shared_env_;
+    std::unique_ptr<SharedIndexEnv> shared_env_;
     std::unique_ptr<VectorStore> vector_store_;
     std::unique_ptr<MetaStore> meta_store_;
 
@@ -551,11 +672,26 @@ public:
                   const std::string& index_id,
                   size_t vector_dim,
                   ndd::quant::QuantizationLevel quant_level) :
-        index_id_(index_id) {
-        vector_store_ = std::make_unique<VectorStore>(
+        index_id_(index_id),
+        use_shared_env_(false) {
+        const bool legacy_split_layout = std::filesystem::exists(base_path + "/meta")
+                         || std::filesystem::exists(base_path + "/filters");
+
+        if(legacy_split_layout) {
+            vector_store_ = std::make_unique<VectorStore>(
                 base_path + "/vectors", vector_dim, quant_level, index_id_);
-        meta_store_ = std::make_unique<MetaStore>(base_path + "/meta");
-        filter_store_ = std::make_unique<Filter>(base_path + "/filters", index_id_);
+            meta_store_ = std::make_unique<MetaStore>(base_path + "/meta");
+            filter_store_ = std::make_unique<Filter>(base_path + "/filters", index_id_);
+        } else {
+            use_shared_env_ = true;
+            shared_env_ = std::make_unique<SharedIndexEnv>(base_path + "/vectors");
+            MDBX_env* env = shared_env_->get();
+
+            vector_store_ = std::make_unique<VectorStore>(
+                env, vector_dim, quant_level, index_id_, settings::DEFAULT_SUBINDEX);
+            meta_store_ = std::make_unique<MetaStore>(env, "vector_meta");
+            filter_store_ = std::make_unique<Filter>(env, index_id_, "filter_schema");
+        }
     }
     VectorStore::Cursor getCursor() { return vector_store_->getCursor(); }
     // Get numeric ids of matching filters
@@ -683,6 +819,45 @@ public:
 
     // Optimized batch operation using pre-quantized QuantVectorObject
     // This avoids double quantization by using already quantized data
+    void store_vectors_batch_txn(
+            MDBX_txn* txn,
+            const std::vector<std::pair<ndd::idInt, QuantVectorObject>>& vectors) {
+        if(vectors.empty()) {
+            return;
+        }
+
+        std::vector<std::pair<ndd::idInt, std::vector<uint8_t>>> vector_batch;
+        std::vector<std::pair<ndd::idInt, ndd::VectorMeta>> meta_batch;
+        std::vector<std::pair<ndd::idInt, std::string>> filter_batch;
+
+        vector_batch.reserve(vectors.size());
+        meta_batch.reserve(vectors.size());
+        filter_batch.reserve(vectors.size());
+
+        for(const auto& [numeric_id, quant_obj] : vectors) {
+            std::vector<uint8_t> vector_bytes = quant_obj.quant_vector;
+
+            ndd::VectorMeta meta;
+            meta.id = quant_obj.id;
+            meta.filter = quant_obj.filter;
+            meta.meta = quant_obj.meta;
+            meta.norm = quant_obj.norm;
+
+            vector_batch.emplace_back(numeric_id, std::move(vector_bytes));
+            meta_batch.emplace_back(numeric_id, std::move(meta));
+
+            if(!quant_obj.filter.empty()) {
+                filter_batch.emplace_back(numeric_id, quant_obj.filter);
+            }
+        }
+
+        vector_store_->store_vectors_batch_txn(txn, vector_batch);
+        meta_store_->store_meta_batch_txn(txn, meta_batch);
+        if(!filter_batch.empty()) {
+            filter_store_->add_filters_from_json_batch_txn(txn, filter_batch);
+        }
+    }
+
     void store_vectors_batch(const std::vector<std::pair<ndd::idInt, QuantVectorObject>>& vectors) {
         if(vectors.empty()) {
             return;
@@ -717,13 +892,39 @@ public:
             }
         }
 
-        // Store vectors and metadata in single transactions
-        vector_store_->store_vectors_batch(vector_batch);
-        meta_store_->store_meta_batch(meta_batch);
+        if(use_shared_env_ && shared_env_) {
+            MDBX_txn* txn;
+            int rc = mdbx_txn_begin(shared_env_->get(), nullptr, MDBX_TXN_READWRITE, &txn);
+            if(rc != MDBX_SUCCESS) {
+                throw std::runtime_error(std::string("Failed to begin shared write transaction: ")
+                                         + mdbx_strerror(rc));
+            }
 
-        // Process filter data in batch if any
-        if(!filter_batch.empty()) {
-            filter_store_->add_filters_from_json_batch(filter_batch);
+            try {
+                vector_store_->store_vectors_batch_txn(txn, vector_batch);
+                meta_store_->store_meta_batch_txn(txn, meta_batch);
+                if(!filter_batch.empty()) {
+                    filter_store_->add_filters_from_json_batch_txn(txn, filter_batch);
+                }
+
+                rc = mdbx_txn_commit(txn);
+                if(rc != MDBX_SUCCESS) {
+                    throw std::runtime_error(std::string("Failed to commit shared write transaction: ")
+                                             + mdbx_strerror(rc));
+                }
+            } catch(...) {
+                mdbx_txn_abort(txn);
+                throw;
+            }
+        } else {
+            // Legacy split-env mode
+            vector_store_->store_vectors_batch(vector_batch);
+            meta_store_->store_meta_batch(meta_batch);
+
+            // Process filter data in batch if any
+            if(!filter_batch.empty()) {
+                filter_store_->add_filters_from_json_batch(filter_batch);
+            }
         }
     }
 
@@ -749,19 +950,74 @@ public:
         return meta_store_->get_meta(numeric_id);
     }
 
+    ndd::VectorMeta get_meta_txn(MDBX_txn* txn, ndd::idInt numeric_id) const {
+        return meta_store_->get_meta_txn(txn, numeric_id);
+    }
+
+    bool uses_shared_env() const { return use_shared_env_ && shared_env_ != nullptr; }
+    MDBX_env* shared_env() const { return shared_env_ ? shared_env_->get() : nullptr; }
+
+    void deletePoint_txn(MDBX_txn* txn, ndd::idInt numeric_id) {
+        auto meta = meta_store_->get_meta_txn(txn, numeric_id);
+        if(!meta.filter.empty()) {
+            filter_store_->remove_filters_from_json_txn(txn, numeric_id, meta.filter);
+        }
+        vector_store_->remove_txn(txn, numeric_id);
+        meta_store_->remove_txn(txn, numeric_id);
+    }
+
+    void updateFilter_txn(MDBX_txn* txn,
+                          ndd::idInt numeric_id,
+                          const std::string& new_filter_json) {
+        auto meta = meta_store_->get_meta_txn(txn, numeric_id);
+
+        if(!meta.filter.empty()) {
+            filter_store_->remove_filters_from_json_txn(txn, numeric_id, meta.filter);
+        }
+
+        meta.filter = new_filter_json;
+        meta_store_->store_meta_batch_txn(txn, {{numeric_id, meta}});
+
+        if(!new_filter_json.empty()) {
+            filter_store_->add_filters_from_json_txn(txn, numeric_id, new_filter_json);
+        }
+    }
+
     // NOT used anymore. Deletes filter, meta and vector data.
     void deletePoint(ndd::idInt numeric_id) {
         try {
-            // Get metadata first to get filter info
-            auto meta = meta_store_->get_meta(numeric_id);
+            if(use_shared_env_ && shared_env_) {
+                MDBX_txn* txn;
+                int rc = mdbx_txn_begin(shared_env_->get(), nullptr, MDBX_TXN_READWRITE, &txn);
+                if(rc != MDBX_SUCCESS) {
+                    throw std::runtime_error(std::string("Failed to begin shared delete transaction: ")
+                                             + mdbx_strerror(rc));
+                }
 
-            // Remove filter entries if they exist
-            if(!meta.filter.empty()) {
-                filter_store_->remove_filters_from_json(numeric_id, meta.filter);
+                try {
+                    deletePoint_txn(txn, numeric_id);
+
+                    rc = mdbx_txn_commit(txn);
+                    if(rc != MDBX_SUCCESS) {
+                        throw std::runtime_error(std::string("Failed to commit shared delete transaction: ")
+                                                 + mdbx_strerror(rc));
+                    }
+                } catch(...) {
+                    mdbx_txn_abort(txn);
+                    throw;
+                }
+            } else {
+                // Get metadata first to get filter info
+                auto meta = meta_store_->get_meta(numeric_id);
+
+                // Remove filter entries if they exist
+                if(!meta.filter.empty()) {
+                    filter_store_->remove_filters_from_json(numeric_id, meta.filter);
+                }
+                // Try to remove both vector and meta data
+                vector_store_->remove(numeric_id);
+                meta_store_->remove(numeric_id);
             }
-            // Try to remove both vector and meta data
-            vector_store_->remove(numeric_id);
-            meta_store_->remove(numeric_id);
         } catch(const std::exception& e) {
             throw std::runtime_error(std::string("Failed to remove vector and metadata: ")
                                      + e.what());
@@ -774,21 +1030,43 @@ public:
 
     // Update filter for a vector
     void updateFilter(ndd::idInt numeric_id, const std::string& new_filter_json) {
-        // Get existing meta
-        auto meta = meta_store_->get_meta(numeric_id);
+        if(use_shared_env_ && shared_env_) {
+            MDBX_txn* txn;
+            int rc = mdbx_txn_begin(shared_env_->get(), nullptr, MDBX_TXN_READWRITE, &txn);
+            if(rc != MDBX_SUCCESS) {
+                throw std::runtime_error(std::string("Failed to begin shared filter update transaction: ")
+                                         + mdbx_strerror(rc));
+            }
 
-        // Remove old filters
-        if(!meta.filter.empty()) {
-            filter_store_->remove_filters_from_json(numeric_id, meta.filter);
-        }
+            try {
+                updateFilter_txn(txn, numeric_id, new_filter_json);
 
-        // Update meta
-        meta.filter = new_filter_json;
-        meta_store_->store_meta(numeric_id, meta);
+                rc = mdbx_txn_commit(txn);
+                if(rc != MDBX_SUCCESS) {
+                    throw std::runtime_error(std::string("Failed to commit shared filter update transaction: ")
+                                             + mdbx_strerror(rc));
+                }
+            } catch(...) {
+                mdbx_txn_abort(txn);
+                throw;
+            }
+        } else {
+            // Get existing meta
+            auto meta = meta_store_->get_meta(numeric_id);
 
-        // Add new filters
-        if(!new_filter_json.empty()) {
-            filter_store_->add_filters_from_json(numeric_id, new_filter_json);
+            // Remove old filters
+            if(!meta.filter.empty()) {
+                filter_store_->remove_filters_from_json(numeric_id, meta.filter);
+            }
+
+            // Update meta
+            meta.filter = new_filter_json;
+            meta_store_->store_meta(numeric_id, meta);
+
+            // Add new filters
+            if(!new_filter_json.empty()) {
+                filter_store_->add_filters_from_json(numeric_id, new_filter_json);
+            }
         }
     }
 

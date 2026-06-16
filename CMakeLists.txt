@@ -121,8 +121,8 @@ include(FetchContent)
 # =======================
 # Find OpenSSL
 # =======================
-find_package(OpenSSL REQUIRED)
-include_directories(${OPENSSL_INCLUDE_DIR})
+# find_package(OpenSSL REQUIRED)
+# include_directories(${OPENSSL_INCLUDE_DIR})
 
 # =======================
 # Find libcurl
@@ -286,8 +286,8 @@ target_include_directories(ndd_core PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/roaring
     ${LMDB_INCLUDE_DIR}
     ${ASIO_INCLUDE_DIR}
-    ${OPENSSL_INCLUDE_DIR}
     ${CURL_INCLUDE_DIRS}
+    # ${OPENSSL_INCLUDE_DIR}
 )
 target_include_directories(${NDD_BINARY_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -301,8 +301,8 @@ target_include_directories(${NDD_BINARY_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/roaring
     ${LMDB_INCLUDE_DIR}
     ${ASIO_INCLUDE_DIR}
-    ${OPENSSL_INCLUDE_DIR}
     ${CURL_INCLUDE_DIRS}
+    # ${OPENSSL_INCLUDE_DIR}ß
 )
 
 # Set compiler flags
@@ -365,11 +365,11 @@ target_compile_definitions(${NDD_BINARY_NAME} PRIVATE
 # Link libraries
 target_link_libraries(${NDD_BINARY_NAME} PRIVATE
     Threads::Threads
-    OpenSSL::SSL
-    OpenSSL::Crypto
     CURL::libcurl
     archive_static
 )
+    # OpenSSL::SSL
+    # OpenSSL::Crypto
 
 # Installation rules
 install(TARGETS ${NDD_BINARY_NAME} RUNTIME DESTINATION bin)
@@ -396,7 +396,7 @@ elseif(USE_NEON)
 endif()
 message(STATUS "ASIO include dir: ${ASIO_INCLUDE_DIR}")
 message(STATUS "LMDB include dir: ${LMDB_INCLUDE_DIR}")
-message(STATUS "OpenSSL include dir: ${OPENSSL_INCLUDE_DIR}")
+# message(STATUS "OpenSSL include dir: ${OPENSSL_INCLUDE_DIR}")
 
 # Create a symbolic link named 'ndd' pointing to the architecture-specific binary
 add_custom_command(TARGET ${NDD_BINARY_NAME} POST_BUILD

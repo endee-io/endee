@@ -124,13 +124,15 @@ We welcome contributions from the community to help make vector search faster an
 
 ## License
 
-Endee is open source software licensed under the **Apache License 2.0**. See the [LICENSE](./LICENSE) file for full terms.
+Endee is free software licensed under the **GNU Affero General Public License v3.0 (AGPLv3)**. See the [LICENSE](./LICENSE) file for full terms.
+
+> **Note:** This repository tracks an earlier line of Endee. The actively developed version has diverged significantly, and keeping both in lockstep is no longer practical for us to maintain. This codebase is provided under the AGPLv3 for the community to fork, study, and build upon. If you run a modified version as a network service, the AGPLv3 requires you to make your modified source available to its users.
 
 ## Trademark and Branding
 
 “Endee” and the Endee logo are trademarks of Endee Labs.
 
-The Apache License 2.0 does not grant permission to use the Endee name, logos, or branding in a way that suggests endorsement or affiliation.
+The AGPLv3 does not grant permission to use the Endee name, logos, or branding in a way that suggests endorsement or affiliation.
 
 If you offer a hosted or managed service based on this software, you must use your own branding and avoid implying it is an official Endee service.
 

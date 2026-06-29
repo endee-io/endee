@@ -332,6 +332,8 @@ Example with debug enabled:
 cmake -DUSE_NEON=ON -DND_DEBUG=ON ..
 ```
 
+For every available CMake option and what it changes, see [CMake options](cmake-options.md).
+
 ### Step 3: Compile
 
 ```bash

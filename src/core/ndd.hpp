@@ -1,3 +1,19 @@
+// Endee — high-performance vector database
+// Copyright (C) 2026 Endee Labs
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 #pragma once
 #include <curl/curl.h>
 #include <regex>
@@ -14,6 +30,7 @@
 #include "quant_vector.hpp"
 #include "wal.hpp"
 #include "../quant/dispatch.hpp"
+#include "../utils/errors.hpp"
 #include <memory>
 #include <deque>
 #include <unordered_map>
@@ -428,7 +445,7 @@ private:
             }
             it = indices_.find(index_id);
             if(it == indices_.end()) {
-                throw std::runtime_error("[ERROR] Index " + index_id + " doesnt exist.");
+                throw ndd::ApiError(404, "[ERROR] Index " + index_id + " doesnt exist.");
             }
             auto entry = it->second;
             per_thread_indices_[index_id] = entry;
@@ -835,13 +852,13 @@ public:
 
         if(!std::filesystem::exists(index_path) || !std::filesystem::exists(lmdb_dir)
            || !std::filesystem::exists(vector_storage_dir)) {
-            throw std::runtime_error("Required files missing for index: " + index_id);
+            throw ndd::ApiError(404, "Required files missing for index: " + index_id);
         }
 
         // Load metadata to get sparse_model
         auto metadata = metadata_manager_->getMetadata(index_id);
         if(!metadata) {
-            throw std::runtime_error("Missing or incompatible index metadata for index: "
+            throw ndd::ApiError(404, "Missing or incompatible index metadata for index: "
                                      + index_id);
         }
         const ndd::SparseScoringModel sparse_model = metadata->sparse_model;
@@ -1868,21 +1885,21 @@ public:
     // ========== Backup operations ==========
 
     // Orchestration methods (defined below after class)
-    std::pair<bool, std::string> createBackupAsync(const std::string& index_id,
-                                                    const std::string& backup_name);
+    std::string createBackupAsync(const std::string& index_id,
+                                  const std::string& backup_name);
 
-    std::pair<bool, std::string> restoreBackup(const std::string& backup_name,
-                                                const std::string& target_index_name,
-                                                const std::string& username);
+    void restoreBackup(const std::string& backup_name,
+                       const std::string& target_index_name,
+                       const std::string& username);
 
     // Forwarding methods (no IndexManager internals needed)
     nlohmann::json listBackups(const std::string& username) {
         return backup_store_.listBackups(username);
     }
 
-    std::pair<bool, std::string> deleteBackup(const std::string& backup_name,
-                                               const std::string& username) {
-        return backup_store_.deleteBackup(backup_name, username);
+    void deleteBackup(const std::string& backup_name,
+                      const std::string& username) {
+        backup_store_.deleteBackup(backup_name, username);
     }
 
     std::optional<std::pair<std::string, std::string>> getActiveBackup(const std::string& username) {
@@ -1894,10 +1911,11 @@ public:
         return backup_store_.getBackupInfo(backup_name, username);
     }
 
-    std::pair<bool, std::string> validateBackupName(const std::string& backup_name) const {
-        return backup_store_.validateBackupName(backup_name);
+    void validateBackupName(const std::string& backup_name) const {
+        backup_store_.validateBackupName(backup_name);
     }
 
+<<<<<<< HEAD
     std::pair<bool, std::string> uploadBackup(const std::string& backup_name,
                                                 const std::string& username,
                                                 const std::string& file_content);
@@ -1969,6 +1987,11 @@ public:
             return vs->get_vectors_batch_into(labels, buffers, success, count);
         });
     }
+=======
+    void uploadBackup(const std::string& backup_name,
+                      const std::string& username,
+                      const std::string& file_content);
+>>>>>>> origin/master
 };
 
 // ========== IndexManager backup implementations ==========
@@ -2135,13 +2158,10 @@ inline void IndexManager::executeBackupJob(const std::string& index_id, const st
     }
 }
 
-inline std::pair<bool, std::string> IndexManager::restoreBackup(const std::string& backup_name,
-                                                                  const std::string& target_index_name,
-                                                                  const std::string& username) {
-    std::pair<bool, std::string> result = backup_store_.validateBackupName(backup_name);
-    if(!result.first) {
-        return result;
-    }
+inline void IndexManager::restoreBackup(const std::string& backup_name,
+                                        const std::string& target_index_name,
+                                        const std::string& username) {
+    backup_store_.validateBackupName(backup_name);
 
     std::string backup_dir_root = backup_store_.getUserBackupDir(username);
     std::string backup_tar = backup_dir_root + "/" + backup_name + ".tar";
@@ -2152,16 +2172,16 @@ inline std::pair<bool, std::string> IndexManager::restoreBackup(const std::strin
     std::string target_dir = data_dir_ + "/" + target_index_id;
 
     if(!std::filesystem::exists(backup_tar)) {
-        return {false, "Backup not found: " + backup_name};
+        throw ndd::ApiError(404, "Backup not found: " + backup_name);
     }
 
     if(metadata_manager_->getMetadata(target_index_id).has_value()) {
-        return {false, "Target index already exists"};
+        throw ndd::ApiError(409, "Target index already exists");
     }
 
     std::string error_msg;
     if(!backup_store_.extractBackupTar(backup_tar, backup_extract_dir, error_msg)) {
-        return {false, "Failed to extract backup archive: " + error_msg};
+        throw ndd::ApiError(500, "Failed to extract backup archive: " + error_msg);
     }
 
     std::vector<std::string> folders;
@@ -2173,7 +2193,7 @@ inline std::pair<bool, std::string> IndexManager::restoreBackup(const std::strin
 
     if(folders.size() != 1) {
         std::filesystem::remove_all(backup_extract_dir);
-        return {false, "Backup extraction failed - directory not found"};
+        throw ndd::ApiError(500, "Backup extraction failed - directory not found");
     }
 
     std::string backup_dir = folders[0];
@@ -2182,7 +2202,7 @@ inline std::pair<bool, std::string> IndexManager::restoreBackup(const std::strin
         std::ifstream f(backup_dir + "/metadata.json");
         if(!f.good()) {
             std::filesystem::remove_all(backup_extract_dir);
-            return {false, "Backup metadata missing"};
+            throw ndd::ApiError(500, "Backup metadata missing");
         }
         nlohmann::json meta_json = nlohmann::json::parse(f);
 
@@ -2219,37 +2239,33 @@ inline std::pair<bool, std::string> IndexManager::restoreBackup(const std::strin
         }
 
         LOG_INFO(2045, username, target_index_name, "Restored backup from " << backup_tar);
-        return {true, ""};
     } catch(const std::exception& e) {
         std::filesystem::remove_all(backup_extract_dir);
-        return {false, "Failed to restore backup: " + std::string(e.what())};
+        throw ndd::ApiError(500, "Failed to restore backup: " + std::string(e.what()));
     }
 }
 
-inline std::pair<bool, std::string> IndexManager::createBackupAsync(const std::string& index_id,
-                                                                      const std::string& backup_name) {
-    std::pair<bool, std::string> result = backup_store_.validateBackupName(backup_name);
-    if(!result.first) {
-        return result;
-    }
+inline std::string IndexManager::createBackupAsync(const std::string& index_id,
+                                                   const std::string& backup_name) {
+    backup_store_.validateBackupName(backup_name);
 
     std::string username;
     size_t pos = index_id.find('/');
     if (pos != std::string::npos) {
         username = index_id.substr(0, pos);
     } else {
-        return {false, "Invalid index ID format"};
+        throw ndd::ApiError(400, "Invalid index ID format");
     }
 
     if (backup_store_.hasActiveBackup(username)) {
-        return {false, "Backup already in progress for user: " + username};
+        throw ndd::ApiError(409, "Backup already in progress for user: " + username);
     }
 
     std::string user_backup_dir = backup_store_.getUserBackupDir(username);
     std::filesystem::create_directories(user_backup_dir);
     std::string backup_tar = user_backup_dir + "/" + backup_name + ".tar";
     if (std::filesystem::exists(backup_tar)) {
-        return {false, "Backup already exists: " + backup_name};
+        throw ndd::ApiError(409, "Backup already exists: " + backup_name);
     }
 
     std::jthread t([this, index_id, backup_name](std::stop_token st) {
@@ -2259,24 +2275,28 @@ inline std::pair<bool, std::string> IndexManager::createBackupAsync(const std::s
 
     LOG_INFO(2046, index_id, "Backup started: " << backup_name);
 
-    return {true, backup_name};
+    return backup_name;
 }
 
+<<<<<<< HEAD
 
 inline std::pair<bool, std::string> IndexManager::uploadBackup(const std::string& backup_name, const std::string& username, const std::string& file_content) {
+=======
+inline void IndexManager::uploadBackup(const std::string& backup_name, const std::string& username, const std::string& file_content) {
+>>>>>>> origin/master
     std::string user_backup_dir = backup_store_.getUserBackupDir(username);
     std::filesystem::create_directories(user_backup_dir);
     std::string backup_path = user_backup_dir + "/" + backup_name + ".tar";
     if(std::filesystem::exists(backup_path)) {
         LOG_WARN(1063, username, "Backup upload conflicts with existing backup " << backup_name);
         
-        return {false, "Backup with name '" + backup_name +"' already exits"};
+        throw ndd::ApiError(409, "Backup with name '" + backup_name +"' already exits");
     }
 
     // Write the file
     std::ofstream out(backup_path, std::ios::binary);
     if(!out.is_open()) {
-        return {false, "Failed to create backup file"};
+        throw ndd::ApiError(500, "Failed to create backup file");
     }
 
     out.write(file_content.data(), file_content.size());
@@ -2285,7 +2305,7 @@ inline std::pair<bool, std::string> IndexManager::uploadBackup(const std::string
     if(!out.good()) {
         // Clean up partial file on error
         std::filesystem::remove(backup_path);
-        return {false, "Failed to write backup file"};
+        throw ndd::ApiError(500, "Failed to write backup file");
     }
 
     nlohmann::json backup_json;
@@ -2320,6 +2340,7 @@ inline std::pair<bool, std::string> IndexManager::uploadBackup(const std::string
     nlohmann::json backup_db = backup_store_.readBackupJson(username);
     backup_db[backup_name] = backup_json;
     backup_store_.writeBackupJson(username, backup_db);
+<<<<<<< HEAD
 
     return {true, "Backup uploaded successfully"};
 }
@@ -2386,3 +2407,6 @@ inline OperationResult IndexManager::rebuildIndexAsync(const std::string& index_
     LOG_INFO(1800, index_id, "Rebuild started: M=" << new_M << " ef_con=" << new_ef_con);
     return {0, "Rebuild started"};
 }
+=======
+}
+>>>>>>> origin/master

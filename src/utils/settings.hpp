@@ -1,3 +1,19 @@
+// Endee — high-performance vector database
+// Copyright (C) 2026 Endee Labs
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 #pragma once
 
 #include <cstdlib>
@@ -14,7 +30,7 @@ constexpr uint64_t TB = (1024ULL * GB);
 
 namespace settings {
     // === Compile-time constants ===
-    inline const std::string VERSION = "1.3.0";
+    inline const std::string VERSION = "1.3.5";
     inline uint16_t INDEX_VERSION = 1;
     inline uint16_t SPARSE_ONDISK_VERSION = 1;
     inline const std::string DEFAULT_SPACE_TYPE = "cosine";

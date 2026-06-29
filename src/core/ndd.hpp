@@ -1915,10 +1915,9 @@ public:
         backup_store_.validateBackupName(backup_name);
     }
 
-<<<<<<< HEAD
-    std::pair<bool, std::string> uploadBackup(const std::string& backup_name,
-                                                const std::string& username,
-                                                const std::string& file_content);
+    void uploadBackup(const std::string& backup_name,
+                      const std::string& username,
+                      const std::string& file_content);
 
     // Metadata access
     std::optional<IndexMetadata> getMetadata(const std::string& index_id) {
@@ -1939,7 +1938,7 @@ public:
     //   1: index not found
     //   2: rebuild or backup already in progress for this user
     //   3: no configuration changes specified / invalid parameters
-    OperationResult rebuildIndexAsync(const std::string& index_id,
+    ndd::OperationResult<> rebuildIndexAsync(const std::string& index_id,
                                       size_t new_M,
                                       size_t new_ef_con);
 
@@ -1987,11 +1986,6 @@ public:
             return vs->get_vectors_batch_into(labels, buffers, success, count);
         });
     }
-=======
-    void uploadBackup(const std::string& backup_name,
-                      const std::string& username,
-                      const std::string& file_content);
->>>>>>> origin/master
 };
 
 // ========== IndexManager backup implementations ==========
@@ -2278,12 +2272,8 @@ inline std::string IndexManager::createBackupAsync(const std::string& index_id,
     return backup_name;
 }
 
-<<<<<<< HEAD
 
-inline std::pair<bool, std::string> IndexManager::uploadBackup(const std::string& backup_name, const std::string& username, const std::string& file_content) {
-=======
 inline void IndexManager::uploadBackup(const std::string& backup_name, const std::string& username, const std::string& file_content) {
->>>>>>> origin/master
     std::string user_backup_dir = backup_store_.getUserBackupDir(username);
     std::filesystem::create_directories(user_backup_dir);
     std::string backup_path = user_backup_dir + "/" + backup_name + ".tar";
@@ -2340,14 +2330,11 @@ inline void IndexManager::uploadBackup(const std::string& backup_name, const std
     nlohmann::json backup_db = backup_store_.readBackupJson(username);
     backup_db[backup_name] = backup_json;
     backup_store_.writeBackupJson(username, backup_db);
-<<<<<<< HEAD
-
-    return {true, "Backup uploaded successfully"};
 }
 
 // ========== IndexManager rebuild implementations ==========
 
-inline OperationResult IndexManager::rebuildIndexAsync(const std::string& index_id,
+inline ndd::OperationResult<> IndexManager::rebuildIndexAsync(const std::string& index_id,
                                                         size_t new_M,
                                                         size_t new_ef_con) {
     auto meta = metadata_manager_->getMetadata(index_id);
@@ -2407,6 +2394,3 @@ inline OperationResult IndexManager::rebuildIndexAsync(const std::string& index_
     LOG_INFO(1800, index_id, "Rebuild started: M=" << new_M << " ef_con=" << new_ef_con);
     return {0, "Rebuild started"};
 }
-=======
-}
->>>>>>> origin/master

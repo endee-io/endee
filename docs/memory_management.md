@@ -23,12 +23,11 @@ The dominant in-memory cost of a live dense index is the HNSW structure:
 
 - the base layer, allocated as `maxElements * sizeDataAtBaseLayer_`
 - upper-layer node storage in `dataUpperLayer_`
-- the vector cache, sized from `VECTOR_CACHE_PERCENTAGE` and `VECTOR_CACHE_MIN_BITS`
 - the visited-list pool and other small bookkeeping structures
 
 One important detail: Endee does not load the full dense vector corpus into the HNSW object.
-Dense vectors stay in `VectorStorage` and are fetched on demand through the vector fetcher and the
-vector cache. So the main DRAM cost is the graph plus cache, not a second full copy of the vector
+Dense vectors stay in `VectorStorage` and are fetched on demand from disk through the vector
+fetcher. So the main DRAM cost is the graph itself, not a second full copy of the vector
 database.
 
 ## Scaling 

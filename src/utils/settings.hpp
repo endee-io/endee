@@ -128,8 +128,6 @@ namespace settings {
     constexpr size_t DEFAULT_MAX_ELEMENTS = 100'000;
     constexpr size_t DEFAULT_MAX_ELEMENTS_INCREMENT = 100'000;
     constexpr size_t DEFAULT_MAX_ELEMENTS_INCREMENT_TRIGGER = 50'000;
-    constexpr size_t DEFAULT_VECTOR_CACHE_PERCENTAGE = 50;
-    constexpr size_t DEFAULT_VECTOR_CACHE_MIN_BITS = 17; // Minimum 128K entries in cache
     const std::string DEFAULT_SERVER_ID = "unknown";
 
     //For Backups
@@ -191,16 +189,6 @@ namespace settings {
     inline static size_t MAX_ELEMENTS_INCREMENT_TRIGGER = [] {
         const char* env = std::getenv("NDD_MAX_INCREMENT_TRIGGER");
         return env ? std::stoull(env) : DEFAULT_MAX_ELEMENTS_INCREMENT_TRIGGER;
-    }();
-
-    inline static size_t VECTOR_CACHE_PERCENTAGE = [] {
-        const char* env = std::getenv("NDD_VECTOR_CACHE_PERCENTAGE");
-        return env ? std::min<size_t>(std::stoull(env), 100) : DEFAULT_VECTOR_CACHE_PERCENTAGE;
-    }();
-
-    inline static size_t VECTOR_CACHE_MIN_BITS = [] {
-        const char* env = std::getenv("NDD_VECTOR_CACHE_MIN_BITS");
-        return env ? std::stoull(env) : DEFAULT_VECTOR_CACHE_MIN_BITS;
     }();
 
     inline static size_t MAX_LIVE_INDICES = [] {

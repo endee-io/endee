@@ -30,6 +30,14 @@
 #include <archive.h>
 #include <archive_entry.h>
 
+#if defined(__unix__) || defined(__APPLE__)
+#  include <fcntl.h>
+#  include <unistd.h>
+#  include <sys/stat.h>
+#  include <cerrno>
+#  include <cstring>
+#endif
+
 #include "json/nlohmann_json.hpp"
 #include "index_meta.hpp"
 #include "settings.hpp"
@@ -48,11 +56,343 @@ private:
     std::unordered_map<std::string, ActiveBackup> active_user_backups_;
     mutable std::mutex active_user_backups_mutex_;
 
+    // Writes a single file into an open libarchive PAX writer with sparse awareness.
+    //
+    // For truly sparse files (physical blocks < apparent size): scan for non-zero
+    // data regions in 4096-byte pages, register them as PAX sparse extents, then
+    // feed bytes to the archive writer sequentially — real data for regions, zero-fill
+    // for hole gaps. The zero-fill is required because the PAX writer maintains a
+    // sequential byte cursor and must consume hole bytes (which it discards) to stay
+    // in sync; skipping them causes data bytes for the next region to be lost.
+    //
+    // For dense files (e.g. the HNSW .idx file): plain sequential copy. Dense files
+    // may contain legitimate zero-valued bytes that must not be treated as holes.
+    //
+    // IMPORTANT: caller must call archive_entry_set_size() with the apparent file
+    // size before calling this function.
+    bool writeSparseFileToArchive(struct archive* a,
+                                   struct archive_entry* e,
+                                   const std::filesystem::path& file_path,
+                                   std::string& error_msg) {
+#if defined(__unix__) || defined(__APPLE__)
+        int fd = ::open(file_path.string().c_str(), O_RDONLY | O_CLOEXEC);
+        if(fd < 0) {
+            error_msg = "open() failed for " + file_path.string()
+                        + ": " + std::strerror(errno);
+            return false;
+        }
+
+        struct stat st;
+        if(::fstat(fd, &st) < 0) {
+            error_msg = std::string("fstat() failed: ") + std::strerror(errno);
+            ::close(fd);
+            return false;
+        }
+        const off_t file_size = st.st_size;
+
+        if(file_size == 0) {
+            if(archive_write_header(a, e) != ARCHIVE_OK) {
+                error_msg = archive_error_string(a);
+                ::close(fd);
+                return false;
+            }
+            ::close(fd);
+            return true;
+        }
+
+        // Only scan for sparse regions when the OS reports fewer physical blocks
+        // than the apparent size. Dense files (physical == apparent) are copied
+        // sequentially to avoid misidentifying real zero bytes as holes.
+        const bool is_sparse = ((off_t)st.st_blocks * 512 < file_size);
+
+        constexpr size_t IO_BUF    = 65536;
+        constexpr size_t SCAN_PAGE = 4096;  // MDBX page size
+
+        char buf[IO_BUF];
+
+        if(is_sparse) {
+            // Pass 1: scan file in SCAN_PAGE blocks to find non-zero data regions.
+            static const char kZeroPage[SCAN_PAGE] = {};
+            struct SparseRegion { off_t offset; off_t length; };
+            std::vector<SparseRegion> regions;
+
+            {
+                char page[SCAN_PAGE];
+                off_t off = 0, region_start = -1;
+                while(off < file_size) {
+                    ssize_t n = ::read(fd, page,
+                        (size_t)std::min((off_t)SCAN_PAGE, file_size - off));
+                    if(n <= 0) break;
+                    if(memcmp(page, kZeroPage, (size_t)n) != 0) {
+                        if(region_start < 0) region_start = off;
+                    } else if(region_start >= 0) {
+                        regions.push_back({region_start, off - region_start});
+                        region_start = -1;
+                    }
+                    off += n;
+                }
+                if(region_start >= 0)
+                    regions.push_back({region_start, file_size - region_start});
+            }
+
+            // Register data extents on the archive entry. The PAX header stores
+            // both the apparent size and the sparse map.
+            if(regions.empty())
+                archive_entry_sparse_add_entry(e, 0, 0); // all-hole file marker
+            else
+                for(const auto& r : regions)
+                    archive_entry_sparse_add_entry(e,
+                        (la_int64_t)r.offset, (la_int64_t)r.length);
+
+            if(archive_write_header(a, e) != ARCHIVE_OK) {
+                error_msg = archive_error_string(a);
+                ::close(fd);
+                return false;
+            }
+
+            // Pass 2: feed bytes to the archive in sparse-list order.
+            // Send zero-fill for each hole gap (PAX writer consumes but discards them),
+            // then actual data bytes for each region.
+            static const char kZeroBuf[IO_BUF] = {};
+            off_t cursor = 0;
+
+            for(const auto& r : regions) {
+                // Feed zeros for the hole between cursor and this region.
+                for(off_t rem = r.offset - cursor; rem > 0; rem -= IO_BUF) {
+                    size_t n = (size_t)std::min(rem, (off_t)IO_BUF);
+                    if(archive_write_data(a, kZeroBuf, n) < 0) {
+                        error_msg = archive_error_string(a);
+                        ::close(fd);
+                        return false;
+                    }
+                }
+                cursor = r.offset;
+
+                // Feed actual data bytes for this region.
+                if(::lseek(fd, r.offset, SEEK_SET) < 0) {
+                    error_msg = std::string("lseek failed: ") + std::strerror(errno);
+                    ::close(fd);
+                    return false;
+                }
+                for(off_t rem = r.length; rem > 0; ) {
+                    ssize_t n = ::read(fd, buf,
+                        (size_t)std::min(rem, (off_t)IO_BUF));
+                    if(n < 0) {
+                        error_msg = std::string("read() failed: ") + std::strerror(errno);
+                        ::close(fd);
+                        return false;
+                    }
+                    if(n == 0) break;
+                    if(archive_write_data(a, buf, (size_t)n) < 0) {
+                        error_msg = archive_error_string(a);
+                        ::close(fd);
+                        return false;
+                    }
+                    rem -= n;
+                }
+                cursor += r.length;
+            }
+        } else {
+            // Dense file: write header then copy all bytes sequentially.
+            if(archive_write_header(a, e) != ARCHIVE_OK) {
+                error_msg = archive_error_string(a);
+                ::close(fd);
+                return false;
+            }
+            while(true) {
+                ssize_t n = ::read(fd, buf, IO_BUF);
+                if(n < 0) {
+                    error_msg = std::string("read() failed: ") + std::strerror(errno);
+                    ::close(fd);
+                    return false;
+                }
+                if(n == 0) break;
+                if(archive_write_data(a, buf, (size_t)n) < 0) {
+                    error_msg = archive_error_string(a);
+                    ::close(fd);
+                    return false;
+                }
+            }
+        }
+
+        ::close(fd);
+        return true;
+#endif
+        // Non-POSIX fallback (Windows): plain sequential copy, no sparse support.
+        if(archive_write_header(a, e) != ARCHIVE_OK) {
+            error_msg = archive_error_string(a);
+            return false;
+        }
+        std::ifstream file(file_path, std::ios::binary);
+        char buffer[8192];
+        while(file.read(buffer, sizeof(buffer)) || file.gcount() > 0)
+            archive_write_data(a, buffer, file.gcount());
+        return true;
+    }
+
+    // Copies a single file preserving sparseness: scans for non-zero data regions,
+    // copies only those (seeking dst to the correct offset), then ftruncate restores
+    // the full apparent size. Dense files are copied sequentially.
+    //
+    // ftruncate is always called: for sparse files the last data region ends before
+    // file_size, and without it MDBX would see the wrong apparent size on mmap.
+    bool sparseCopyFile(const std::filesystem::path& src,
+                        const std::filesystem::path& dst,
+                        std::string& error_msg) {
+#if defined(__unix__) || defined(__APPLE__)
+        int src_fd = ::open(src.string().c_str(), O_RDONLY | O_CLOEXEC);
+        if(src_fd < 0) {
+            error_msg = "open(src) failed for " + src.string()
+                        + ": " + std::strerror(errno);
+            return false;
+        }
+
+        struct stat st;
+        if(::fstat(src_fd, &st) < 0) {
+            error_msg = std::string("fstat() failed: ") + std::strerror(errno);
+            ::close(src_fd);
+            return false;
+        }
+        const off_t file_size = st.st_size;
+
+        int dst_fd = ::open(dst.string().c_str(),
+                            O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        if(dst_fd < 0) {
+            error_msg = "open(dst) failed for " + dst.string()
+                        + ": " + std::strerror(errno);
+            ::close(src_fd);
+            return false;
+        }
+
+        if(file_size == 0) {
+            ::close(src_fd);
+            ::close(dst_fd);
+            return true;
+        }
+
+        const bool is_sparse = ((off_t)st.st_blocks * 512 < file_size);
+
+        constexpr size_t IO_BUF    = 65536;
+        constexpr size_t SCAN_PAGE = 4096;
+
+        char buf[IO_BUF];
+
+        if(is_sparse) {
+            static const char kZeroPage[SCAN_PAGE] = {};
+            struct SparseRegion { off_t offset; off_t length; };
+            std::vector<SparseRegion> regions;
+
+            {
+                char page[SCAN_PAGE];
+                off_t off = 0, region_start = -1;
+                while(off < file_size) {
+                    ssize_t n = ::read(src_fd, page,
+                        (size_t)std::min((off_t)SCAN_PAGE, file_size - off));
+                    if(n <= 0) break;
+                    if(memcmp(page, kZeroPage, (size_t)n) != 0) {
+                        if(region_start < 0) region_start = off;
+                    } else if(region_start >= 0) {
+                        regions.push_back({region_start, off - region_start});
+                        region_start = -1;
+                    }
+                    off += n;
+                }
+                if(region_start >= 0)
+                    regions.push_back({region_start, file_size - region_start});
+            }
+
+            for(const auto& r : regions) {
+                if(::lseek(src_fd, r.offset, SEEK_SET) < 0 ||
+                   ::lseek(dst_fd,  r.offset, SEEK_SET) < 0) {
+                    error_msg = std::string("lseek failed: ") + std::strerror(errno);
+                    ::close(src_fd); ::close(dst_fd);
+                    return false;
+                }
+                for(off_t rem = r.length; rem > 0; ) {
+                    ssize_t n = ::read(src_fd, buf,
+                        (size_t)std::min(rem, (off_t)IO_BUF));
+                    if(n < 0) {
+                        error_msg = std::string("read() failed: ") + std::strerror(errno);
+                        ::close(src_fd); ::close(dst_fd);
+                        return false;
+                    }
+                    if(n == 0) break;
+                    if(::write(dst_fd, buf, (size_t)n) != n) {
+                        error_msg = std::string("write() failed: ") + std::strerror(errno);
+                        ::close(src_fd); ::close(dst_fd);
+                        return false;
+                    }
+                    rem -= n;
+                }
+            }
+        } else {
+            // Dense file: sequential copy.
+            while(true) {
+                ssize_t n = ::read(src_fd, buf, IO_BUF);
+                if(n < 0) {
+                    error_msg = std::string("read() failed: ") + std::strerror(errno);
+                    ::close(src_fd); ::close(dst_fd);
+                    return false;
+                }
+                if(n == 0) break;
+                if(::write(dst_fd, buf, (size_t)n) != n) {
+                    error_msg = std::string("write() failed: ") + std::strerror(errno);
+                    ::close(src_fd); ::close(dst_fd);
+                    return false;
+                }
+            }
+        }
+
+        if(::ftruncate(dst_fd, file_size) < 0) {
+            error_msg = std::string("ftruncate() failed: ") + std::strerror(errno);
+            ::close(src_fd); ::close(dst_fd);
+            return false;
+        }
+
+        ::close(src_fd);
+        ::close(dst_fd);
+        return true;
+
+#else
+        // Non-POSIX fallback: delegate to std::filesystem.
+        std::error_code ec;
+        std::filesystem::copy_file(src, dst,
+            std::filesystem::copy_options::overwrite_existing, ec);
+        if(ec) {
+            error_msg = "copy_file failed: " + ec.message();
+            return false;
+        }
+        return true;
+#endif
+    }
+
 public:
     BackupStore(const std::string& data_dir)
         : data_dir_(data_dir) {
         std::filesystem::create_directories(data_dir + "/backups");
         cleanupTempDir();
+    }
+
+    // Recursively copies src_dir → dst_dir preserving sparseness on each file.
+    // Replaces std::filesystem::copy in the restore path to avoid materialising
+    // the full apparent size of sparse MDBX files as physical disk blocks.
+    bool sparseCopyDirectory(const std::filesystem::path& src_dir,
+                              const std::filesystem::path& dst_dir,
+                              std::string& error_msg) {
+        for(const auto& entry : std::filesystem::recursive_directory_iterator(src_dir)) {
+            std::filesystem::path rel = std::filesystem::relative(entry.path(), src_dir);
+            std::filesystem::path dst_path = dst_dir / rel;
+
+            if(entry.is_directory()) {
+                std::filesystem::create_directories(dst_path);
+            } else if(entry.is_regular_file()) {
+                std::filesystem::create_directories(dst_path.parent_path());
+                if(!sparseCopyFile(entry.path(), dst_path, error_msg)) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     // Archive methods
@@ -71,7 +411,6 @@ public:
         }
 
         for(const auto& entry : std::filesystem::recursive_directory_iterator(source_dir)) {
-            // Check stop_token per-file so shutdown doesn't block on large tar operations
             if(st.stop_requested()) {
                 archive_write_close(a);
                 archive_write_free(a);
@@ -84,24 +423,16 @@ public:
                 std::filesystem::path rel_path =
                         std::filesystem::relative(entry.path(), source_dir.parent_path());
                 archive_entry_set_pathname(e, rel_path.string().c_str());
-                archive_entry_set_size(e, std::filesystem::file_size(entry.path()));
+                archive_entry_set_size(e, (la_int64_t)std::filesystem::file_size(entry.path()));
                 archive_entry_set_filetype(e, AE_IFREG);
                 archive_entry_set_perm(e, 0644);
 
-                if(archive_write_header(a, e) != ARCHIVE_OK) {
-                    error_msg = archive_error_string(a);
+                if(!writeSparseFileToArchive(a, e, entry.path(), error_msg)) {
                     archive_entry_free(e);
                     archive_write_close(a);
                     archive_write_free(a);
                     return false;
                 }
-
-                std::ifstream file(entry.path(), std::ios::binary);
-                char buffer[8192];
-                while(file.read(buffer, sizeof(buffer)) || file.gcount() > 0) {
-                    archive_write_data(a, buffer, file.gcount());
-                }
-                file.close();
                 archive_entry_free(e);
             }
         }
@@ -120,7 +451,11 @@ public:
 
         archive_read_support_format_all(a);
         archive_read_support_filter_all(a);
-        archive_write_disk_set_options(ext, ARCHIVE_EXTRACT_TIME | ARCHIVE_EXTRACT_PERM);
+        // ARCHIVE_EXTRACT_SPARSE: activates sparse file creation on disk — zero-valued
+        // data blocks are written as lseek operations instead of actual writes.
+        // archive_write_finish_entry then calls ftruncate to restore the apparent size.
+        archive_write_disk_set_options(ext,
+            ARCHIVE_EXTRACT_TIME | ARCHIVE_EXTRACT_PERM | ARCHIVE_EXTRACT_SPARSE);
         archive_write_disk_set_standard_lookup(ext);
 
         if(archive_read_open_filename(a, archive_path.string().c_str(), 10240) != ARCHIVE_OK) {

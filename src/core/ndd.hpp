@@ -2201,10 +2201,12 @@ inline void IndexManager::restoreBackup(const std::string& backup_name,
         nlohmann::json meta_json = nlohmann::json::parse(f);
 
         std::filesystem::create_directories(target_dir);
-        std::filesystem::copy(backup_dir,
-                              target_dir,
-                              std::filesystem::copy_options::recursive
-                                      | std::filesystem::copy_options::overwrite_existing);
+        std::string copy_error;
+        if(!backup_store_.sparseCopyDirectory(backup_dir, target_dir, copy_error)) {
+            std::filesystem::remove_all(backup_extract_dir);
+            std::filesystem::remove_all(target_dir);
+            return {false, "Failed to copy backup files: " + copy_error};
+        }
 
         std::filesystem::remove(target_dir + "/metadata.json");
 
